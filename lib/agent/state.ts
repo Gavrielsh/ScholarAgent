@@ -1,3 +1,7 @@
+import type { UserContext } from "@/lib/auth/types";
+
+export type { UserContext };
+
 export interface ChatMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
@@ -24,4 +28,5 @@ export interface AgentGraphState {
   gathered_context: RetrievedContext[];
   current_step_index: number;
   final_response?: string;
+  user_context?: UserContext;
 }
