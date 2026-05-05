@@ -32,13 +32,18 @@ export async function researcherNode(
     }
 
     if (activeStep.description.toLowerCase().includes("vector store")) {
-      const docs = await querySimilarDocuments(state.mission, 5);
+      // RLS requires a user permission level. If the agent was invoked without
+      // a user context (e.g. internal smoke test), default to Guest (L4) so
+      // only public content is returned — never broaden access by default.
+      const permissionLevel = state.user_context?.permissionLevel ?? 4;
+      const docs = await querySimilarDocuments(state.mission, permissionLevel, 5);
       newContext.push(
         ...docs.map((doc) => ({
           source: "pgvector" as const,
           content: doc.text,
           metadata: {
             similarity: doc.similarity,
+            classification_level: doc.classificationLevel,
             ...doc.metadata,
           },
         }))
