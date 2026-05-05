@@ -1,6 +1,6 @@
 import { END, START, StateGraph } from "@langchain/langgraph";
 
-import type { AgentGraphState } from "@/lib/agent/state";
+import type { AgentGraphState, UserContext } from "@/lib/agent/state";
 import { plannerNode } from "@/lib/agent/nodes/planner";
 import { researcherNode } from "@/lib/agent/nodes/researcher";
 import { responderNode } from "@/lib/agent/nodes/responder";
@@ -31,6 +31,10 @@ const graph = new StateGraph<AgentGraphState>({
       value: (x: string | undefined, y: string | undefined) => y ?? x,
       default: () => undefined,
     },
+    user_context: {
+      value: (x: AgentGraphState["user_context"], y: AgentGraphState["user_context"]) => y ?? x,
+      default: () => undefined,
+    },
   },
 })
   .addNode("planner", plannerNode)
@@ -50,6 +54,7 @@ export async function runAgentWorkflow(input: {
   mission: string;
   senderId?: string;
   incomingMessage?: string;
+  userContext?: UserContext;
 }) {
   const now = new Date().toISOString();
 
@@ -73,5 +78,6 @@ export async function runAgentWorkflow(input: {
     gathered_context: [],
     current_step_index: 0,
     final_response: undefined,
+    user_context: input.userContext,
   } satisfies AgentGraphState);
 }
