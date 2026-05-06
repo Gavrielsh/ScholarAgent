@@ -1,4 +1,5 @@
 import type { AgentGraphState } from "@/lib/agent/state";
+import { ROLE_DESCRIPTIONS } from "@/lib/auth/types";
 import { getLlmAdapter } from "@/lib/llm/adapter";
 
 function formatWhatsAppResponse(state: AgentGraphState): string {
@@ -41,6 +42,7 @@ export async function responderNode(
   try {
     const roleName = state.user_context?.roleName ?? "קהל פתוח / הורים";
     const permissionLevel = state.user_context?.permissionLevel ?? 4;
+    const roleDescription = ROLE_DESCRIPTIONS[permissionLevel];
     finalResponse = await adapter.generateText({
       messages: [
         {
@@ -48,12 +50,7 @@ export async function responderNode(
           content:
             `You are a mentor in the 'Adam LeAdam Ze Lev' project. The user is a ${roleName}. Adjust your vocabulary, depth of detail, and tone to match their needs as defined in the target audience documents.
 ענה תמיד בעברית, בצורה קצרה ומעשית לוואטסאפ.
-מיפוי קהלים:
-L0 צוות מטה: תמונת מצב מלאה, נתונים טכניים ואנליטיקה רוחבית.
-L1 מנהלות הכשרה: הנחיה מקצועית, תובנות פדגוגיות וסיכומי ניהול.
-L2 סטודנטים/יועצות: לוגיסטיקה, פרוטוקולי משמעת ותובנות התנהגות לזוגות ספציפיים.
-L3 חונכים/בוגרים: טיפים פרקטיים מהשטח, רעיונות לפעילות וניהול משבר בשפה פשוטה.
-L4 קהל פתוח/הורים: מידע כללי, חזון הפרויקט והנחיות לציבור.`,
+Audience instruction for this user only: ${roleDescription}`,
         },
         {
           role: "user",

@@ -58,6 +58,14 @@ export class GeminiAdapter implements LlmAdapter {
       };
     }
 
+    if (input.responseSchema) {
+      payload.generationConfig = {
+        ...(payload.generationConfig as Record<string, unknown>),
+        response_mime_type: "application/json",
+        response_schema: input.responseSchema,
+      };
+    }
+
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

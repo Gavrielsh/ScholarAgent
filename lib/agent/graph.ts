@@ -27,6 +27,14 @@ const graph = new StateGraph<AgentGraphState>({
       value: (x: number, y: number) => y ?? x,
       default: () => 0,
     },
+    needs_replanning: {
+      value: (x: boolean | undefined, y: boolean | undefined) => y ?? x,
+      default: () => false,
+    },
+    replanning_count: {
+      value: (x: number | undefined, y: number | undefined) => y ?? x,
+      default: () => 0,
+    },
     final_response: {
       value: (x: string | undefined, y: string | undefined) => y ?? x,
       default: () => undefined,
@@ -39,13 +47,34 @@ const graph = new StateGraph<AgentGraphState>({
 })
   .addNode("planner", plannerNode)
   .addNode("researcher", researcherNode)
+  .addNode("replanner", async (state) => {
+    return {
+      needs_replanning: false,
+      replanning_count: (state.replanning_count ?? 0) + 1,
+      plan: [],
+      current_step_index: 0,
+      messages: [
+        ...state.messages,
+        {
+          role: "system" as const,
+          content:
+            "Previous search yielded no results. Formulate a new plan with different keywords or fallback tools.",
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    };
+  })
   .addNode("responder", responderNode)
   .addEdge(START, "planner")
   .addEdge("planner", "researcher")
   .addConditionalEdges("researcher", (state) => {
+    if (state.needs_replanning && (state.replanning_count ?? 0) < 1) {
+      return "replanner";
+    }
     const planCompleted = state.current_step_index >= state.plan.length;
     return planCompleted ? "responder" : "researcher";
   })
+  .addEdge("replanner", "planner")
   .addEdge("responder", END);
 
 export const agentGraphApp = graph.compile();
@@ -88,6 +117,8 @@ export async function runAgentWorkflow(input: {
     plan: [],
     gathered_context: [],
     current_step_index: 0,
+    needs_replanning: false,
+    replanning_count: 0,
     final_response: undefined,
     user_context: input.userContext,
   } satisfies AgentGraphState);

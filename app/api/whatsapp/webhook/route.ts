@@ -88,80 +88,70 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const event = parseIncomingTextEvent(body);
   if (!event) {
-    return NextResponse.json(
-      { ok: true, ignored: "לא נמצאה הודעת טקסט נתמכת במטען." },
-      { status: 200 }
-    );
+    return NextResponse.json({ ok: true, ignored: "לא נמצאה הודעת טקסט נתמכת במטען." }, { status: 200 });
   }
 
   const { senderId, messageBody, messageId } = event;
-  const receivedAt = new Date().toISOString();
+  void (async () => {
+    try {
+      const receivedAt = new Date().toISOString();
+      const userContext = await lookupUserByPhone(senderId);
 
-  // Step 2 — Resolve the caller's permission level from the user registry.
-  // Fails safe to Guest (L4) when the phone is not registered.
-  const userContext = await lookupUserByPhone(senderId);
+      try {
+        await appendChatEntries(senderId, [
+          { role: "user", content: messageBody, timestamp: receivedAt, messageId: messageId ?? undefined },
+        ]);
+      } catch (err) {
+        console.error("Failed to persist inbound chat entry:", err);
+      }
 
-  // Step 3 — Persist the inbound message. Failure here must not block the reply.
-  try {
-    await appendChatEntries(senderId, [
-      { role: "user", content: messageBody, timestamp: receivedAt, messageId: messageId ?? undefined },
-    ]);
-  } catch (err) {
-    // TODO: Wire structured logging / alerting.
-    console.error("Failed to persist inbound chat entry:", err);
-  }
+      let priorMessages: ChatMessage[] = [];
+      try {
+        const history = await readChatHistory(senderId);
+        const withoutLast = history.entries.slice(0, -1);
+        priorMessages = buildConversationContext(withoutLast);
+      } catch (err) {
+        console.error("Failed to load chat history for context:", err);
+      }
 
-  // Step 4 — Load recent conversation history for multi-turn context.
-  let priorMessages: ChatMessage[] = [];
-  try {
-    const history = await readChatHistory(senderId);
-    // Exclude the message we just appended (it will be added by the graph).
-    const withoutLast = history.entries.slice(0, -1);
-    priorMessages = buildConversationContext(withoutLast);
-  } catch (err) {
-    console.error("Failed to load chat history for context:", err);
-  }
+      let responseText: string;
+      try {
+        const result = await runAgentWorkflow({
+          senderId,
+          mission: messageBody,
+          incomingMessage: messageBody,
+          userContext,
+          priorMessages,
+        });
 
-  // Step 5 — Run the agent workflow with user context + conversation history.
-  let responseText: string;
-  try {
-    const result = await runAgentWorkflow({
-      senderId,
-      mission: messageBody,
-      incomingMessage: messageBody,
-      userContext,
-      priorMessages,
-    });
+        responseText = String(
+          result.final_response ??
+            "קיבלתי את ההודעה שלך, ואני צריך עוד רגע כדי לספק תשובה מלאה יותר."
+        );
+      } catch (err) {
+        console.error("Agent workflow error:", err);
+        responseText = "מצטערים, אירעה תקלה בעיבוד ההודעה. אפשר לנסות שוב בעוד רגע.";
+      }
 
-    responseText = String(
-      result.final_response ??
-        "קיבלתי את ההודעה שלך, ואני צריך עוד רגע כדי לספק תשובה מלאה יותר."
-    );
-  } catch (err) {
-    console.error("Agent workflow error:", err);
-    responseText = "מצטערים, אירעה תקלה בעיבוד ההודעה. אפשר לנסות שוב בעוד רגע.";
-  }
+      try {
+        await sendWhatsAppTextMessage({ to: senderId, body: responseText });
+      } catch (err) {
+        console.error("Failed to send WhatsApp reply:", err);
+      }
 
-  // Step 6 — Send the reply.
-  let sendError: string | null = null;
-  try {
-    await sendWhatsAppTextMessage({ to: senderId, body: responseText });
-  } catch (err) {
-    sendError = err instanceof Error ? err.message : String(err);
-    console.error("Failed to send WhatsApp reply:", err);
-  }
+      try {
+        await appendChatEntries(senderId, [
+          { role: "assistant", content: responseText, timestamp: new Date().toISOString() },
+        ]);
+      } catch (err) {
+        console.error("Failed to persist assistant chat entry:", err);
+      }
+    } catch (err) {
+      console.error("Detached webhook processing failed:", err);
+    }
+  })().catch((err) => {
+    console.error("Detached webhook unhandled rejection:", err);
+  });
 
-  // Step 7 — Persist the assistant turn for audit and future context loading.
-  try {
-    await appendChatEntries(senderId, [
-      { role: "assistant", content: responseText, timestamp: new Date().toISOString() },
-    ]);
-  } catch (err) {
-    console.error("Failed to persist assistant chat entry:", err);
-  }
-
-  return NextResponse.json(
-    { ok: sendError === null, sendError },
-    { status: sendError === null ? 200 : 502 }
-  );
+  return NextResponse.json({ ok: true }, { status: 200 });
 }

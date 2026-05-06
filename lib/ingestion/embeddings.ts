@@ -16,6 +16,7 @@ interface GeminiBatchEmbeddingResponse {
 
 const EMBEDDING_MODEL = process.env.GEMINI_EMBEDDING_MODEL ?? "text-embedding-004";
 const EMBEDDING_DIMENSION = 768;
+const RETRY_DELAYS_MS = [1000, 2000, 4000] as const;
 
 function endpoint(path: string): string {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -59,38 +60,74 @@ export async function embedTextBatch(texts: string[]): Promise<number[][]> {
   const filtered = texts.map((t) => t.trim()).filter((t) => t.length > 0);
   if (filtered.length === 0) return [];
 
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length + 1; attempt++) {
+    try {
+      const response = await fetch(endpoint("batchEmbedContents"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requests: filtered.map((text) => ({
+            model: `models/${EMBEDDING_MODEL}`,
+            content: { parts: [{ text }] },
+          })),
+        }),
+      });
+
+      if (!response.ok) {
+        if (attempt < RETRY_DELAYS_MS.length) {
+          await sleep(RETRY_DELAYS_MS[attempt]);
+          continue;
+        }
+        throw new Error(`Batch embed HTTP ${response.status}`);
+      }
+
+      const json = (await response.json()) as GeminiBatchEmbeddingResponse;
+      const vectors = json.embeddings ?? [];
+      if (vectors.length !== filtered.length) {
+        throw new Error(
+          `Batch embed returned ${vectors.length} vectors, expected ${filtered.length}.`
+        );
+      }
+      return vectors.map((v) => {
+        const values = v.values ?? [];
+        if (values.length > 0 && values.length !== EMBEDDING_DIMENSION) {
+          throw new Error(
+            `Gemini embedding dimension mismatch: got ${values.length}, expected ${EMBEDDING_DIMENSION}.`
+          );
+        }
+        return values;
+      });
+    } catch (err) {
+      if (attempt < RETRY_DELAYS_MS.length) {
+        await sleep(RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
+      console.warn("Batch embed failed after retries, falling back to sequential:", err);
+    }
+    break;
+  }
+
   try {
-    const response = await fetch(endpoint("batchEmbedContents"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        requests: filtered.map((text) => ({
-          model: `models/${EMBEDDING_MODEL}`,
-          content: { parts: [{ text }] },
-        })),
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Batch embed HTTP ${response.status}`);
-    }
-
-    const json = (await response.json()) as GeminiBatchEmbeddingResponse;
-    const vectors = json.embeddings ?? [];
-    if (vectors.length !== filtered.length) {
-      throw new Error(
-        `Batch embed returned ${vectors.length} vectors, expected ${filtered.length}.`
-      );
-    }
-    return vectors.map((v) => v.values ?? []);
-  } catch (err) {
-    // TODO: Replace this fallback with a proper retry/backoff strategy and
-    //       observability hook once a logger is wired in.
-    console.warn("Batch embed failed, falling back to sequential:", err);
     const out: number[][] = [];
-    for (const t of filtered) {
-      out.push(await embedText(t));
+    for (let attempt = 0; attempt < RETRY_DELAYS_MS.length + 1; attempt++) {
+      try {
+        for (const t of filtered) {
+          out.push(await embedText(t));
+        }
+        return out;
+      } catch (err) {
+        if (attempt < RETRY_DELAYS_MS.length) {
+          await sleep(RETRY_DELAYS_MS[attempt]);
+          out.length = 0;
+          continue;
+        }
+        throw err;
+      }
     }
     return out;
+  } catch (err) {
+    console.warn("Batch embed failed after retries, sequential fallback also failed:", err);
+    throw err;
   }
 }

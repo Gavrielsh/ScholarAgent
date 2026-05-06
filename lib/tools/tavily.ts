@@ -20,19 +20,32 @@ export async function tavilySearch(query: string): Promise<TavilySearchResponse>
     throw new Error("Missing TAVILY_API_KEY environment variable.");
   }
 
-  const response = await fetch(TAVILY_API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      // TODO: Extend Tavily payload with depth/topic filters per use-case.
-      api_key: apiKey,
-      query,
-      max_results: 5,
-      search_depth: "basic",
-    }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  let response: Response;
+  try {
+    response = await fetch(TAVILY_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        // TODO: Extend Tavily payload with depth/topic filters per use-case.
+        api_key: apiKey,
+        query,
+        max_results: 5,
+        search_depth: "basic",
+      }),
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error("Tavily request timeout after 5000ms.");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     const body = await response.text();

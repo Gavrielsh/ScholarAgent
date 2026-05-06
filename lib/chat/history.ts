@@ -89,20 +89,19 @@ export async function readChatHistory(senderId: string): Promise<ChatHistoryFile
       `SELECT role, content, message_id, occurred_at, created_at
        FROM chat_history
        WHERE sender_id = $1
-       ORDER BY occurred_at ASC, created_at ASC`,
+       ORDER BY occurred_at DESC, created_at DESC
+       LIMIT 20`,
       [senderId]
     )
   );
 
-  const entries: ChatHistoryEntry[] = rows.rows.map((row) => ({
+  const entries: ChatHistoryEntry[] = [...rows.rows].reverse().map((row) => ({
     role: row.role,
     content: row.content,
     timestamp: row.occurred_at.toISOString(),
     messageId: row.message_id ?? undefined,
   }));
-  const createdAt =
-    rows.rows[0]?.occurred_at.toISOString() ?? new Date().toISOString();
-  const updatedAt =
-    rows.rows[rows.rows.length - 1]?.occurred_at.toISOString() ?? createdAt;
+  const createdAt = entries[0]?.timestamp ?? new Date().toISOString();
+  const updatedAt = entries[entries.length - 1]?.timestamp ?? createdAt;
   return { senderId, createdAt, updatedAt, entries };
 }

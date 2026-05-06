@@ -66,8 +66,8 @@ export async function withRlsTransaction<T>(
       await client.query("COMMIT");
       return result;
     } catch (err) {
-      await client.query("ROLLBACK").catch(() => {
-        // Ignore rollback errors; the original error is more important.
+      await client.query("ROLLBACK").catch((rollbackErr) => {
+        console.error("RLS Transaction Rollback Error:", rollbackErr);
       });
       throw err;
     }

@@ -27,57 +27,25 @@ Example output:
   {"id":"step-3","description":"Synthesize findings","tool":"synthesize"}
 ]`;
 
-// Fallback plan used when the LLM returns unparseable output.
-function heuristicPlan(mission: string): PlanStep[] {
-  const normalized = mission.trim();
-  if (!normalized) {
-    return [
-      { id: "step-1", description: "בקשת הבהרה מהמשתמש לגבי מטרת הפניה.", tool: "synthesize", status: "pending" },
-    ];
-  }
-  return [
-    { id: "step-1", description: "איסוף מידע רלוונטי ממאגר הידע הפנימי.", tool: "pgvector",   status: "pending" },
-    { id: "step-2", description: "איסוף מקורות חיצוניים עדכניים לפי הצורך.",  tool: "tavily",    status: "pending" },
-    { id: "step-3", description: "ניסוח תשובה מותאמת תפקיד וברורה לוואטסאפ.", tool: "synthesize", status: "pending" },
-  ];
-}
+const PLAN_SCHEMA = {
+  type: "array",
+  minItems: 1,
+  items: {
+    type: "object",
+    additionalProperties: false,
+    required: ["id", "description", "tool"],
+    properties: {
+      id: { type: "string" },
+      description: { type: "string" },
+      tool: { type: "string", enum: ["tavily", "pgvector", "both", "synthesize"] },
+    },
+  },
+} as const;
 
 interface RawStep {
-  id?: unknown;
-  description?: unknown;
-  tool?: unknown;
-}
-
-const VALID_TOOLS: ReadonlySet<string> = new Set(["tavily", "pgvector", "both", "synthesize"]);
-
-function parseLlmPlan(raw: string, mission: string): PlanStep[] {
-  // Strip any accidental markdown fences the LLM might have added.
-  const cleaned = raw.replace(/```[a-z]*\n?/gi, "").trim();
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch {
-    return heuristicPlan(mission);
-  }
-
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    return heuristicPlan(mission);
-  }
-
-  const steps: PlanStep[] = [];
-  for (const item of parsed as RawStep[]) {
-    if (typeof item.id !== "string" || typeof item.description !== "string") {
-      continue;
-    }
-    const tool: PlanStepTool = VALID_TOOLS.has(String(item.tool))
-      ? (item.tool as PlanStepTool)
-      : "pgvector";
-
-    steps.push({ id: item.id, description: item.description, tool, status: "pending" });
-  }
-
-  return steps.length > 0 ? steps : heuristicPlan(mission);
+  id: string;
+  description: string;
+  tool: PlanStepTool;
 }
 
 export async function plannerNode(
@@ -100,12 +68,32 @@ export async function plannerNode(
         },
       ],
       temperature: 0.0, // deterministic plan generation
+      responseSchema: PLAN_SCHEMA as unknown as Record<string, any>,
     });
-    plan = parseLlmPlan(raw, state.mission);
+    const parsed = JSON.parse(raw) as RawStep[];
+    plan = parsed.map((item) => ({
+      id: item.id,
+      description: item.description,
+      tool: item.tool,
+      status: "pending",
+    }));
   } catch {
-    // LLM unavailable (e.g. missing API key) — degrade gracefully.
-    plan = heuristicPlan(state.mission);
+    // LLM unavailable — minimal safe fallback.
+    plan = [
+      {
+        id: "step-1",
+        description: "איסוף מידע פנימי ממאגר הידע.",
+        tool: "pgvector",
+        status: "pending",
+      },
+      {
+        id: "step-2",
+        description: "גיבוש תשובה תמציתית למשתמש.",
+        tool: "synthesize",
+        status: "pending",
+      },
+    ];
   }
 
-  return { plan, current_step_index: 0 };
+  return { plan, current_step_index: 0, needs_replanning: false };
 }

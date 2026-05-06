@@ -4,6 +4,8 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import type { PermissionLevel, UserContext } from "@/lib/auth/types";
 
 const VALID_LEVELS: ReadonlySet<number> = new Set([0, 1, 2, 3, 4]);
+let cachedJwks: ReturnType<typeof createRemoteJWKSet> | null = null;
+let cachedJwksUrl: string | null = null;
 
 export class UnauthenticatedError extends Error {
   constructor(message = "חסר או לא תקין אסימון אימות.") {
@@ -74,7 +76,12 @@ async function verifySupabaseToken(token: string) {
   if (!url) {
     throw new UnauthenticatedError("חסר SUPABASE_JWT_SECRET וגם SUPABASE_URL להגדרת אימות.");
   }
-  const jwks = createRemoteJWKSet(new URL(`${url}/auth/v1/.well-known/jwks.json`));
+  const jwksUrl = `${url}/auth/v1/.well-known/jwks.json`;
+  if (!cachedJwks || cachedJwksUrl !== jwksUrl) {
+    cachedJwks = createRemoteJWKSet(new URL(jwksUrl));
+    cachedJwksUrl = jwksUrl;
+  }
+  const jwks = cachedJwks;
   return jwtVerify(token, jwks, issuer ? { issuer } : undefined);
 }
 

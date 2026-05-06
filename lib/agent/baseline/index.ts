@@ -61,11 +61,8 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
     messages: [
       {
         role: "system",
-        // TODO: Translate/Adapt this system prompt to Hebrew for the organisation.
         content:
-          "You are an educational assistant for the organisation. " +
-          "Answer the question using ONLY the provided context. " +
-          "If the context is insufficient, say so clearly.",
+          "אתה עוזר וירטואלי חינוכי. ענה על השאלה תוך שימוש אך ורק במידע המסופק בהקשר. אם ההקשר אינו מספק, ציין זאת בבירור.",
       },
       {
         role: "user",

@@ -32,6 +32,8 @@ export interface AgentGraphState {
   plan: PlanStep[];
   gathered_context: RetrievedContext[];
   current_step_index: number;
+  needs_replanning?: boolean;
+  replanning_count?: number;
   final_response?: string;
   user_context?: UserContext;
 }

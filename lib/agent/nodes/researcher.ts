@@ -6,25 +6,6 @@ function markStepStatus(steps: PlanStep[], index: number, status: PlanStep["stat
   return steps.map((step, i) => (i === index ? { ...step, status } : step));
 }
 
-// Determines which tools to run for a step.
-// Primary decision: the `tool` field set by the LLM planner.
-// Fallback: legacy keyword heuristic for steps that predate the tool field.
-function resolveTool(step: PlanStep): { useTavily: boolean; useVector: boolean } {
-  if (step.tool) {
-    return {
-      useTavily: step.tool === "tavily" || step.tool === "both",
-      useVector: step.tool === "pgvector" || step.tool === "both",
-    };
-  }
-
-  // Legacy keyword fallback (kept for backward compatibility with old plan shapes).
-  const desc = step.description.toLowerCase();
-  return {
-    useTavily: desc.includes("web") || desc.includes("tavily") || desc.includes("חיצוני"),
-    useVector: desc.includes("vector") || desc.includes("internal") || desc.includes("פנימי") || desc.includes("מאגר"),
-  };
-}
-
 export async function researcherNode(
   state: AgentGraphState
 ): Promise<Partial<AgentGraphState>> {
@@ -34,9 +15,11 @@ export async function researcherNode(
 
   const activeStep = state.plan[state.current_step_index];
   const inProgressPlan = markStepStatus(state.plan, state.current_step_index, "in_progress");
-  const { useTavily, useVector } = resolveTool(activeStep);
+  const useTavily = activeStep.tool === "tavily" || activeStep.tool === "both";
+  const useVector = activeStep.tool === "pgvector" || activeStep.tool === "both";
 
   const newContext: RetrievedContext[] = [];
+  let vectorDocsCount = 0;
 
   try {
     if (useTavily) {
@@ -55,6 +38,7 @@ export async function researcherNode(
       // context is present — never broaden access silently.
       const permissionLevel = state.user_context?.permissionLevel ?? 4;
       const docs = await querySimilarDocuments(state.mission, permissionLevel, 5);
+      vectorDocsCount = docs.length;
       newContext.push(
         ...docs.map((doc) => ({
           source: "pgvector" as const,
@@ -74,6 +58,7 @@ export async function researcherNode(
       plan: completedPlan,
       gathered_context: [...state.gathered_context, ...newContext],
       current_step_index: state.current_step_index + 1,
+      needs_replanning: useVector && vectorDocsCount === 0,
     };
   } catch (error) {
     const failedPlan = markStepStatus(inProgressPlan, state.current_step_index, "failed");

@@ -9,6 +9,14 @@ export const PERMISSION_ROLE: Record<PermissionLevel, string> = {
   4: "Guest",
 };
 
+export const ROLE_DESCRIPTIONS: Record<PermissionLevel, string> = {
+  0: "Headquarters staff: full situational picture, technical details, cross-project analytics, and strategic oversight.",
+  1: "Training managers: professional guidance, pedagogical insights, operational summaries, and management-oriented recommendations.",
+  2: "Students/counselors: logistics support, discipline protocols, and behavioral insights for specific mentor-mentee pairs.",
+  3: "Mentors/alumni: practical on-the-ground tips, activity ideas, and crisis-management guidance in simple, actionable Hebrew.",
+  4: "General public/parents: general information, project vision, and public-facing guidelines without internal operational detail.",
+};
+
 export interface UserContext {
   userId: string;
   permissionLevel: PermissionLevel;

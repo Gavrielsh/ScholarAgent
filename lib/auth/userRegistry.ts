@@ -1,4 +1,5 @@
 import { query } from "@/lib/db/client";
+import { PERMISSION_ROLE } from "@/lib/auth/types";
 import type { PermissionLevel, UserContext } from "@/lib/auth/types";
 
 interface UserRow {
@@ -29,6 +30,7 @@ export async function lookupUserByPhone(phoneNumber: string): Promise<UserContex
     return {
       userId: row.id,
       permissionLevel: row.permission_level,
+      roleName: PERMISSION_ROLE[row.permission_level],
       organizationId: row.organization_id ?? undefined,
     };
   } catch (err) {
@@ -45,6 +47,7 @@ function guestContext(phoneNumber: string): UserContext {
   return {
     userId: `phone:${phoneNumber}`,
     permissionLevel: 4,
+    roleName: PERMISSION_ROLE[4],
     organizationId: undefined,
   };
 }
