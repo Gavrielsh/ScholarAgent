@@ -9,6 +9,9 @@ export interface EmbeddingRecord {
   text: string;
   classificationLevel: PermissionLevel;
   metadata?: Record<string, unknown>;
+  // Precomputed embedding vector. When provided, embedText() is skipped,
+  // eliminating the redundant API call from the batch-upload pipeline.
+  embedding?: number[];
 }
 
 export interface SimilarDocument {
@@ -39,7 +42,14 @@ export async function upsertDocument(document: EmbeddingRecord): Promise<string>
     throw new Error("Cannot insert document with empty text.");
   }
 
-  const embedding = await embedText(document.text);
+  // Use the precomputed embedding when available (batch upload path) to avoid
+  // a redundant Gemini API call per chunk. Fall back to on-demand embedding
+  // for single-document inserts that don't pre-compute.
+  const embedding =
+    document.embedding && document.embedding.length > 0
+      ? document.embedding
+      : await embedText(document.text);
+
   if (embedding.length === 0) {
     throw new Error("Embedding generation returned an empty vector.");
   }

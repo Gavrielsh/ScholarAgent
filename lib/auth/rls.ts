@@ -23,23 +23,39 @@ export function buildRlsVectorSearchSql(permissionLevel: PermissionLevel): strin
   `.trim();
 }
 
-// Schema definition for the knowledge_base table (for reference during migrations).
+// Schema definition for the knowledge_base table (for reference; run via migrations/).
+//
+// DIMENSION NOTE: text-embedding-004 (Gemini free tier) outputs 768-dim vectors.
+// The column must be vector(768) — NOT vector(1536) which is OpenAI's dimension.
 export const KNOWLEDGE_BASE_SCHEMA_SQL = `
+  CREATE EXTENSION IF NOT EXISTS vector;
+
   CREATE TABLE IF NOT EXISTS knowledge_base (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    content     TEXT NOT NULL,
-    metadata    JSONB,
-    classification_level INTEGER NOT NULL DEFAULT 4,
-    embedding   vector(768),
-    created_at  TIMESTAMPTZ DEFAULT now()
+    id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    content              TEXT NOT NULL,
+    metadata             JSONB,
+    classification_level INTEGER NOT NULL DEFAULT 4
+                           CHECK (classification_level BETWEEN 0 AND 4),
+    embedding            vector(768),
+    created_at           TIMESTAMPTZ DEFAULT now()
   );
 
-  -- RLS policy: each row is visible only to sessions whose app.user_permission_level <= classification_level.
+  -- HNSW index for approximate nearest-neighbour search (proposal §5.2).
+  -- m=16 and ef_construction=64 are sensible defaults; tune after load testing.
+  CREATE INDEX IF NOT EXISTS knowledge_base_embedding_hnsw_idx
+    ON knowledge_base
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+  -- RLS policy: each row is visible only to sessions where
+  -- app.user_permission_level <= classification_level.
   ALTER TABLE knowledge_base ENABLE ROW LEVEL SECURITY;
 
+  DROP POLICY IF EXISTS rls_knowledge_access ON knowledge_base;
   CREATE POLICY rls_knowledge_access ON knowledge_base
     FOR SELECT
     USING (
       classification_level >= current_setting('app.user_permission_level')::integer
     );
 `.trim();
+

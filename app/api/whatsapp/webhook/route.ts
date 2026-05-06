@@ -1,15 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { runAgentWorkflow } from "@/lib/agent/graph";
-import { appendChatEntries } from "@/lib/chat/history";
+import { appendChatEntries, readChatHistory } from "@/lib/chat/history";
+import { lookupUserByPhone } from "@/lib/auth/userRegistry";
 import { sendWhatsAppTextMessage } from "@/lib/whatsapp/sendMessage";
+import type { ChatMessage } from "@/lib/agent/state";
+
+// Maximum number of prior turns to include as conversation context.
+// Keeps the LLM prompt bounded while preserving meaningful history.
+const MAX_HISTORY_TURNS = 10;
 
 interface WhatsAppTextMessageEvent {
   from: string;
   id: string;
-  text?: {
-    body: string;
-  };
+  text?: { body: string };
   type?: string;
 }
 
@@ -40,17 +44,28 @@ function parseIncomingTextEvent(payload: WhatsAppWebhookPayload): ParsedTextEven
   const messageBody = firstMessage.text?.body;
   if (!senderId || !messageBody) return null;
 
-  return {
-    senderId,
-    messageBody,
-    messageId: firstMessage.id ?? null,
-  };
+  return { senderId, messageBody, messageId: firstMessage.id ?? null };
+}
+
+// Converts stored chat history entries into the ChatMessage format
+// expected by the agent graph, capped to the most recent N turns.
+function buildConversationContext(
+  rawEntries: Array<{ role: string; content: string; timestamp: string }>
+): ChatMessage[] {
+  const recent = rawEntries.slice(-MAX_HISTORY_TURNS * 2); // each turn = 2 entries
+  return recent
+    .filter((e) => e.role === "user" || e.role === "assistant")
+    .map((e) => ({
+      role: e.role as "user" | "assistant",
+      content: e.content,
+      createdAt: e.timestamp,
+    }));
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const { searchParams } = new URL(request.url);
-  const mode = searchParams.get("hub.mode");
-  const token = searchParams.get("hub.verify_token");
+  const mode      = searchParams.get("hub.mode");
+  const token     = searchParams.get("hub.verify_token");
   const challenge = searchParams.get("hub.challenge");
 
   const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
@@ -63,8 +78,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  // Step 1: parse the inbound payload defensively. Any malformed structure
-  // returns 200 with `ignored: true` so Meta does not retry the webhook.
+  // Step 1 — Parse payload defensively. Return 200 so Meta doesn't retry.
   let body: WhatsAppWebhookPayload;
   try {
     body = (await request.json()) as WhatsAppWebhookPayload;
@@ -83,31 +97,40 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const { senderId, messageBody, messageId } = event;
   const receivedAt = new Date().toISOString();
 
-  // Step 2: persist the inbound message immediately. We do not block on
-  // failures here — losing a single history append must never prevent the
-  // user from getting a reply. Errors are logged and recovery is deferred.
+  // Step 2 — Resolve the caller's permission level from the user registry.
+  // Fails safe to Guest (L4) when the phone is not registered.
+  const userContext = await lookupUserByPhone(senderId);
+
+  // Step 3 — Persist the inbound message. Failure here must not block the reply.
   try {
     await appendChatEntries(senderId, [
-      {
-        role: "user",
-        content: messageBody,
-        timestamp: receivedAt,
-        messageId: messageId ?? undefined,
-      },
+      { role: "user", content: messageBody, timestamp: receivedAt, messageId: messageId ?? undefined },
     ]);
   } catch (err) {
-    // TODO: Wire structured logging / alerting; do not crash the webhook.
+    // TODO: Wire structured logging / alerting.
     console.error("Failed to persist inbound chat entry:", err);
   }
 
-  // Step 3: run the agent workflow. Any error here yields a graceful fallback
-  // text so the user always receives some reply.
+  // Step 4 — Load recent conversation history for multi-turn context.
+  let priorMessages: ChatMessage[] = [];
+  try {
+    const history = await readChatHistory(senderId);
+    // Exclude the message we just appended (it will be added by the graph).
+    const withoutLast = history.entries.slice(0, -1);
+    priorMessages = buildConversationContext(withoutLast);
+  } catch (err) {
+    console.error("Failed to load chat history for context:", err);
+  }
+
+  // Step 5 — Run the agent workflow with user context + conversation history.
   let responseText: string;
   try {
     const result = await runAgentWorkflow({
       senderId,
       mission: messageBody,
       incomingMessage: messageBody,
+      userContext,
+      priorMessages,
     });
 
     responseText = String(
@@ -119,8 +142,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     responseText = "מצטערים, אירעה תקלה בעיבוד ההודעה. אפשר לנסות שוב בעוד רגע.";
   }
 
-  // Step 4: send the reply over WhatsApp. If sending fails we still record
-  // the assistant turn so the conversation log stays consistent on next retry.
+  // Step 6 — Send the reply.
   let sendError: string | null = null;
   try {
     await sendWhatsAppTextMessage({ to: senderId, body: responseText });
@@ -129,21 +151,15 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     console.error("Failed to send WhatsApp reply:", err);
   }
 
-  // Step 5: persist the outbound message (and any send error) for audit.
+  // Step 7 — Persist the assistant turn for audit and future context loading.
   try {
     await appendChatEntries(senderId, [
-      {
-        role: "assistant",
-        content: responseText,
-        timestamp: new Date().toISOString(),
-      },
+      { role: "assistant", content: responseText, timestamp: new Date().toISOString() },
     ]);
   } catch (err) {
     console.error("Failed to persist assistant chat entry:", err);
   }
 
-  // We always return 200 to Meta unless something catastrophic happened.
-  // Internal failures are reflected in the JSON body for our own monitoring.
   return NextResponse.json(
     { ok: sendError === null, sendError },
     { status: sendError === null ? 200 : 502 }

@@ -1,6 +1,6 @@
 import { END, START, StateGraph } from "@langchain/langgraph";
 
-import type { AgentGraphState, UserContext } from "@/lib/agent/state";
+import type { AgentGraphState, ChatMessage, UserContext } from "@/lib/agent/state";
 import { plannerNode } from "@/lib/agent/nodes/planner";
 import { researcherNode } from "@/lib/agent/nodes/researcher";
 import { responderNode } from "@/lib/agent/nodes/responder";
@@ -55,24 +55,35 @@ export async function runAgentWorkflow(input: {
   senderId?: string;
   incomingMessage?: string;
   userContext?: UserContext;
+  // Prior conversation turns loaded from chat history for multi-turn context.
+  priorMessages?: ChatMessage[];
 }) {
   const now = new Date().toISOString();
 
+  const systemMessage: ChatMessage = {
+    role: "system",
+    content: input.senderId
+      ? `Incoming WhatsApp sender: ${input.senderId}`
+      : "Incoming WhatsApp sender unknown.",
+    createdAt: now,
+  };
+
+  const currentMessage: ChatMessage = {
+    role: "user",
+    content: input.incomingMessage ?? input.mission,
+    createdAt: now,
+  };
+
+  // Prepend prior turns so the responder has full conversation history,
+  // supporting multi-turn follow-up questions over WhatsApp.
+  const messages: ChatMessage[] = [
+    systemMessage,
+    ...(input.priorMessages ?? []),
+    currentMessage,
+  ];
+
   return agentGraphApp.invoke({
-    messages: [
-      {
-        role: "system",
-        content: input.senderId
-          ? `Incoming WhatsApp sender: ${input.senderId}`
-          : "Incoming WhatsApp sender unknown.",
-        createdAt: now,
-      },
-      {
-        role: "user",
-        content: input.incomingMessage ?? input.mission,
-        createdAt: now,
-      },
-    ],
+    messages,
     mission: input.mission,
     plan: [],
     gathered_context: [],

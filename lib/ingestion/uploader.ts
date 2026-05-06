@@ -49,6 +49,9 @@ export async function ingestDocument(input: UploadDocumentInput): Promise<Upload
   const records: EmbeddingRecord[] = chunks.map((chunk, i) => ({
     text: chunk.text,
     classificationLevel: input.classificationLevel,
+    // Pass the precomputed vector so upsertDocument skips the redundant
+    // embedText() call — one Gemini API round-trip per chunk instead of two.
+    embedding: vectors[i],
     metadata: {
       ...(input.extraMetadata ?? {}),
       document_id: documentId,
@@ -58,15 +61,9 @@ export async function ingestDocument(input: UploadDocumentInput): Promise<Upload
       chunk_index: chunk.index,
       char_start: chunk.charStart,
       char_end: chunk.charEnd,
-      // We pass the precomputed vector along; pgvector.upsertDocument will
-      // re-embed if it doesn't see one. TODO: extend EmbeddingRecord to accept
-      // a precomputed embedding to avoid the redundant API call.
-      precomputed_vector_length: vectors[i].length,
     },
   }));
 
-  // TODO: upsertDocument currently re-embeds the text inside pgvector.ts.
-  // Optimise by threading the precomputed `vectors[i]` through to skip that call.
   const { insertedIds, failures } = await upsertDocumentsBatch(records);
 
   return {
