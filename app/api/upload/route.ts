@@ -22,7 +22,6 @@ const MIN_UPLOAD_LEVEL: PermissionLevel = 1;
 const VALID_CLASSIFICATION_LEVELS: ReadonlySet<number> = new Set([0, 1, 2, 3, 4]);
 
 function jsonError(status: number, message: string, extra?: Record<string, unknown>) {
-  // TODO: Translate/Adapt this response to Hebrew.
   return NextResponse.json({ ok: false, error: message, ...extra }, { status });
 }
 
@@ -30,18 +29,18 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // ── 1. Authentication & authorisation ────────────────────────────────────
   let user;
   try {
-    user = extractUserContext(request);
+    user = await extractUserContext(request);
   } catch (err) {
     if (err instanceof UnauthenticatedError) {
       return jsonError(401, err.message);
     }
-    return jsonError(500, "Failed to read auth context.");
+    return jsonError(500, "קריאת פרטי האימות נכשלה.");
   }
 
   try {
     assertMinimumLevel(user, MIN_UPLOAD_LEVEL);
   } catch {
-    return jsonError(403, "Only Managers and Admins may upload documents.");
+    return jsonError(403, "רק צוות מטה (L0) ומנהלות הכשרה (L1) רשאים להעלות מסמכים.");
   }
 
   // ── 2. Parse multipart form ──────────────────────────────────────────────
@@ -49,18 +48,18 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     form = await request.formData();
   } catch {
-    return jsonError(400, "Request body is not valid multipart/form-data.");
+    return jsonError(400, "גוף הבקשה אינו בפורמט multipart/form-data תקין.");
   }
 
   const file = form.get("file");
   const classificationRaw = form.get("classificationLevel");
 
   if (!(file instanceof File)) {
-    return jsonError(400, "Missing required form field: file.");
+    return jsonError(400, "שדה חובה חסר: file.");
   }
 
   if (classificationRaw === null) {
-    return jsonError(400, "Missing required form field: classificationLevel.");
+    return jsonError(400, "שדה חובה חסר: classificationLevel.");
   }
 
   const classificationLevel = Number.parseInt(String(classificationRaw), 10);
@@ -70,7 +69,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   ) {
     return jsonError(
       400,
-      `Invalid classificationLevel "${classificationRaw}". Must be 0–4.`
+      `classificationLevel לא תקין: "${classificationRaw}". הערכים המותרים הם 0–4.`
     );
   }
 
@@ -79,21 +78,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (classificationLevel < user.permissionLevel) {
     return jsonError(
       403,
-      `You cannot classify a document below your own permission level (${user.permissionLevel}).`
+      `אין לך הרשאה לסווג מסמך מתחת לרמת ההרשאה שלך (${user.permissionLevel}).`
     );
   }
 
   // ── 3. File validation ───────────────────────────────────────────────────
   if (file.size === 0) {
-    return jsonError(400, "Uploaded file is empty.");
+    return jsonError(400, "הקובץ שהועלה ריק.");
   }
 
   if (file.size > MAX_FILE_BYTES) {
-    return jsonError(413, `File exceeds ${MAX_FILE_BYTES} bytes maximum.`);
+    return jsonError(413, `הקובץ חורג מהמגבלה המותרת (${MAX_FILE_BYTES} בתים).`);
   }
 
   if (!ALLOWED_MIME_TYPES.has(file.type)) {
-    return jsonError(415, `Unsupported MIME type: ${file.type || "<unknown>"}.`);
+    return jsonError(415, `סוג קובץ לא נתמך: ${file.type || "<unknown>"}.`);
   }
 
   // ── 4. Extract text ──────────────────────────────────────────────────────
@@ -104,12 +103,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   } catch (err) {
     return jsonError(
       422,
-      err instanceof Error ? err.message : "Failed to extract text from upload."
+      err instanceof Error ? err.message : "חילוץ הטקסט מהקובץ נכשל."
     );
   }
 
   if (!text.trim()) {
-    return jsonError(422, "No extractable text content in uploaded file.");
+    return jsonError(422, "לא נמצא טקסט שניתן לחלץ מהקובץ.");
   }
 
   // ── 5. Ingest (chunk → embed → insert) ───────────────────────────────────
@@ -129,21 +128,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json(
       {
         ok: true,
-        // TODO: Translate/Adapt this response to Hebrew.
-        message: "Document ingested successfully.",
+        message: "המסמך נטען למאגר הידע בהצלחה.",
         ...result,
       },
       { status: 201 }
     );
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown ingestion error.";
+    const message = err instanceof Error ? err.message : "שגיאת טעינה לא ידועה.";
     // TODO: Distinguish DB connection errors from embedding errors with
     //       structured error types so retries can be targeted intelligently.
-    return jsonError(502, `Ingestion failed: ${message}`);
+    return jsonError(502, `טעינת המסמך נכשלה: ${message}`);
   }
 }
 
 // Reject other verbs explicitly so misconfigured clients get a clear signal.
 export async function GET(): Promise<NextResponse> {
-  return jsonError(405, "Use POST multipart/form-data to upload a document.");
+  return jsonError(405, "יש להשתמש ב-POST בפורמט multipart/form-data להעלאת מסמך.");
 }

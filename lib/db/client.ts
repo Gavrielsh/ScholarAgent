@@ -17,10 +17,14 @@ function getPool(): Pool {
 
   pool = new Pool({
     connectionString,
-    // Conservative defaults; tune in production.
-    max: Number(process.env.PG_POOL_MAX ?? 10),
+    // Supabase transaction pooler works best with short-lived pooled sessions.
+    max: Number(process.env.PG_POOL_MAX ?? 5),
+    min: Number(process.env.PG_POOL_MIN ?? 1),
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
+    ssl: process.env.PG_SSLMODE === "disable" ? false : { rejectUnauthorized: false },
+    keepAlive: true,
+    allowExitOnIdle: true,
   });
 
   pool.on("error", (err) => {

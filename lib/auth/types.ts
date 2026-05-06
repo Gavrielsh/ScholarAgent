@@ -12,6 +12,7 @@ export const PERMISSION_ROLE: Record<PermissionLevel, string> = {
 export interface UserContext {
   userId: string;
   permissionLevel: PermissionLevel;
+  roleName: string;
   organizationId?: string;
 }
 

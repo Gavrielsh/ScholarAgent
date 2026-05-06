@@ -1,5 +1,6 @@
 import type { AgentGraphState, PlanStep, RetrievedContext } from "@/lib/agent/state";
 import { querySimilarDocuments } from "@/lib/db/pgvector";
+import { getLlmAdapter } from "@/lib/llm/adapter";
 import { tavilySearch } from "@/lib/tools/tavily";
 
 function markStepStatus(steps: PlanStep[], index: number, status: PlanStep["status"]): PlanStep[] {
@@ -15,39 +16,59 @@ export async function researcherNode(
 
   const activeStep = state.plan[state.current_step_index];
   const inProgressPlan = markStepStatus(state.plan, state.current_step_index, "in_progress");
+  const adapter = getLlmAdapter();
 
   const newContext: RetrievedContext[] = [];
 
   try {
-    // TODO: Replace heuristic matching with a proper tool-selection policy agent.
-    if (activeStep.description.toLowerCase().includes("web evidence")) {
-      const web = await tavilySearch(state.mission);
-      newContext.push(
-        ...web.results.map((item) => ({
-          source: "tavily" as const,
-          content: `${item.title}\n${item.content}\n${item.url}`,
-          metadata: { url: item.url, score: item.score },
-        }))
-      );
-    }
+    const routingRaw = await adapter.generateText({
+      messages: [
+        {
+          role: "system",
+          content:
+            "בחר כלים לשלב מחקר והחזר JSON בלבד: {\"tools\":[{\"name\":\"pgvector|tavily\",\"query\":\"...\"}]}.",
+        },
+        {
+          role: "user",
+          content: `משימה: ${state.mission}\nשלב פעיל: ${activeStep.description}`,
+        },
+      ],
+      temperature: 0,
+    });
+    const routing = JSON.parse(routingRaw) as {
+      tools?: Array<{ name?: "pgvector" | "tavily"; query?: string }>;
+    };
+    const selectedTools = (routing.tools ?? []).length
+      ? (routing.tools ?? [])
+      : [{ name: "pgvector" as const, query: state.mission }];
+    const permissionLevel = state.user_context?.permissionLevel ?? 4;
 
-    if (activeStep.description.toLowerCase().includes("vector store")) {
-      // RLS requires a user permission level. If the agent was invoked without
-      // a user context (e.g. internal smoke test), default to Guest (L4) so
-      // only public content is returned — never broaden access by default.
-      const permissionLevel = state.user_context?.permissionLevel ?? 4;
-      const docs = await querySimilarDocuments(state.mission, permissionLevel, 5);
-      newContext.push(
-        ...docs.map((doc) => ({
-          source: "pgvector" as const,
-          content: doc.text,
-          metadata: {
-            similarity: doc.similarity,
-            classification_level: doc.classificationLevel,
-            ...doc.metadata,
-          },
-        }))
-      );
+    for (const tool of selectedTools) {
+      const query = tool.query?.trim() || state.mission;
+      if (tool.name === "pgvector") {
+        const docs = await querySimilarDocuments(query, permissionLevel, 5);
+        newContext.push(
+          ...docs.map((doc) => ({
+            source: "pgvector" as const,
+            content: doc.text,
+            metadata: {
+              similarity: doc.similarity,
+              classification_level: doc.classificationLevel,
+              ...doc.metadata,
+            },
+          }))
+        );
+      }
+      if (tool.name === "tavily") {
+        const web = await tavilySearch(query);
+        newContext.push(
+          ...web.results.map((item) => ({
+            source: "tavily" as const,
+            content: `${item.title}\n${item.content}\n${item.url}`,
+            metadata: { url: item.url, score: item.score },
+          }))
+        );
+      }
     }
 
     const completedPlan = markStepStatus(inProgressPlan, state.current_step_index, "completed");
@@ -65,7 +86,7 @@ export async function researcherNode(
         ...state.gathered_context,
         {
           source: "tavily",
-          content: "Research step failed. Falling back to partial context.",
+          content: "שלב המחקר נכשל. ממשיכים עם הקשר חלקי.",
           metadata: {
             error: error instanceof Error ? error.message : "Unknown researcher error",
             failed_step: activeStep.id,

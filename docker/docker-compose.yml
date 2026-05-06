@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: scholaragent-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: scholaragent
+    ports:
+      - "5432:5432"
+    volumes:
+      - scholaragent-pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d scholaragent"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  scholaragent-pgdata:

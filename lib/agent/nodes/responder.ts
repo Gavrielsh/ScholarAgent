@@ -9,17 +9,17 @@ function formatWhatsAppResponse(state: AgentGraphState): string {
       ? topContext
           .map((ctx, index) => `${index + 1}. [${ctx.source}] ${ctx.content.slice(0, 180)}`)
           .join("\n")
-      : "No external context found yet.";
+      : "לא נמצא הקשר חיצוני.";
 
   // TODO: Replace template formatter with LLM synthesis chain for higher quality responses.
   return [
-    `Mission: ${state.mission || "No mission provided."}`,
+    `מטרה: ${state.mission || "לא סופקה מטרה."}`,
     "",
-    "Quick Findings:",
+    "מה ידוע כרגע:",
     evidenceLines,
     "",
-    "Recommended Next Action:",
-    "Use this as an initial decision-support draft and ask a follow-up question for deeper analysis.",
+    "צעד מומלץ:",
+    "זהו ניסוח ראשוני לקבלת החלטה. מומלץ לשאול שאלת המשך כדי לדייק את ההמלצה.",
   ].join("\n");
 }
 
@@ -39,25 +39,35 @@ export async function responderNode(
 
   let finalResponse = fallback;
   try {
+    const roleName = state.user_context?.roleName ?? "קהל פתוח / הורים";
+    const permissionLevel = state.user_context?.permissionLevel ?? 4;
     finalResponse = await adapter.generateText({
       messages: [
         {
           role: "system",
           content:
-            "You are an educational decision-support assistant. Keep answers concise, structured, and WhatsApp-friendly.",
+            `You are a mentor in the 'Adam LeAdam Ze Lev' project. The user is a ${roleName}. Adjust your vocabulary, depth of detail, and tone to match their needs as defined in the target audience documents.
+ענה תמיד בעברית, בצורה קצרה ומעשית לוואטסאפ.
+מיפוי קהלים:
+L0 צוות מטה: תמונת מצב מלאה, נתונים טכניים ואנליטיקה רוחבית.
+L1 מנהלות הכשרה: הנחיה מקצועית, תובנות פדגוגיות וסיכומי ניהול.
+L2 סטודנטים/יועצות: לוגיסטיקה, פרוטוקולי משמעת ותובנות התנהגות לזוגות ספציפיים.
+L3 חונכים/בוגרים: טיפים פרקטיים מהשטח, רעיונות לפעילות וניהול משבר בשפה פשוטה.
+L4 קהל פתוח/הורים: מידע כללי, חזון הפרויקט והנחיות לציבור.`,
         },
         {
           role: "user",
           content: [
-            `Mission: ${state.mission}`,
+            `מטרה: ${state.mission}`,
+            `תפקיד משתמש: ${roleName} (L${permissionLevel})`,
             "",
-            "Gathered context:",
+            "הקשר שנאסף:",
             gatheredContextBlock,
             "",
-            "Return a practical response with 3 sections:",
-            "1) What we know",
-            "2) Suggested action",
-            "3) One follow-up question",
+            "החזר תשובה מעשית עם 3 סעיפים:",
+            "1) מה ידוע",
+            "2) פעולה מומלצת",
+            "3) שאלת המשך אחת",
           ].join("\n"),
         },
       ],

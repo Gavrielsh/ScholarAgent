@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import mammoth from "mammoth";
 
 import type { PermissionLevel } from "@/lib/auth/types";
 import { upsertDocumentsBatch, type EmbeddingRecord } from "@/lib/db/pgvector";
@@ -89,12 +90,19 @@ export async function extractTextFromUpload(
       return new TextDecoder("utf-8").decode(bytes);
 
     case "application/pdf":
-      // TODO: Wire a PDF text extractor (e.g. pdf-parse or pdfjs-dist).
-      throw new Error("PDF extraction not yet implemented.");
+      {
+        const parser = (await import("pdf-parse")) as unknown as {
+          default?: (buf: Buffer) => Promise<{ text?: string }>;
+        };
+        const parsePdf = parser.default;
+        if (!parsePdf) {
+          throw new Error("מודול PDF לא נטען כראוי.");
+        }
+        return (await parsePdf(Buffer.from(bytes))).text ?? "";
+      }
 
     case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-      // TODO: Wire a DOCX extractor (e.g. mammoth).
-      throw new Error("DOCX extraction not yet implemented.");
+      return (await mammoth.extractRawText({ buffer: Buffer.from(bytes) })).value ?? "";
 
     default:
       throw new Error(`Unsupported MIME type for text extraction: ${mimeType}`);

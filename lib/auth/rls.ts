@@ -30,7 +30,7 @@ export const KNOWLEDGE_BASE_SCHEMA_SQL = `
     content     TEXT NOT NULL,
     metadata    JSONB,
     classification_level INTEGER NOT NULL DEFAULT 4,
-    embedding   vector(1536),
+    embedding   vector(768),
     created_at  TIMESTAMPTZ DEFAULT now()
   );
 

@@ -59,7 +59,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return new NextResponse(challenge ?? "", { status: 200 });
   }
 
-  return NextResponse.json({ error: "Webhook verification failed." }, { status: 403 });
+  return NextResponse.json({ error: "אימות ה-Webhook נכשל." }, { status: 403 });
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -69,13 +69,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     body = (await request.json()) as WhatsAppWebhookPayload;
   } catch {
-    return NextResponse.json({ ok: true, ignored: "Malformed JSON payload." }, { status: 200 });
+    return NextResponse.json({ ok: true, ignored: "מטען JSON לא תקין." }, { status: 200 });
   }
 
   const event = parseIncomingTextEvent(body);
   if (!event) {
     return NextResponse.json(
-      { ok: true, ignored: "No supported text message in payload." },
+      { ok: true, ignored: "לא נמצאה הודעת טקסט נתמכת במטען." },
       { status: 200 }
     );
   }
@@ -110,14 +110,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       incomingMessage: messageBody,
     });
 
-    responseText =
+    responseText = String(
       result.final_response ??
-      // TODO: Translate/Adapt this response to Hebrew.
-      "I received your message, but I need one more pass to provide a complete response.";
+        "קיבלתי את ההודעה שלך, ואני צריך עוד רגע כדי לספק תשובה מלאה יותר."
+    );
   } catch (err) {
     console.error("Agent workflow error:", err);
-    // TODO: Translate/Adapt this response to Hebrew.
-    responseText = "Sorry, something went wrong while processing your message. Please try again shortly.";
+    responseText = "מצטערים, אירעה תקלה בעיבוד ההודעה. אפשר לנסות שוב בעוד רגע.";
   }
 
   // Step 4: send the reply over WhatsApp. If sending fails we still record

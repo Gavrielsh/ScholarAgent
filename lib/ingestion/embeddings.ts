@@ -15,6 +15,7 @@ interface GeminiBatchEmbeddingResponse {
 }
 
 const EMBEDDING_MODEL = process.env.GEMINI_EMBEDDING_MODEL ?? "text-embedding-004";
+const EMBEDDING_DIMENSION = 768;
 
 function endpoint(path: string): string {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -43,7 +44,13 @@ export async function embedText(text: string): Promise<number[]> {
   }
 
   const json = (await response.json()) as GeminiEmbeddingResponse;
-  return json.embedding?.values ?? [];
+  const values = json.embedding?.values ?? [];
+  if (values.length > 0 && values.length !== EMBEDDING_DIMENSION) {
+    throw new Error(
+      `Gemini embedding dimension mismatch: got ${values.length}, expected ${EMBEDDING_DIMENSION}.`
+    );
+  }
+  return values;
 }
 
 // Generates embeddings for many texts in one HTTP round-trip.

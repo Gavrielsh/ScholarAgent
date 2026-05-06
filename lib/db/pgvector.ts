@@ -2,6 +2,8 @@ import { withClient, withRlsTransaction } from "@/lib/db/client";
 import type { PermissionLevel } from "@/lib/auth/types";
 import { embedText } from "@/lib/ingestion/embeddings";
 
+const EMBEDDING_DIMENSION = 768;
+
 export interface EmbeddingRecord {
   id?: string;
   text: string;
@@ -21,6 +23,11 @@ export interface SimilarDocument {
 function toVectorLiteral(vector: number[]): string {
   if (vector.length === 0) {
     throw new Error("Cannot serialise an empty embedding vector.");
+  }
+  if (vector.length !== EMBEDDING_DIMENSION) {
+    throw new Error(
+      `Embedding dimension mismatch: got ${vector.length}, expected ${EMBEDDING_DIMENSION}.`
+    );
   }
   return `[${vector.join(",")}]`;
 }
