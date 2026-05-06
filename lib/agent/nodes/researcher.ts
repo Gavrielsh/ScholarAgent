@@ -1,10 +1,28 @@
 import type { AgentGraphState, PlanStep, RetrievedContext } from "@/lib/agent/state";
 import { querySimilarDocuments } from "@/lib/db/pgvector";
-import { getLlmAdapter } from "@/lib/llm/adapter";
 import { tavilySearch } from "@/lib/tools/tavily";
 
 function markStepStatus(steps: PlanStep[], index: number, status: PlanStep["status"]): PlanStep[] {
   return steps.map((step, i) => (i === index ? { ...step, status } : step));
+}
+
+// Determines which tools to run for a step.
+// Primary decision: the `tool` field set by the LLM planner.
+// Fallback: legacy keyword heuristic for steps that predate the tool field.
+function resolveTool(step: PlanStep): { useTavily: boolean; useVector: boolean } {
+  if (step.tool) {
+    return {
+      useTavily: step.tool === "tavily" || step.tool === "both",
+      useVector: step.tool === "pgvector" || step.tool === "both",
+    };
+  }
+
+  // Legacy keyword fallback (kept for backward compatibility with old plan shapes).
+  const desc = step.description.toLowerCase();
+  return {
+    useTavily: desc.includes("web") || desc.includes("tavily") || desc.includes("חיצוני"),
+    useVector: desc.includes("vector") || desc.includes("internal") || desc.includes("פנימי") || desc.includes("מאגר"),
+  };
 }
 
 export async function researcherNode(
@@ -16,59 +34,38 @@ export async function researcherNode(
 
   const activeStep = state.plan[state.current_step_index];
   const inProgressPlan = markStepStatus(state.plan, state.current_step_index, "in_progress");
-  const adapter = getLlmAdapter();
+  const { useTavily, useVector } = resolveTool(activeStep);
 
   const newContext: RetrievedContext[] = [];
 
   try {
-    const routingRaw = await adapter.generateText({
-      messages: [
-        {
-          role: "system",
-          content:
-            "בחר כלים לשלב מחקר והחזר JSON בלבד: {\"tools\":[{\"name\":\"pgvector|tavily\",\"query\":\"...\"}]}.",
-        },
-        {
-          role: "user",
-          content: `משימה: ${state.mission}\nשלב פעיל: ${activeStep.description}`,
-        },
-      ],
-      temperature: 0,
-    });
-    const routing = JSON.parse(routingRaw) as {
-      tools?: Array<{ name?: "pgvector" | "tavily"; query?: string }>;
-    };
-    const selectedTools = (routing.tools ?? []).length
-      ? (routing.tools ?? [])
-      : [{ name: "pgvector" as const, query: state.mission }];
-    const permissionLevel = state.user_context?.permissionLevel ?? 4;
+    if (useTavily) {
+      const web = await tavilySearch(state.mission);
+      newContext.push(
+        ...web.results.map((item) => ({
+          source: "tavily" as const,
+          content: `${item.title}\n${item.content}\n${item.url}`,
+          metadata: { url: item.url, score: item.score },
+        }))
+      );
+    }
 
-    for (const tool of selectedTools) {
-      const query = tool.query?.trim() || state.mission;
-      if (tool.name === "pgvector") {
-        const docs = await querySimilarDocuments(query, permissionLevel, 5);
-        newContext.push(
-          ...docs.map((doc) => ({
-            source: "pgvector" as const,
-            content: doc.text,
-            metadata: {
-              similarity: doc.similarity,
-              classification_level: doc.classificationLevel,
-              ...doc.metadata,
-            },
-          }))
-        );
-      }
-      if (tool.name === "tavily") {
-        const web = await tavilySearch(query);
-        newContext.push(
-          ...web.results.map((item) => ({
-            source: "tavily" as const,
-            content: `${item.title}\n${item.content}\n${item.url}`,
-            metadata: { url: item.url, score: item.score },
-          }))
-        );
-      }
+    if (useVector) {
+      // RLS requires a permission level. Default to Guest (L4) when no user
+      // context is present — never broaden access silently.
+      const permissionLevel = state.user_context?.permissionLevel ?? 4;
+      const docs = await querySimilarDocuments(state.mission, permissionLevel, 5);
+      newContext.push(
+        ...docs.map((doc) => ({
+          source: "pgvector" as const,
+          content: doc.text,
+          metadata: {
+            similarity: doc.similarity,
+            classification_level: doc.classificationLevel,
+            ...doc.metadata,
+          },
+        }))
+      );
     }
 
     const completedPlan = markStepStatus(inProgressPlan, state.current_step_index, "completed");
