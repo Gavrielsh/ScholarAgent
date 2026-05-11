@@ -1,7 +1,7 @@
 import type { KnowledgeChunk, PermissionLevel, UserContext } from "@/lib/auth/types";
 
 // A user may access a chunk when their permission level is <= the chunk's classification level.
-// (Lower numeric level = higher privilege, so Admin L0 can access all levels 0-4.)
+// (Lower numeric level = higher privilege, so Admin L0 can access all levels 0-3.)
 export function canAccessChunk(user: UserContext, chunk: KnowledgeChunk): boolean {
   return user.permissionLevel <= chunk.classificationLevel;
 }

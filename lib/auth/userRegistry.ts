@@ -10,9 +10,8 @@ interface UserRow {
 }
 
 // Look up a WhatsApp sender's permission level from the `users` table.
-// Returns a Guest (L4) context when the phone number is not registered —
-// this is the safe default: unknown callers get the least privilege possible.
-export async function lookupUserByPhone(phoneNumber: string): Promise<UserContext> {
+// Returns null when the phone number is not registered or has an invalid level.
+export async function lookupUserByPhone(phoneNumber: string): Promise<UserContext | null> {
   try {
     const result = await query<UserRow>(
       `SELECT id, phone_number, permission_level, organization_id
@@ -24,7 +23,15 @@ export async function lookupUserByPhone(phoneNumber: string): Promise<UserContex
 
     const row = result.rows[0];
     if (!row) {
-      return guestContext(phoneNumber);
+      return null;
+    }
+
+    if (!(row.permission_level in PERMISSION_ROLE)) {
+      console.error("userRegistry: invalid permission level for user:", {
+        phoneNumber,
+        permissionLevel: row.permission_level,
+      });
+      return null;
     }
 
     return {
@@ -34,20 +41,7 @@ export async function lookupUserByPhone(phoneNumber: string): Promise<UserContex
       organizationId: row.organization_id ?? undefined,
     };
   } catch (err) {
-    // DB unreachable → fail safe to Guest rather than crash the webhook.
-    // TODO: Wire structured logging so this degradation is observable.
-    console.error("userRegistry: DB lookup failed, defaulting to Guest:", err);
-    return guestContext(phoneNumber);
+    console.error("userRegistry: DB lookup failed:", err);
+    return null;
   }
-}
-
-// Synthesises a minimal Guest context for callers not found in the registry.
-// The userId encodes the phone so it can still be used for audit logs.
-function guestContext(phoneNumber: string): UserContext {
-  return {
-    userId: `phone:${phoneNumber}`,
-    permissionLevel: 4,
-    roleName: PERMISSION_ROLE[4],
-    organizationId: undefined,
-  };
 }

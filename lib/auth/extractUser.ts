@@ -3,7 +3,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 
 import type { PermissionLevel, UserContext } from "@/lib/auth/types";
 
-const VALID_LEVELS: ReadonlySet<number> = new Set([0, 1, 2, 3, 4]);
+const VALID_LEVELS: ReadonlySet<number> = new Set([0, 1, 2, 3]);
 let cachedJwks: ReturnType<typeof createRemoteJWKSet> | null = null;
 let cachedJwksUrl: string | null = null;
 

@@ -40,8 +40,12 @@ export async function responderNode(
 
   let finalResponse = fallback;
   try {
-    const roleName = state.user_context?.roleName ?? "קהל פתוח / הורים";
-    const permissionLevel = state.user_context?.permissionLevel ?? 4;
+    if (!state.user_context) {
+      throw new Error("Missing user context for role-aware response generation.");
+    }
+
+    const roleName = state.user_context.roleName;
+    const permissionLevel = state.user_context.permissionLevel;
     const roleDescription = ROLE_DESCRIPTIONS[permissionLevel];
     finalResponse = await adapter.generateText({
       messages: [

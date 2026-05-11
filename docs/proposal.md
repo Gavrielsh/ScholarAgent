@@ -53,7 +53,6 @@ What added value does Agentic-RAG provide compared to Baseline RAG in terms of r
 | L1 | Manager | Organizational management data |
 | L2 | Staff | Staff-level operational data |
 | L3 | Volunteer | Volunteer-facing content |
-| L4 | Guest | Public content only |
 
 Security is enforced at two layers:
 - **Application layer:** RBAC middleware validates user role before query

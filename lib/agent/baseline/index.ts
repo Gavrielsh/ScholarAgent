@@ -8,14 +8,23 @@
 // against the Agentic-RAG configurations.
 
 import type { PermissionLevel, UserContext } from "@/lib/auth/types";
+import type { ChatMessage } from "@/lib/agent/state";
 import { querySimilarDocuments } from "@/lib/db/pgvector";
 import { getLlmAdapter } from "@/lib/llm/adapter";
 import { computeDls, type DlsResult } from "@/lib/metrics/dls";
 import type { KnowledgeChunk } from "@/lib/auth/types";
+import type { LlmMessage } from "@/lib/llm/types";
+
+function isConversationMessage(message: ChatMessage): message is ChatMessage & {
+  role: "user" | "assistant";
+} {
+  return message.role === "user" || message.role === "assistant";
+}
 
 export interface BaselineRagInput {
   query: string;
   userContext: UserContext;
+  priorMessages?: ChatMessage[];
   retrievalLimit?: number;
 }
 
@@ -34,7 +43,7 @@ export interface BaselineRagResult {
 // Runs a single Baseline RAG query and returns the answer plus evaluation data.
 // The caller is responsible for computing RAGAS scores from the returned fields.
 export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineRagResult> {
-  const { query, userContext, retrievalLimit = 5 } = input;
+  const { query, userContext, priorMessages = [], retrievalLimit = 5 } = input;
   const startMs = Date.now();
 
   // Step 1 — Retrieve: pgvector similarity search inside an RLS transaction.
@@ -57,6 +66,13 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
       : "No relevant documents found in the knowledge base.";
 
   const adapter = getLlmAdapter();
+  const conversationContext: LlmMessage[] = priorMessages
+    .filter(isConversationMessage)
+    .map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
+
   const answer = await adapter.generateText({
     messages: [
       {
@@ -64,6 +80,7 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
         content:
           "אתה עוזר וירטואלי חינוכי. ענה על השאלה תוך שימוש אך ורק במידע המסופק בהקשר. אם ההקשר אינו מספק, ציין זאת בבירור.",
       },
+      ...conversationContext,
       {
         role: "user",
         content: `Question: ${query}\n\nContext:\n${contextBlock}`,

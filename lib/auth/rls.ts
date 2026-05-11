@@ -5,7 +5,7 @@ import type { PermissionLevel } from "@/lib/auth/types";
 //
 // Rule: a row is visible when classification_level >= user's permission level.
 // Admin (L0) → classification_level >= 0 → sees everything.
-// Guest (L4) → classification_level >= 4 → sees only public rows.
+// Volunteer (L3) → classification_level >= 3 → sees only the lowest registered tier.
 export function buildRlsWhereClause(permissionLevel: PermissionLevel): string {
   return `classification_level >= ${permissionLevel}`;
 }
@@ -34,8 +34,8 @@ export const KNOWLEDGE_BASE_SCHEMA_SQL = `
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     content              TEXT NOT NULL,
     metadata             JSONB,
-    classification_level INTEGER NOT NULL DEFAULT 4
-                           CHECK (classification_level BETWEEN 0 AND 4),
+    classification_level INTEGER NOT NULL DEFAULT 3
+                           CHECK (classification_level BETWEEN 0 AND 3),
     embedding            vector(768),
     created_at           TIMESTAMPTZ DEFAULT now()
   );

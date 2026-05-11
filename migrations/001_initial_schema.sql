@@ -7,13 +7,13 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";   -- provides gen_random_uuid()
 
 -- ── Users table ─────────────────────────────────────────────────────────────
--- Maps WhatsApp phone numbers to permission levels (L0-L4).
+-- Maps WhatsApp phone numbers to permission levels (L0-L3).
 -- Populated manually or through an admin interface; not auto-created on first message.
 CREATE TABLE IF NOT EXISTS users (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   phone_number     VARCHAR(20) UNIQUE NOT NULL,   -- E.164 format, e.g. "972501234567"
-  permission_level INTEGER NOT NULL DEFAULT 4
-                     CHECK (permission_level BETWEEN 0 AND 4),
+  permission_level INTEGER NOT NULL DEFAULT 3
+                     CHECK (permission_level BETWEEN 0 AND 3),
   organization_id  UUID,
   display_name     TEXT,
   created_at       TIMESTAMPTZ DEFAULT now(),
@@ -24,13 +24,13 @@ CREATE INDEX IF NOT EXISTS users_phone_number_idx ON users (phone_number);
 
 -- ── Knowledge base table ─────────────────────────────────────────────────────
 -- Stores document chunks + their Gemini text-embedding-004 vectors (768-dim).
--- Each chunk inherits a classification_level matching one of the five user tiers.
+-- Each chunk inherits a classification_level matching one of the four user tiers.
 CREATE TABLE IF NOT EXISTS knowledge_base (
   id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   content              TEXT NOT NULL,
   metadata             JSONB,
-  classification_level INTEGER NOT NULL DEFAULT 4
-                         CHECK (classification_level BETWEEN 0 AND 4),
+  classification_level INTEGER NOT NULL DEFAULT 3
+                         CHECK (classification_level BETWEEN 0 AND 3),
   -- DIMENSION: text-embedding-004 outputs 768 floats (not 1536).
   embedding            vector(768),
   created_at           TIMESTAMPTZ DEFAULT now()

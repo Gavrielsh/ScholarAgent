@@ -1,12 +1,11 @@
-// Five-tier authorization model per thesis proposal (L0=Admin, L4=Guest).
-export type PermissionLevel = 0 | 1 | 2 | 3 | 4;
+// Four-tier authorization model (L0=Admin, L3=Volunteer).
+export type PermissionLevel = 0 | 1 | 2 | 3;
 
 export const PERMISSION_ROLE: Record<PermissionLevel, string> = {
   0: "Admin",
   1: "Manager",
   2: "Staff",
   3: "Volunteer",
-  4: "Guest",
 };
 
 export const ROLE_DESCRIPTIONS: Record<PermissionLevel, string> = {
@@ -14,7 +13,6 @@ export const ROLE_DESCRIPTIONS: Record<PermissionLevel, string> = {
   1: "Training managers: professional guidance, pedagogical insights, operational summaries, and management-oriented recommendations.",
   2: "Students/counselors: logistics support, discipline protocols, and behavioral insights for specific mentor-mentee pairs.",
   3: "Mentors/alumni: practical on-the-ground tips, activity ideas, and crisis-management guidance in simple, actionable Hebrew.",
-  4: "General public/parents: general information, project vision, and public-facing guidelines without internal operational detail.",
 };
 
 export interface UserContext {
@@ -25,7 +23,7 @@ export interface UserContext {
 }
 
 // A knowledge-base chunk carries the minimum permission level required to access it.
-// classificationLevel=0 → admin-only; classificationLevel=4 → public.
+// classificationLevel=0 → admin-only; classificationLevel=3 → lowest registered tier.
 export interface KnowledgeChunk {
   id: string;
   content: string;

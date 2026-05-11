@@ -1,14 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { runBaselineRag } from "@/lib/agent/baseline";
 import { runAgentWorkflow } from "@/lib/agent/graph";
 import { appendChatEntries, readChatHistory } from "@/lib/chat/history";
 import { lookupUserByPhone } from "@/lib/auth/userRegistry";
+import { evaluatePromptInjection } from "@/lib/security/promptInjection";
 import { sendWhatsAppTextMessage } from "@/lib/whatsapp/sendMessage";
 import type { ChatMessage } from "@/lib/agent/state";
 
 // Maximum number of prior turns to include as conversation context.
 // Keeps the LLM prompt bounded while preserving meaningful history.
 const MAX_HISTORY_TURNS = 10;
+const RAG_MODE = (process.env.RAG_MODE ?? "baseline").toLowerCase();
+const PROMPT_INJECTION_SAFETY_MESSAGE =
+  "לא ניתן לעבד את ההודעה הזו מטעמי בטיחות. אפשר לנסח מחדש את הבקשה ללא הוראות לשינוי התנהגות המערכת.";
+const UNAUTHORIZED_MESSAGE =
+  "המספר אינו מזוהה במערכת. יש לפנות לאחד האחראים כדי להסדיר את הגישה.";
 
 interface WhatsAppTextMessageEvent {
   from: string;
@@ -95,7 +102,26 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   void (async () => {
     try {
       const receivedAt = new Date().toISOString();
+      let isPromptInjection: boolean;
+      try {
+        isPromptInjection = await evaluatePromptInjection(messageBody);
+      } catch (err) {
+        console.error("Prompt injection check failed:", { senderId, err });
+        await sendWhatsAppTextMessage({ to: senderId, body: PROMPT_INJECTION_SAFETY_MESSAGE });
+        return;
+      }
+
+      if (isPromptInjection) {
+        console.error("Blocked prompt injection attempt:", { senderId });
+        await sendWhatsAppTextMessage({ to: senderId, body: PROMPT_INJECTION_SAFETY_MESSAGE });
+        return;
+      }
+
       const userContext = await lookupUserByPhone(senderId);
+      if (!userContext) {
+        await sendWhatsAppTextMessage({ to: senderId, body: UNAUTHORIZED_MESSAGE });
+        return;
+      }
 
       try {
         await appendChatEntries(senderId, [
@@ -116,20 +142,29 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
       let responseText: string;
       try {
-        const result = await runAgentWorkflow({
-          senderId,
-          mission: messageBody,
-          incomingMessage: messageBody,
-          userContext,
-          priorMessages,
-        });
+        if (RAG_MODE === "agentic") {
+          const result = await runAgentWorkflow({
+            senderId,
+            mission: messageBody,
+            incomingMessage: messageBody,
+            userContext,
+            priorMessages,
+          });
 
-        responseText = String(
-          result.final_response ??
-            "קיבלתי את ההודעה שלך, ואני צריך עוד רגע כדי לספק תשובה מלאה יותר."
-        );
+          responseText = String(
+            result.final_response ??
+              "קיבלתי את ההודעה שלך, ואני צריך עוד רגע כדי לספק תשובה מלאה יותר."
+          );
+        } else {
+          const result = await runBaselineRag({
+            query: messageBody,
+            userContext,
+            priorMessages,
+          });
+          responseText = result.answer;
+        }
       } catch (err) {
-        console.error("Agent workflow error:", err);
+        console.error("RAG workflow error:", err);
         responseText = "מצטערים, אירעה תקלה בעיבוד ההודעה. אפשר לנסות שוב בעוד רגע.";
       }
 

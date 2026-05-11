@@ -34,10 +34,11 @@ export async function researcherNode(
     }
 
     if (useVector) {
-      // RLS requires a permission level. Default to Guest (L4) when no user
-      // context is present — never broaden access silently.
-      const permissionLevel = state.user_context?.permissionLevel ?? 4;
-      const docs = await querySimilarDocuments(state.mission, permissionLevel, 5);
+      if (!state.user_context) {
+        throw new Error("Missing user context for RLS-protected vector search.");
+      }
+
+      const docs = await querySimilarDocuments(state.mission, state.user_context.permissionLevel, 5);
       vectorDocsCount = docs.length;
       newContext.push(
         ...docs.map((doc) => ({

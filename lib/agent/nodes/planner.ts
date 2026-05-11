@@ -59,12 +59,16 @@ export async function plannerNode(
   let plan: PlanStep[];
 
   try {
+    if (!state.user_context) {
+      throw new Error("Missing user context for planning.");
+    }
+
     const raw = await adapter.generateText({
       messages: [
         { role: "system", content: PLANNER_SYSTEM_PROMPT },
         {
           role: "user",
-          content: `Mission: ${state.mission || "No mission provided."}\nUser level: L${state.user_context?.permissionLevel ?? 4}`,
+          content: `Mission: ${state.mission || "No mission provided."}\nUser level: L${state.user_context.permissionLevel}`,
         },
       ],
       temperature: 0.0, // deterministic plan generation

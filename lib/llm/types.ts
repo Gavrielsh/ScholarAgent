@@ -6,6 +6,7 @@ export interface LlmMessage {
 export interface GenerateTextInput {
   messages: LlmMessage[];
   temperature?: number;
+  model?: string;
   responseSchema?: Record<string, any>;
 }
 
