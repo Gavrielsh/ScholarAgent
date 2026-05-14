@@ -1,3 +1,5 @@
+import { redactPii } from "@/lib/ingestion/piiRedact";
+
 export interface Chunk {
   index: number;
   text: string;
@@ -56,7 +58,7 @@ function splitIntoSemanticUnits(text: string): string[] {
  * then packs units into a character budget with overlap.
  */
 export function chunkText(rawText: string, options: ChunkOptions = {}): Chunk[] {
-  const text = rawText.replace(/\r\n/g, "\n").trim();
+  const text = redactPii(rawText).replace(/\r\n/g, "\n").trim();
   if (!text) return [];
 
   const chunkSize = Math.max(200, options.chunkSize ?? DEFAULT_CHUNK_SIZE);
