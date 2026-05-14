@@ -5,6 +5,7 @@ import type { PermissionLevel } from "@/lib/auth/types";
 import { upsertDocumentsBatch, type EmbeddingRecord } from "@/lib/db/pgvector";
 import { chunkText } from "@/lib/ingestion/chunker";
 import { embedTextBatch } from "@/lib/ingestion/embeddings";
+import { redactPii } from "@/lib/ingestion/piiRedact";
 
 export interface UploadDocumentInput {
   filename: string;
@@ -32,7 +33,8 @@ export async function ingestDocument(input: UploadDocumentInput): Promise<Upload
   }
 
   const documentId = randomUUID();
-  const chunks = chunkText(input.text);
+  const sanitized = redactPii(input.text);
+  const chunks = chunkText(sanitized);
 
   if (chunks.length === 0) {
     return { documentId, chunkCount: 0, insertedChunkIds: [], failures: [] };

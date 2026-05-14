@@ -1,9 +1,5 @@
-// Embeddings via Google AI Studio's free `text-embedding-004` endpoint.
-// Output dimensionality is 768; the knowledge_base.embedding column must match.
-//
-// TODO: Update the knowledge_base schema to vector(768) if it was created with
-//       a different dimension. The proposal currently shows vector(1536).
-
+// Embeddings via Google AI Studio (Gemini embedding models).
+// Default aligns with knowledge_base.vector(768) — multilingual model for Hebrew/Latin corpora.
 interface GeminiEmbeddingResponse {
   embedding?: {
     values?: number[];
@@ -14,7 +10,10 @@ interface GeminiBatchEmbeddingResponse {
   embeddings?: Array<{ values?: number[] }>;
 }
 
-const EMBEDDING_MODEL = process.env.GEMINI_EMBEDDING_MODEL ?? "text-embedding-004";
+// Default: multilingual Gemini embedding (768-dim, aligns with knowledge_base.vector(768)).
+// Override via GEMINI_EMBEDDING_MODEL for comparative experiments (e.g. text-embedding-004).
+const EMBEDDING_MODEL =
+  process.env.GEMINI_EMBEDDING_MODEL ?? "text-multilingual-embedding-002";
 const EMBEDDING_DIMENSION = 768;
 const RETRY_DELAYS_MS = [1000, 2000, 4000] as const;
 

@@ -102,19 +102,22 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   void (async () => {
     try {
       const receivedAt = new Date().toISOString();
-      let isPromptInjection: boolean;
-      try {
-        isPromptInjection = await evaluatePromptInjection(messageBody);
-      } catch (err) {
-        console.error("Prompt injection check failed:", { senderId, err });
-        await sendWhatsAppTextMessage({ to: senderId, body: PROMPT_INJECTION_SAFETY_MESSAGE });
-        return;
-      }
 
-      if (isPromptInjection) {
-        console.error("Blocked prompt injection attempt:", { senderId });
-        await sendWhatsAppTextMessage({ to: senderId, body: PROMPT_INJECTION_SAFETY_MESSAGE });
-        return;
+      if (RAG_MODE === "agentic") {
+        let isPromptInjection: boolean;
+        try {
+          isPromptInjection = await evaluatePromptInjection(messageBody);
+        } catch (err) {
+          console.error("Prompt injection check failed:", { senderId, err });
+          await sendWhatsAppTextMessage({ to: senderId, body: PROMPT_INJECTION_SAFETY_MESSAGE });
+          return;
+        }
+
+        if (isPromptInjection) {
+          console.error("Blocked prompt injection attempt:", { senderId });
+          await sendWhatsAppTextMessage({ to: senderId, body: PROMPT_INJECTION_SAFETY_MESSAGE });
+          return;
+        }
       }
 
       const userContext = await lookupUserByPhone(senderId);

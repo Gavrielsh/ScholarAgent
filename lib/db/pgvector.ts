@@ -3,14 +3,15 @@ import type { PermissionLevel } from "@/lib/auth/types";
 import { embedText } from "@/lib/ingestion/embeddings";
 
 const EMBEDDING_DIMENSION = 768;
+/** Per-modality DB fetch cap before RRF / application slicing (RLS recall trap). */
+export const DEFAULT_RETRIEVAL_OVERFETCH = 200;
+const DEFAULT_RRF_K = 60;
 
 export interface EmbeddingRecord {
   id?: string;
   text: string;
   classificationLevel: PermissionLevel;
   metadata?: Record<string, unknown>;
-  // Precomputed embedding vector. When provided, embedText() is skipped,
-  // eliminating the redundant API call from the batch-upload pipeline.
   embedding?: number[];
 }
 
@@ -19,10 +20,31 @@ export interface SimilarDocument {
   text: string;
   metadata: Record<string, unknown> | null;
   classificationLevel: PermissionLevel;
+  /** Dense-vector cosine similarity when available. */
   similarity: number;
+  /** Fused RRF score when hybrid retrieval runs. */
+  rrfScore?: number;
 }
 
-// Convert a JS number[] vector to the PostgreSQL pgvector literal: "[0.1,0.2,...]".
+export interface QuerySimilarOptions {
+  /** Rows returned after RRF merge + sort (default 5). */
+  limit?: number;
+  /** HNSW / BM25 leg cap each — fetch wide before RLS shrinks the effective set. */
+  overfetch?: number;
+  rrfK?: number;
+}
+
+function normalizeQueryOptions(arg?: number | QuerySimilarOptions): Required<QuerySimilarOptions> {
+  if (typeof arg === "number") {
+    return { limit: arg, overfetch: DEFAULT_RETRIEVAL_OVERFETCH, rrfK: DEFAULT_RRF_K };
+  }
+  return {
+    limit: arg?.limit ?? 5,
+    overfetch: arg?.overfetch ?? DEFAULT_RETRIEVAL_OVERFETCH,
+    rrfK: arg?.rrfK ?? DEFAULT_RRF_K,
+  };
+}
+
 function toVectorLiteral(vector: number[]): string {
   if (vector.length === 0) {
     throw new Error("Cannot serialise an empty embedding vector.");
@@ -35,16 +57,11 @@ function toVectorLiteral(vector: number[]): string {
   return `[${vector.join(",")}]`;
 }
 
-// Insert a chunk + its embedding. The classificationLevel determines who may
-// later retrieve this row through the RLS policy.
 export async function upsertDocument(document: EmbeddingRecord): Promise<string> {
   if (!document.text.trim()) {
     throw new Error("Cannot insert document with empty text.");
   }
 
-  // Use the precomputed embedding when available (batch upload path) to avoid
-  // a redundant Gemini API call per chunk. Fall back to on-demand embedding
-  // for single-document inserts that don't pre-compute.
   const embedding =
     document.embedding && document.embedding.length > 0
       ? document.embedding
@@ -57,9 +74,6 @@ export async function upsertDocument(document: EmbeddingRecord): Promise<string>
   const vectorLiteral = toVectorLiteral(embedding);
   const metadataJson = JSON.stringify(document.metadata ?? {});
 
-  // INSERT ... RETURNING id. Uses the DB's gen_random_uuid() if no id supplied.
-  // Writes bypass the RLS SELECT policy, but we still execute as a normal
-  // pooled query — the upload endpoint enforces RBAC before reaching this.
   const sql = document.id
     ? `
         INSERT INTO knowledge_base (id, content, metadata, classification_level, embedding)
@@ -89,9 +103,6 @@ export async function upsertDocument(document: EmbeddingRecord): Promise<string>
   return insertedId;
 }
 
-// Insert many documents efficiently. Each row goes through the single-row
-// upsert path so any individual failure is isolated. For very large batches,
-// TODO: convert to a single COPY or multi-row INSERT for throughput.
 export async function upsertDocumentsBatch(
   documents: EmbeddingRecord[]
 ): Promise<{ insertedIds: string[]; failures: Array<{ index: number; error: string }> }> {
@@ -113,15 +124,60 @@ export async function upsertDocumentsBatch(
   return { insertedIds, failures };
 }
 
-// RLS-aware similarity search. The transaction sets app.user_permission_level
-// so the policy filters out any row whose classification_level is below the
-// user's authorisation. This is the database-level half of the defence-in-depth
-// strategy described in the proposal.
+type RetrievedRow = {
+  id: string;
+  content: string;
+  metadata: Record<string, unknown> | null;
+  classification_level: PermissionLevel;
+  similarity: number;
+};
+
+function mapRow(row: RetrievedRow): SimilarDocument {
+  return {
+    id: row.id,
+    text: row.content,
+    metadata: row.metadata,
+    classificationLevel: row.classification_level,
+    similarity: Number(row.similarity),
+  };
+}
+
+/**
+ * Reciprocal Rank Fusion over two ranked lists (Cormack et al. style), k≈60.
+ */
+function reciprocalRankFusion(
+  vectorRanked: SimilarDocument[],
+  bm25Ranked: SimilarDocument[],
+  rrfK: number
+): SimilarDocument[] {
+  const byId = new Map<string, { doc: SimilarDocument; rrf: number }>();
+
+  const bump = (doc: SimilarDocument, rank: number) => {
+    const inc = 1 / (rrfK + rank);
+    const cur = byId.get(doc.id);
+    if (!cur) {
+      byId.set(doc.id, { doc: { ...doc }, rrf: inc });
+    } else {
+      cur.rrf += inc;
+      cur.doc.similarity = Math.max(cur.doc.similarity, doc.similarity);
+    }
+  };
+
+  vectorRanked.forEach((doc, i) => bump(doc, i + 1));
+  bm25Ranked.forEach((doc, i) => bump(doc, i + 1));
+
+  return [...byId.values()]
+    .sort((a, b) => b.rrf - a.rrf)
+    .map(({ doc, rrf }) => ({ ...doc, rrfScore: rrf }));
+}
+
+// RLS-aware hybrid retrieval: dense HNSW + BM25 (tsvector), fused with RRF.
 export async function querySimilarDocuments(
   queryText: string,
   permissionLevel: PermissionLevel,
-  limit = 5
+  options?: number | QuerySimilarOptions
 ): Promise<SimilarDocument[]> {
+  const opts = normalizeQueryOptions(options);
   if (!queryText.trim()) {
     return [];
   }
@@ -132,8 +188,9 @@ export async function querySimilarDocuments(
   }
 
   const vectorLiteral = toVectorLiteral(queryEmbedding);
+  const overfetch = opts.overfetch;
 
-  const sql = `
+  const vectorSql = `
     SELECT id, content, metadata, classification_level,
            1 - (embedding <=> $1::vector) AS similarity
     FROM knowledge_base
@@ -141,21 +198,47 @@ export async function querySimilarDocuments(
     LIMIT $2;
   `;
 
-  const result = await withRlsTransaction(permissionLevel, (client) =>
-    client.query<{
-      id: string;
-      content: string;
-      metadata: Record<string, unknown> | null;
-      classification_level: PermissionLevel;
-      similarity: number;
-    }>(sql, [vectorLiteral, limit])
-  );
+  const bm25Sql = `
+    SELECT id, content, metadata, classification_level,
+           ts_rank_cd(content_tsv, websearch_to_tsquery('simple', $1)) AS similarity
+    FROM knowledge_base
+    WHERE content_tsv @@ websearch_to_tsquery('simple', $1)
+    ORDER BY similarity DESC
+    LIMIT $2;
+  `;
 
-  return result.rows.map((row) => ({
-    id: row.id,
-    text: row.content,
-    metadata: row.metadata,
-    classificationLevel: row.classification_level,
-    similarity: Number(row.similarity),
-  }));
+  const fused = await withRlsTransaction(permissionLevel, async (client) => {
+    const vecRes = await client.query<RetrievedRow>(vectorSql, [vectorLiteral, overfetch]);
+    const vectorRows = vecRes.rows.map(mapRow);
+
+    let bm25Rows: SimilarDocument[] = [];
+    try {
+      const bmRes = await client.query<RetrievedRow>(bm25Sql, [queryText, overfetch]);
+      bm25Rows = bmRes.rows.map(mapRow);
+    } catch (err) {
+      // Older DBs without content_tsv / GIN — fall back to dense-only.
+      console.warn("BM25 leg skipped (schema or tsquery error):", err);
+    }
+
+    if (bm25Rows.length === 0) {
+      return vectorRows.slice(0, opts.limit);
+    }
+
+    const merged = reciprocalRankFusion(vectorRows, bm25Rows, opts.rrfK);
+    return merged.slice(0, opts.limit);
+  });
+
+  return fused;
+}
+
+/**
+ * Hard-delete every chunk belonging to a logical source document (metadata.document_id).
+ * Call from a trusted webhook after upstream CMS deletion or full re-ingest.
+ */
+export async function hardDeleteKnowledgeChunksByDocumentId(documentId: string): Promise<number> {
+  if (!documentId.trim()) return 0;
+  const res = await withClient((client) =>
+    client.query(`DELETE FROM knowledge_base WHERE metadata->>'document_id' = $1`, [documentId])
+  );
+  return res.rowCount ?? 0;
 }
