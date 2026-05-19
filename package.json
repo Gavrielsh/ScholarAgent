@@ -12,6 +12,7 @@
   "dependencies": {
     "@langchain/core": "^1.1.42",
     "@langchain/langgraph": "^1.2.9",
+    "@vercel/functions": "^1.5.0",
     "jose": "^6.2.3",
     "langfuse": "^3.38.20",
     "mammoth": "^1.12.0",
