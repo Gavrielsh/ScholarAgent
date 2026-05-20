@@ -5,7 +5,7 @@ import { runAgentWorkflow } from "@/lib/agent/graph";
 import type { ChatMessage } from "@/lib/agent/state";
 import { appendChatEntries, readChatHistory } from "@/lib/chat/history";
 import { buildBoundedConversationContext, truncateInboundMessage } from "@/lib/chat/context";
-import { lookupUserByPhone } from "@/lib/auth/userRegistry";
+import { lookupUserByPhone, UserRegistryDbError } from "@/lib/auth/userRegistry";
 import { logError } from "@/lib/logger";
 import { runAfterResponse } from "@/lib/server/postResponse";
 import { evaluatePromptInjection } from "@/lib/security/promptInjection";
@@ -76,7 +76,22 @@ async function processIncomingMessage(event: ParsedTextEvent): Promise<void> {
     }
   }
 
-  const userContext = await lookupUserByPhone(senderId);
+  let userContext;
+  try {
+    userContext = await lookupUserByPhone(senderId);
+  } catch (err) {
+    if (err instanceof UserRegistryDbError) {
+      // DB is unreachable — this is an infrastructure failure, not an auth failure.
+      // Log it and reply with a generic retry message so the user isn't misled.
+      logError("user_registry_db_error", err, { senderId });
+      await sendWhatsAppTextMessage({
+        to: senderId,
+        body: "מצטערים, הייתה תקלה זמנית במערכת. אנא נסה שוב בעוד מספר דקות.",
+      });
+      return;
+    }
+    throw err;
+  }
   if (!userContext) {
     await sendWhatsAppTextMessage({ to: senderId, body: UNAUTHORIZED_MESSAGE });
     return;
