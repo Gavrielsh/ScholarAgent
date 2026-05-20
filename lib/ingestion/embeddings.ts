@@ -1,5 +1,4 @@
 // Embeddings via Google AI Studio (Gemini embedding models).
-// Default aligns with knowledge_base.vector(768) — multilingual model for Hebrew/Latin corpora.
 interface GeminiEmbeddingResponse {
   embedding?: {
     values?: number[];
@@ -10,10 +9,8 @@ interface GeminiBatchEmbeddingResponse {
   embeddings?: Array<{ values?: number[] }>;
 }
 
-// Default: multilingual Gemini embedding (768-dim, aligns with knowledge_base.vector(768)).
-// Override via GEMINI_EMBEDDING_MODEL for comparative experiments (e.g. text-embedding-004).
 const EMBEDDING_MODEL =
-  process.env.GEMINI_EMBEDDING_MODEL ?? "text-multilingual-embedding-002";
+  process.env.GEMINI_EMBEDDING_MODEL ?? "gemini-embedding-2";
 const EMBEDDING_DIMENSION = 768;
 const RETRY_DELAYS_MS = [1000, 2000, 4000] as const;
 
@@ -25,7 +22,6 @@ function endpoint(path: string): string {
   return `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:${path}?key=${apiKey}`;
 }
 
-// Generates a single embedding vector for the given text.
 export async function embedText(text: string): Promise<number[]> {
   const trimmed = text.trim();
   if (!trimmed) return [];
@@ -35,6 +31,7 @@ export async function embedText(text: string): Promise<number[]> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       content: { parts: [{ text: trimmed }] },
+      outputDimensionality: 768, // ← שינוי: הגבלת dimensions
     }),
   });
 
@@ -53,8 +50,6 @@ export async function embedText(text: string): Promise<number[]> {
   return values;
 }
 
-// Generates embeddings for many texts in one HTTP round-trip.
-// Falls back to per-item calls if the batch endpoint is unavailable.
 export async function embedTextBatch(texts: string[]): Promise<number[][]> {
   const filtered = texts.map((t) => t.trim()).filter((t) => t.length > 0);
   if (filtered.length === 0) return [];
@@ -69,6 +64,7 @@ export async function embedTextBatch(texts: string[]): Promise<number[][]> {
           requests: filtered.map((text) => ({
             model: `models/${EMBEDDING_MODEL}`,
             content: { parts: [{ text }] },
+            outputDimensionality: 768, // ← שינוי: הגבלת dimensions
           })),
         }),
       });

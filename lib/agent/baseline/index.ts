@@ -112,6 +112,7 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
   let injection = false;
   try {
     injection = await evaluatePromptInjection(query);
+    console.log("injection check result:", injection, "for query:", query);
   } catch (err) {
     console.error("Prompt injection classifier error (fail-closed):", err);
     injection = true;

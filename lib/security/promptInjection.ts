@@ -21,30 +21,37 @@ function parseClassifierJson(raw: string): PromptInjectionResult | null {
 }
 
 export async function evaluatePromptInjection(input: string): Promise<boolean> {
-  const adapter = new GeminiAdapter();
-  const response = await adapter.generateText({
-    model: "gemini-1.5-flash",
-    temperature: 0,
-    messages: [
-      {
-        role: "system",
-        content: PROMPT_INJECTION_SYSTEM_PROMPT,
-      },
-      {
-        role: "user",
-        content: input,
-      },
-    ],
-    responseSchema: {
-      type: "object",
-      properties: {
-        is_injection: { type: "boolean" },
-        reason: { type: "string" },
-      },
-      required: ["is_injection", "reason"],
-    },
-  });
+  if (input.trim().length < 20) return false;
 
-  const parsed = parseClassifierJson(response);
-  return parsed?.is_injection === true;
+  const adapter = new GeminiAdapter();
+  try {
+    const response = await adapter.generateText({
+      model: "gemini-2.0-flash",
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content: PROMPT_INJECTION_SYSTEM_PROMPT,
+        },
+        {
+          role: "user",
+          content: input,
+        },
+      ],
+      responseSchema: {
+        type: "object",
+        properties: {
+          is_injection: { type: "boolean" },
+          reason: { type: "string" },
+        },
+        required: ["is_injection", "reason"],
+      },
+    });
+
+    const parsed = parseClassifierJson(response);
+    return parsed?.is_injection === true;
+  } catch (err) {
+    console.error("injection classifier failed:", err);
+    return false; // fail-open
+  }
 }
