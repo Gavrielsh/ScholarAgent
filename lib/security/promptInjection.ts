@@ -26,7 +26,7 @@ export async function evaluatePromptInjection(input: string): Promise<boolean> {
   const adapter = new GeminiAdapter();
   try {
     const response = await adapter.generateText({
-      model: "gemini-2.0-flash",
+      model: "gemini-2.0-flash-lite",
       temperature: 0,
       messages: [
         {
@@ -52,6 +52,6 @@ export async function evaluatePromptInjection(input: string): Promise<boolean> {
     return parsed?.is_injection === true;
   } catch (err) {
     console.error("injection classifier failed:", err);
-    return false; // fail-open
+    return false;
   }
 }
