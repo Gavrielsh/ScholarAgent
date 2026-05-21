@@ -42,6 +42,10 @@ interface ParsedTextEvent {
   messageId: string | null;
 }
 
+// Global cache to prevent processing the same WhatsApp message multiple times
+// caused by WhatsApp's automatic webhook retries.
+const activeMessagesCache = new Set<string>();
+
 function parseIncomingTextEvent(payload: WhatsAppWebhookPayload): ParsedTextEvent | null {
   const firstMessage = payload?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
   if (!firstMessage) return null;
@@ -188,6 +192,24 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (!event) {
     return NextResponse.json({ ok: true, ignored: "לא נמצאה הודעת טקסט נתמכת במטען." }, { status: 200 });
   }
+
+  // --- Deduplication Mechanism ---
+  if (event.messageId) {
+    if (activeMessagesCache.has(event.messageId)) {
+      console.log(`[DEDUPLICATION] Skipping duplicate WhatsApp request for messageId: ${event.messageId}`);
+      // Return 200 immediately to satisfy WhatsApp's retry mechanism without triggering LLM
+      return NextResponse.json({ ok: true, status: "duplicate_ignored" }, { status: 200 });
+    }
+    
+    // Mark the message as being processed
+    activeMessagesCache.add(event.messageId);
+
+    // Clear the messageId from cache after 5 minutes to prevent memory leaks
+    setTimeout(() => {
+      activeMessagesCache.delete(event.messageId!);
+    }, 5 * 60 * 1000);
+  }
+  // -------------------------------
 
   await runAfterResponse(() => processIncomingMessage(event));
 

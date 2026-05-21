@@ -10,7 +10,7 @@ interface GeminiBatchEmbeddingResponse {
 }
 
 const EMBEDDING_MODEL =
-  process.env.GEMINI_EMBEDDING_MODEL ?? "gemini-embedding-2";
+  process.env.GEMINI_EMBEDDING_MODEL ?? "gemini-embedding-001";
 const EMBEDDING_DIMENSION = 768;
 const RETRY_DELAYS_MS = [1000, 2000, 4000] as const;
 
