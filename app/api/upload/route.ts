@@ -40,7 +40,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     assertMinimumLevel(user, MIN_UPLOAD_LEVEL);
   } catch {
-    return jsonError(403, "רק צוות מטה (L0) ומנהלות הכשרה (L1) רשאים להעלות מסמכים.");
+    return jsonError(403, "רק צוות מטה ומנהלות הכשרה רשאים להעלות מסמכים.");
   }
 
   // ── 2. Parse multipart form ──────────────────────────────────────────────
