@@ -26,6 +26,8 @@ export interface RetrievedContext {
   metadata?: Record<string, unknown>;
 }
 
+export type IntentCategory = "VALID_EDUCATIONAL" | "BORDERLINE" | "PROBLEMATIC";
+
 export interface AgentGraphState {
   messages: ChatMessage[];
   mission: string;
@@ -36,4 +38,7 @@ export interface AgentGraphState {
   replanning_count?: number;
   final_response?: string;
   user_context?: UserContext;
+  safetyRiskScore: number;
+  intentCategory: IntentCategory;
+  rewrittenQuery: string | null;
 }

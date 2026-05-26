@@ -17,13 +17,14 @@ export async function researcherNode(
   const inProgressPlan = markStepStatus(state.plan, state.current_step_index, "in_progress");
   const useTavily = activeStep.tool === "tavily" || activeStep.tool === "both";
   const useVector = activeStep.tool === "pgvector" || activeStep.tool === "both";
+  const retrievalQuery = state.rewrittenQuery ?? state.mission;
 
   const newContext: RetrievedContext[] = [];
   let vectorDocsCount = 0;
 
   try {
     if (useTavily) {
-      const web = await tavilySearch(state.mission);
+      const web = await tavilySearch(retrievalQuery);
       newContext.push(
         ...web.results.map((item) => ({
           source: "tavily" as const,
@@ -38,7 +39,7 @@ export async function researcherNode(
         throw new Error("Missing user context for RLS-protected vector search.");
       }
 
-      const docs = await querySimilarDocuments(state.mission, state.user_context.permissionLevel, 5);
+      const docs = await querySimilarDocuments(retrievalQuery, state.user_context.permissionLevel, 5);
       vectorDocsCount = docs.length;
       newContext.push(
         ...docs.map((doc) => ({

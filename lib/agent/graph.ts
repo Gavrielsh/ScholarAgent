@@ -1,6 +1,7 @@
 import { END, START, StateGraph } from "@langchain/langgraph";
 
 import type { AgentGraphState, ChatMessage, UserContext } from "@/lib/agent/state";
+import { safetySignalsNode } from "@/lib/agent/baseline/safetySignals";
 import { plannerNode } from "@/lib/agent/nodes/planner";
 import { researcherNode } from "@/lib/agent/nodes/researcher";
 import { responderNode } from "@/lib/agent/nodes/responder";
@@ -43,8 +44,22 @@ const graph = new StateGraph<AgentGraphState>({
       value: (x: AgentGraphState["user_context"], y: AgentGraphState["user_context"]) => y ?? x,
       default: () => undefined,
     },
+    safetyRiskScore: {
+      value: (x: number, y: number) => y ?? x,
+      default: () => 0,
+    },
+    intentCategory: {
+      value: (x: AgentGraphState["intentCategory"], y: AgentGraphState["intentCategory"]) =>
+        y ?? x,
+      default: (): AgentGraphState["intentCategory"] => "VALID_EDUCATIONAL",
+    },
+    rewrittenQuery: {
+      value: (x: string | null, y: string | null) => y ?? x,
+      default: () => null,
+    },
   },
 })
+  .addNode("safety", safetySignalsNode)
   .addNode("planner", plannerNode)
   .addNode("researcher", researcherNode)
   .addNode("replanner", async (state) => {
@@ -65,7 +80,10 @@ const graph = new StateGraph<AgentGraphState>({
     };
   })
   .addNode("responder", responderNode)
-  .addEdge(START, "planner")
+  .addEdge(START, "safety")
+  .addConditionalEdges("safety", (state) => {
+    return state.final_response ? "responder" : "planner";
+  })
   .addEdge("planner", "researcher")
   .addConditionalEdges("researcher", (state) => {
     if (state.needs_replanning && (state.replanning_count ?? 0) < 1) {
@@ -121,5 +139,8 @@ export async function runAgentWorkflow(input: {
     replanning_count: 0,
     final_response: undefined,
     user_context: input.userContext,
+    safetyRiskScore: 0,
+    intentCategory: "VALID_EDUCATIONAL",
+    rewrittenQuery: null,
   } satisfies AgentGraphState);
 }

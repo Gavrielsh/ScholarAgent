@@ -56,6 +56,7 @@ export async function plannerNode(
   }
 
   const adapter = getLlmAdapter();
+  const planningMission = state.rewrittenQuery ?? state.mission;
   let plan: PlanStep[];
 
   try {
@@ -68,7 +69,7 @@ export async function plannerNode(
         { role: "system", content: PLANNER_SYSTEM_PROMPT },
         {
           role: "user",
-          content: `Mission: ${state.mission || "No mission provided."}\nUser level: L${state.user_context.permissionLevel}`,
+          content: `Mission: ${planningMission || "No mission provided."}\nUser level: L${state.user_context.permissionLevel}`,
         },
       ],
       temperature: 0.0, // deterministic plan generation
