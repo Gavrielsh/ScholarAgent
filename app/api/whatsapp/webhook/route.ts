@@ -8,14 +8,11 @@ import { buildBoundedConversationContext, truncateInboundMessage } from "@/lib/c
 import { lookupUserByPhone, UserRegistryDbError } from "@/lib/auth/userRegistry";
 import { logError } from "@/lib/logger";
 import { runAfterResponse } from "@/lib/server/postResponse";
-import { evaluatePromptInjection } from "@/lib/security/promptInjection";
 import { sendWhatsAppTextMessage } from "@/lib/whatsapp/sendMessage";
 
 export const runtime = "nodejs";
 
 const RAG_MODE = (process.env.RAG_MODE ?? "baseline").toLowerCase();
-const PROMPT_INJECTION_SAFETY_MESSAGE =
-  "לא ניתן לעבד את ההודעה הזו מטעמי בטיחות. אפשר לנסח מחדש את הבקשה ללא הוראות לשינוי התנהגות המערכת.";
 const UNAUTHORIZED_MESSAGE =
   "המספר אינו מזוהה במערכת. יש לפנות לאחד האחראים כדי להסדיר את הגישה.";
 
@@ -42,8 +39,6 @@ interface ParsedTextEvent {
   messageId: string | null;
 }
 
-// Global cache to prevent processing the same WhatsApp message multiple times
-// caused by WhatsApp's automatic webhook retries.
 const activeMessagesCache = new Set<string>();
 
 function parseIncomingTextEvent(payload: WhatsAppWebhookPayload): ParsedTextEvent | null {
@@ -65,28 +60,11 @@ async function processIncomingMessage(event: ParsedTextEvent): Promise<void> {
   const messageBody = truncateInboundMessage(event.messageBody);
   const receivedAt = new Date().toISOString();
 
-  if (RAG_MODE === "agentic") {
-    try {
-      const isPromptInjection = await evaluatePromptInjection(messageBody);
-      if (isPromptInjection) {
-        logError("prompt_injection_blocked", new Error("injection_detected"), { senderId });
-        await sendWhatsAppTextMessage({ to: senderId, body: PROMPT_INJECTION_SAFETY_MESSAGE });
-        return;
-      }
-    } catch (err) {
-      logError("prompt_injection_check_failed", err, { senderId });
-      await sendWhatsAppTextMessage({ to: senderId, body: PROMPT_INJECTION_SAFETY_MESSAGE });
-      return;
-    }
-  }
-
   let userContext;
   try {
     userContext = await lookupUserByPhone(senderId);
   } catch (err) {
     if (err instanceof UserRegistryDbError) {
-      // DB is unreachable — this is an infrastructure failure, not an auth failure.
-      // Log it and reply with a generic retry message so the user isn't misled.
       logError("user_registry_db_error", err, { senderId });
       await sendWhatsAppTextMessage({
         to: senderId,
@@ -193,23 +171,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: true, ignored: "לא נמצאה הודעת טקסט נתמכת במטען." }, { status: 200 });
   }
 
-  // --- Deduplication Mechanism ---
   if (event.messageId) {
     if (activeMessagesCache.has(event.messageId)) {
       console.log(`[DEDUPLICATION] Skipping duplicate WhatsApp request for messageId: ${event.messageId}`);
-      // Return 200 immediately to satisfy WhatsApp's retry mechanism without triggering LLM
       return NextResponse.json({ ok: true, status: "duplicate_ignored" }, { status: 200 });
     }
     
-    // Mark the message as being processed
     activeMessagesCache.add(event.messageId);
-
-    // Clear the messageId from cache after 5 minutes to prevent memory leaks
     setTimeout(() => {
       activeMessagesCache.delete(event.messageId!);
     }, 5 * 60 * 1000);
   }
-  // -------------------------------
 
   await runAfterResponse(() => processIncomingMessage(event));
 

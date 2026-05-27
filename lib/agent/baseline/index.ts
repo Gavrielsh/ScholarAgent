@@ -1,7 +1,8 @@
 // Baseline RAG — control configuration for comparative evaluation (proposal §6.2).
-// Retrieve → optional cross-encoder re-rank → single LLM call. No LangGraph planner loop.
+// Retrieve -> optional cross-encoder re-rank -> single LLM call. No LangGraph planner loop.
 
 import type { PermissionLevel, UserContext } from "@/lib/auth/types";
+import { ROLE_DESCRIPTIONS } from "@/lib/auth/types";
 import type { ChatMessage } from "@/lib/agent/state";
 import { insertRagAuditLog } from "@/lib/db/auditLogs";
 import { DEFAULT_RETRIEVAL_OVERFETCH, querySimilarDocuments, type SimilarDocument } from "@/lib/db/pgvector";
@@ -14,7 +15,6 @@ import {
   containsMandatoryHandoffSignals,
   MANDATORY_HANDOFF_RESPONSE_HE,
 } from "@/lib/agent/baseline/safetySignals";
-import { evaluatePromptInjection } from "@/lib/security/promptInjection";
 import { startBaselineRagTrace } from "@/lib/observability/tracing";
 
 function isConversationMessage(message: ChatMessage): message is ChatMessage & {
@@ -109,27 +109,6 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
     return payload;
   };
 
-  let injection = false;
-  try {
-    injection = await evaluatePromptInjection(query);
-    console.log("injection check result:", injection, "for query:", query);
-  } catch (err) {
-    console.error("Prompt injection classifier error (fail-closed):", err);
-    injection = true;
-  }
-
-  if (injection) {
-    const emptyDls = computeDls(userContext, []);
-    return finish(
-      {
-        answer: PROMPT_INJECTION_RESPONSE_HE,
-        retrievedChunks: [],
-        dls: emptyDls,
-        latencyMs: Date.now() - startMs,
-      },
-      { injection: true }
-    );
-  }
 
   if (containsMandatoryHandoffSignals(query)) {
     const emptyDls = computeDls(userContext, []);
@@ -157,7 +136,7 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
   trace.rerankSpan.end({ chunkIds: reranked.map((d) => d.id) });
 
   const retrievedChunks = fromCandidates(reranked);
-
+  
   const chunksForDls: KnowledgeChunk[] = reranked.map((d) => ({
     id: d.id,
     content: d.text,
@@ -168,7 +147,7 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
   const contextBlock =
     reranked.length > 0
       ? reranked.map((d, i) => `[${i + 1}] ${d.text}`).join("\n\n")
-      : "No relevant documents found in the knowledge base.";
+      : "אין מידע ספציפי במסמכים לשאילתה זו. עליך להסתמך על הידע המקצועי הכללי שלך כאיש חינוך.";
 
   const adapter = getLlmAdapter();
   const conversationContext: LlmMessage[] = priorMessages
@@ -178,24 +157,38 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
       content: message.content,
     }));
 
+  const roleName = userContext.roleName;
+  const roleDescription = ROLE_DESCRIPTIONS[userContext.permissionLevel] || "";
+
+  // Enhanced System Prompt focusing on structural line breaks and 200 words target length
   const llmMessages: LlmMessage[] = [
     {
       role: "system",
-      content:
-        "אתה עוזר וירטואלי חינוכי. ענה על השאלה תוך שימוש אך ורק במידע המסופק בהקשר. אם ההקשר אינו מספק, ציין זאת בבירור.",
+      content: [
+`You are an expert mentor in the 'Adam LeAdam Ze Lev' project, assisting mentors with social dilemmas, boycott prevention, and violence reduction. 
+The user is a ${roleName}. ${roleDescription}
+
+Strict Guidelines:
+****. Length Control: Keep the response concise to save tokens. The total length MUST NOT exceed 150 words.
+1. Tone & Language: Respond ONLY in Hebrew. Maintain an empathetic, professional, and educational tone.
+2. Privacy: NEVER identify real students, share names, or rank children.
+3. Structure & Scannability: Break the text into 2 short paragraphs with line breaks. Use bullet points (•) or numbered lists for actionable steps.
+`
+      ].join("\n"),
     },
     ...conversationContext,
     {
       role: "user",
-      content: `Question: ${query}\n\nContext:\n${contextBlock}`,
+      content: `פנייה מקורית: ${query}\n\nהקשר שנאסף:\n${contextBlock}`,
     },
   ];
 
   const genTrace = trace.attachLlmGeneration(llmMessages);
-  const answer = await adapter.generateText({
+  let answer = await adapter.generateText({
     messages: llmMessages,
-    temperature: 0.2,
+    temperature: 0.3, 
   });
+    
   genTrace.end({ answer });
 
   const result: BaselineRagResult = {
