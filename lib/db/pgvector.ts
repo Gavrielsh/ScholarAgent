@@ -1,6 +1,9 @@
+import { randomUUID } from "node:crypto";
+
 import { withClient, withRlsTransaction } from "@/lib/db/client";
 import type { PermissionLevel } from "@/lib/auth/types";
-import { embedText } from "@/lib/ingestion/embeddings";
+import { embedText, embedTextBatch } from "@/lib/ingestion/embeddings";
+import { logWarn } from "@/lib/logger";
 
 const EMBEDDING_DIMENSION = 768;
 /** Per-modality DB fetch cap before RRF / application slicing (RLS recall trap). */
@@ -103,21 +106,145 @@ export async function upsertDocument(document: EmbeddingRecord): Promise<string>
   return insertedId;
 }
 
+const BULK_UPSERT_SQL = `
+  INSERT INTO knowledge_base (id, content, metadata, classification_level, embedding)
+  SELECT u.id, u.content, u.metadata::jsonb, u.classification_level, u.embedding::vector
+  FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::int[], $5::text[]) AS u(
+    id, content, metadata, classification_level, embedding
+  )
+  ON CONFLICT (id) DO UPDATE
+    SET content = EXCLUDED.content,
+        metadata = EXCLUDED.metadata,
+        classification_level = EXCLUDED.classification_level,
+        embedding = EXCLUDED.embedding
+  RETURNING id;
+`;
+
+type PreparedBatchRow = {
+  sourceIndex: number;
+  id: string;
+  text: string;
+  metadataJson: string;
+  classificationLevel: PermissionLevel;
+  embedding?: number[];
+};
+
 export async function upsertDocumentsBatch(
   documents: EmbeddingRecord[]
 ): Promise<{ insertedIds: string[]; failures: Array<{ index: number; error: string }> }> {
   const insertedIds: string[] = [];
   const failures: Array<{ index: number; error: string }> = [];
 
+  if (documents.length === 0) {
+    return { insertedIds, failures };
+  }
+
+  const prepared: PreparedBatchRow[] = [];
+
   for (let i = 0; i < documents.length; i++) {
+    const document = documents[i];
     try {
-      const id = await upsertDocument(documents[i]);
-      insertedIds.push(id);
+      if (!document.text.trim()) {
+        throw new Error("Cannot insert document with empty text.");
+      }
+      prepared.push({
+        sourceIndex: i,
+        id: document.id ?? randomUUID(),
+        text: document.text,
+        metadataJson: JSON.stringify(document.metadata ?? {}),
+        classificationLevel: document.classificationLevel,
+        embedding:
+          document.embedding && document.embedding.length > 0
+            ? document.embedding
+            : undefined,
+      });
     } catch (err) {
       failures.push({
         index: i,
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+  }
+
+  if (prepared.length === 0) {
+    return { insertedIds, failures };
+  }
+
+  const needsEmbedding = prepared.filter((row) => !row.embedding);
+  if (needsEmbedding.length > 0) {
+    try {
+      const vectors = await embedTextBatch(needsEmbedding.map((row) => row.text));
+      if (vectors.length !== needsEmbedding.length) {
+        throw new Error(
+          `Embedding count mismatch: got ${vectors.length}, expected ${needsEmbedding.length}.`
+        );
+      }
+      needsEmbedding.forEach((row, idx) => {
+        row.embedding = vectors[idx];
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      for (const row of needsEmbedding) {
+        failures.push({ index: row.sourceIndex, error: message });
+      }
+      const surviving = prepared.filter(
+        (row) => row.embedding && row.embedding.length > 0
+      );
+      prepared.length = 0;
+      prepared.push(...surviving);
+    }
+  }
+
+  const ready: PreparedBatchRow[] = [];
+  for (const row of prepared) {
+    try {
+      if (!row.embedding || row.embedding.length === 0) {
+        throw new Error("Embedding generation returned an empty vector.");
+      }
+      toVectorLiteral(row.embedding);
+      ready.push(row);
+    } catch (err) {
+      failures.push({
+        index: row.sourceIndex,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (ready.length === 0) {
+    return { insertedIds, failures };
+  }
+
+  const ids = ready.map((row) => row.id);
+  const texts = ready.map((row) => row.text);
+  const metadata = ready.map((row) => row.metadataJson);
+  const levels = ready.map((row) => row.classificationLevel);
+  const embeddings = ready.map((row) => toVectorLiteral(row.embedding!));
+
+  try {
+    const result = await withClient((client) =>
+      client.query<{ id: string }>(BULK_UPSERT_SQL, [ids, texts, metadata, levels, embeddings])
+    );
+    for (const row of result.rows) {
+      if (row.id) {
+        insertedIds.push(row.id);
+      }
+    }
+    if (insertedIds.length !== ready.length) {
+      throw new Error(
+        `Bulk upsert returned ${insertedIds.length} ids, expected ${ready.length}.`
+      );
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const stack = err instanceof Error ? err.stack : undefined;
+    logWarn("knowledge_base_bulk_upsert_failed", message, {
+      batchSize: ready.length,
+      sqlPreview: BULK_UPSERT_SQL.slice(0, 120),
+      stack,
+    });
+    for (const row of ready) {
+      failures.push({ index: row.sourceIndex, error: message });
     }
   }
 
@@ -217,7 +344,14 @@ export async function querySimilarDocuments(
       bm25Rows = bmRes.rows.map(mapRow);
     } catch (err) {
       // Older DBs without content_tsv / GIN — fall back to dense-only.
-      console.warn("BM25 leg skipped (schema or tsquery error):", err);
+      logWarn(
+        "retrieval_bm25_leg_skipped",
+        err instanceof Error ? err.message : String(err),
+        {
+          sqlPreview: bm25Sql.slice(0, 120),
+          stack: err instanceof Error ? err.stack : undefined,
+        }
+      );
     }
 
     if (bm25Rows.length === 0) {

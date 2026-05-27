@@ -1,3 +1,5 @@
+import { logWarn } from "@/lib/logger";
+
 // Embeddings via Google AI Studio (Gemini embedding models).
 interface GeminiEmbeddingResponse {
   embedding?: {
@@ -98,7 +100,11 @@ export async function embedTextBatch(texts: string[]): Promise<number[][]> {
         await sleep(RETRY_DELAYS_MS[attempt]);
         continue;
       }
-      console.warn("Batch embed failed after retries, falling back to sequential:", err);
+      logWarn(
+        "embed_text_batch_fallback_sequential",
+        err instanceof Error ? err.message : String(err),
+        { stack: err instanceof Error ? err.stack : undefined }
+      );
     }
     break;
   }
@@ -122,7 +128,11 @@ export async function embedTextBatch(texts: string[]): Promise<number[][]> {
     }
     return out;
   } catch (err) {
-    console.warn("Batch embed failed after retries, sequential fallback also failed:", err);
+    logWarn(
+      "embed_text_batch_sequential_failed",
+      err instanceof Error ? err.message : String(err),
+      { stack: err instanceof Error ? err.stack : undefined }
+    );
     throw err;
   }
 }

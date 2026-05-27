@@ -1,5 +1,4 @@
 import { logError, logWarn } from "@/lib/logger";
-import { text } from "stream/consumers";
 
 export interface SendWhatsAppTextInput {
   to: string;
@@ -58,7 +57,7 @@ export async function sendWhatsAppTextMessage(input: SendWhatsAppTextInput): Pro
     messaging_product: "whatsapp",
     to: input.to,
     type: "text",
-    text: {body: input.body},
+    text: { body: input.body },
   });
 
   let lastError: Error | null = null;
