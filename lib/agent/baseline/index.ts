@@ -1,5 +1,6 @@
 // Baseline RAG — control configuration for comparative evaluation (proposal §6.2).
-// Retrieve -> optional cross-encoder re-rank -> single LLM call. No LangGraph planner loop.
+// Retrieve -> optional cross-encoder re-rank -> single LLM call.
+
 import type { PermissionLevel, UserContext } from "@/lib/auth/types";
 import { ROLE_DESCRIPTIONS } from "@/lib/auth/types";
 import { filterAuthorizedChunks } from "@/lib/auth/rbac";
@@ -16,10 +17,6 @@ import type { KnowledgeChunk } from "@/lib/auth/types";
 import type { LlmMessage } from "@/lib/llm/types";
 import { logError } from "@/lib/logger";
 import { defaultScoreReranker, type DocumentReranker, type RerankCandidate } from "@/lib/agent/baseline/reranker";
-import {
-  containsMandatoryHandoffSignals,
-  MANDATORY_HANDOFF_RESPONSE_HE,
-} from "@/lib/agent/baseline/safetySignals";
 import { startBaselineRagTrace } from "@/lib/observability/tracing";
 
 function isConversationMessage(message: ChatMessage): message is ChatMessage & {
@@ -32,13 +29,11 @@ export interface BaselineRagInput {
   query: string;
   userContext: UserContext;
   priorMessages?: ChatMessage[];
-  /** Final chunk count passed to the LLM after hybrid retrieval + re-ranking (default 5). */
   retrievalLimit?: number;
-  /** Optional cross-encoder / hosted reranker — defaults to score-based top-K. */
   reranker?: DocumentReranker;
 }
 
-export interface BaselineRagResult {
+export interface BaselineRagCoreResult {
   answer: string;
   retrievedChunks: Array<{
     id: string;
@@ -51,6 +46,8 @@ export interface BaselineRagResult {
   latencyMs: number;
 }
 
+export type BaselineRagResult = BaselineRagCoreResult;
+
 function toCandidates(docs: SimilarDocument[]): RerankCandidate[] {
   return docs.map((d) => ({
     id: d.id,
@@ -62,7 +59,7 @@ function toCandidates(docs: SimilarDocument[]): RerankCandidate[] {
   }));
 }
 
-function fromCandidates(c: RerankCandidate[]): BaselineRagResult["retrievedChunks"] {
+function fromCandidates(c: RerankCandidate[]): BaselineRagCoreResult["retrievedChunks"] {
   return c.map((d) => ({
     id: d.id,
     text: d.text,
@@ -72,7 +69,8 @@ function fromCandidates(c: RerankCandidate[]): BaselineRagResult["retrievedChunk
   }));
 }
 
-export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineRagResult> {
+/** Core RAG — no audit log; call recordBaselineRagMetrics after WhatsApp send. */
+export async function runBaselineRagCore(input: BaselineRagInput): Promise<BaselineRagCoreResult> {
   const { query, userContext, priorMessages = [], retrievalLimit = 5 } = input;
   const reranker = input.reranker ?? defaultScoreReranker;
   const startMs = Date.now();
@@ -83,48 +81,6 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
     permissionLevel: userContext.permissionLevel,
   });
 
-  const finish = async (
-    payload: BaselineRagResult,
-    log?: { safety?: boolean }
-  ): Promise<BaselineRagResult> => {
-    if (log?.safety) {
-      logError("baseline_rag.safety_handoff", new Error("mandatory safety handoff"), {
-        userId: userContext.userId,
-      });
-    }
-    try {
-      await insertRagAuditLog({
-        query,
-        userId: userContext.userId,
-        retrievedChunkIds: payload.retrievedChunks.map((c) => c.id),
-        latencyMs: Date.now() - startMs,
-      });
-    } catch (err) {
-      logError("baseline_rag.audit_log_insert_failed", err, { userId: userContext.userId });
-    }
-    trace.endRoot({
-      answer: payload.answer,
-      chunkIds: payload.retrievedChunks.map((c) => c.id),
-      latencyMs: payload.latencyMs,
-    });
-    return payload;
-  };
-
-
-  if (containsMandatoryHandoffSignals(query)) {
-    const emptyDls = computeDls(userContext, []);
-    return finish(
-      {
-        answer: MANDATORY_HANDOFF_RESPONSE_HE,
-        retrievedChunks: [],
-        dls: emptyDls,
-        latencyMs: Date.now() - startMs,
-      },
-      { safety: true }
-    );
-  }
-
-  // DLS experiment: unrestricted retrieval (service-role bypasses RLS) before RBAC filtering.
   const fused = await querySimilarDocumentsBypassRls(query, {
     limit: DEFAULT_RETRIEVAL_OVERFETCH,
     overfetch: DEFAULT_RETRIEVAL_OVERFETCH,
@@ -133,6 +89,7 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
     chunkIds: fused.map((d) => d.id),
     fusedCount: fused.length,
   });
+
   const rerankedAll = await reranker.rerank(query, toCandidates(fused), retrievalLimit);
   trace.rerankSpan.end({ chunkIds: rerankedAll.map((d) => d.id) });
 
@@ -169,11 +126,11 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
         `The user is a ${roleName}. ${roleDescription}`,
         "",
         "Strict Guidelines:",
-        "1. Length Control: The total length MUST be between 150 and 215 words.",
+        "1. Length Control: The total length MUST be between 150 and 250 words.",
         "2. Tone & Language: Respond ONLY in Hebrew. Maintain an empathetic, professional, and educational tone.",
         "3. Privacy: NEVER identify real students, share names, or rank children.",
         "4. Structure & Scannability: Break the text into 2 short paragraphs with line breaks. Use bullet points (•) or numbered lists for actionable steps.",
-        "IMPORTANT FORMATTING RULE: Format your response for WhatsApp. Use a single asterisk for bold text (*text*) and NEVER use double asterisks (**text**). Return a detailed response of approximately 215 words.",
+        "IMPORTANT FORMATTING RULE: Format your response for WhatsApp. Use a single asterisk for bold text (*text*) and NEVER use double asterisks (**text**). Return a detailed response of approximately 250 words.",
       ].join("\n"),
     },
     ...conversationContext,
@@ -191,12 +148,35 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
   answer = answer.replace(/\*\*/g, "*");
   genTrace.end({ answer });
 
-  const result: BaselineRagResult = {
+  const latencyMs = Date.now() - startMs;
+  trace.endRoot({
     answer,
-    retrievedChunks,
-    dls,
-    latencyMs: Date.now() - startMs,
-  };
+    chunkIds: retrievedChunks.map((c) => c.id),
+    latencyMs,
+  });
 
-  return finish(result);
+  return { answer, retrievedChunks, dls, latencyMs };
+}
+
+export async function recordBaselineRagMetrics(input: {
+  query: string;
+  userContext: UserContext;
+  result: BaselineRagCoreResult;
+}): Promise<void> {
+  try {
+    await insertRagAuditLog({
+      query: input.query,
+      userId: input.userContext.userId,
+      retrievedChunkIds: input.result.retrievedChunks.map((c) => c.id),
+      latencyMs: input.result.latencyMs,
+    });
+  } catch (err) {
+    logError("baseline_rag.audit_log_insert_failed", err, { userId: input.userContext.userId });
+  }
+}
+
+export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineRagCoreResult> {
+  const result = await runBaselineRagCore(input);
+  await recordBaselineRagMetrics({ query: input.query, userContext: input.userContext, result });
+  return result;
 }

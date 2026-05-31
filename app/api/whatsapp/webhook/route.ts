@@ -1,12 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { runBaselineRag } from "@/lib/agent/baseline";
+import { recordBaselineRagMetrics } from "@/lib/agent/baseline";
+import { processBaselineQuery } from "@/lib/agent/baseline/orchestrator";
 import type { ChatMessage } from "@/lib/agent/state";
 import { appendChatEntries, readChatHistory } from "@/lib/chat/history";
 import { buildBoundedConversationContext, truncateInboundMessage } from "@/lib/chat/context";
 import { lookupUserByPhone, UserRegistryDbError } from "@/lib/auth/userRegistry";
 import { logError, logInfo } from "@/lib/logger";
 import { runAfterResponse } from "@/lib/server/postResponse";
+import {
+  markMessageReadAndTyping,
+  startTypingSession,
+} from "@/lib/whatsapp/messaging";
 import { sendWhatsAppTextMessage } from "@/lib/whatsapp/sendMessage";
 
 export const runtime = "nodejs";
@@ -16,27 +21,40 @@ const UNAUTHORIZED_MESSAGE =
 const FALLBACK_ERROR_MESSAGE =
   "מצטערים, אירעה תקלה בעיבוד ההודעה. אפשר לנסות שוב בעוד רגע.";
 
-interface WhatsAppTextMessageEvent {
+interface WhatsAppTextBody {
+  body?: string;
+}
+
+interface WhatsAppInteractiveReply {
+  type?: string;
+  button_reply?: { id?: string; title?: string };
+}
+
+interface WhatsAppMessageEvent {
   from: string;
   id: string;
-  text?: { body: string };
   type?: string;
+  text?: WhatsAppTextBody;
+  interactive?: WhatsAppInteractiveReply;
 }
 
 interface WhatsAppWebhookPayload {
   entry?: Array<{
     changes?: Array<{
       value?: {
-        messages?: WhatsAppTextMessageEvent[];
+        messaging_product?: string;
+        statuses?: Array<{ id: string; status: string }>;
+        messages?: WhatsAppMessageEvent[];
       };
     }>;
   }>;
 }
 
-interface ParsedTextEvent {
+interface ParsedInboundEvent {
   senderId: string;
   messageBody: string;
   messageId: string | null;
+  buttonId?: string;
 }
 
 const processingMessageIds = new Set<string>();
@@ -74,91 +92,161 @@ function abandonMessageProcessing(messageId: string): void {
   processedMessageIds.delete(messageId);
 }
 
-function parseIncomingTextEvent(payload: WhatsAppWebhookPayload): ParsedTextEvent | null {
+function isStatusOnlyWebhook(payload: WhatsAppWebhookPayload): boolean {
+  const value = payload?.entry?.[0]?.changes?.[0]?.value;
+  if (!value?.statuses?.length) return false;
+  return !value.messages?.length;
+}
+
+function parseInboundEvent(payload: WhatsAppWebhookPayload): ParsedInboundEvent | null {
   const firstMessage = payload?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-  if (!firstMessage) return null;
+  if (!firstMessage?.from) return null;
+
+  const senderId = firstMessage.from;
+  const messageId = firstMessage.id ?? null;
+
+  if (firstMessage.type === "interactive" || firstMessage.interactive?.button_reply) {
+    const buttonId = firstMessage.interactive?.button_reply?.id;
+    const title = firstMessage.interactive?.button_reply?.title ?? "";
+    if (!buttonId) return null;
+    return {
+      senderId,
+      messageId,
+      messageBody: title,
+      buttonId,
+    };
+  }
 
   const isText = firstMessage.type === "text" || !!firstMessage.text?.body;
   if (!isText) return null;
 
-  const senderId = firstMessage.from;
   const messageBody = firstMessage.text?.body;
-  if (!senderId || !messageBody) return null;
+  if (!messageBody) return null;
 
-  return { senderId, messageBody, messageId: firstMessage.id ?? null };
+  return { senderId, messageBody, messageId };
 }
 
-async function processIncomingMessage(event: ParsedTextEvent): Promise<void> {
-  const { senderId, messageId } = event;
-  const messageBody = truncateInboundMessage(event.messageBody);
-  const receivedAt = new Date().toISOString();
-
-  let userContext;
-  try {
-    userContext = await lookupUserByPhone(senderId);
-  } catch (err) {
-    if (err instanceof UserRegistryDbError) {
-      logError("user_registry_db_error", err, { senderId });
-      await sendWhatsAppTextMessage({
-        to: senderId,
-        body: "מצטערים, הייתה תקלה זמנית במערכת. אנא נסה שוב בעוד מספר דקות.",
-      });
-      return;
-    }
-    throw err;
-  }
-  if (!userContext) {
-    await sendWhatsAppTextMessage({ to: senderId, body: UNAUTHORIZED_MESSAGE });
-    return;
-  }
-
+async function persistInboundMessage(
+  senderId: string,
+  messageBody: string,
+  messageId: string | null
+): Promise<void> {
   try {
     await appendChatEntries(senderId, [
       {
         role: "user",
         content: messageBody,
-        timestamp: receivedAt,
+        timestamp: new Date().toISOString(),
         messageId: messageId ?? undefined,
       },
     ]);
   } catch (err) {
     logError("chat_history_inbound_persist_failed", err, { senderId });
   }
+}
 
-  let priorMessages: ChatMessage[] = [];
-  try {
-    const history = await readChatHistory(senderId);
-    const withoutLast = history.entries.slice(0, -1);
-    priorMessages = buildBoundedConversationContext(withoutLast);
-  } catch (err) {
-    logError("chat_history_context_load_failed", err, { senderId });
-  }
-
-  let responseText = FALLBACK_ERROR_MESSAGE;
-  try {
-    const result = await runBaselineRag({
-      query: messageBody,
-      userContext,
-      priorMessages,
-    });
-    responseText = result.answer;
-    await sendWhatsAppTextMessage({ to: senderId, body: responseText });
-  } catch (err) {
-    logError("baseline_rag_or_whatsapp_send_failed", err, { senderId, messageId });
-    try {
-      await sendWhatsAppTextMessage({ to: senderId, body: FALLBACK_ERROR_MESSAGE });
-    } catch (sendErr) {
-      logError("whatsapp_fallback_send_failed", sendErr, { senderId, messageId });
-    }
-    throw err;
-  }
-
+async function persistOutboundMessage(senderId: string, content: string): Promise<void> {
   try {
     await appendChatEntries(senderId, [
-      { role: "assistant", content: responseText, timestamp: new Date().toISOString() },
+      { role: "assistant", content, timestamp: new Date().toISOString() },
     ]);
   } catch (err) {
     logError("chat_history_outbound_persist_failed", err, { senderId });
+  }
+}
+
+async function processIncomingMessage(event: ParsedInboundEvent): Promise<void> {
+  const { senderId, messageId } = event;
+  const messageBody = truncateInboundMessage(event.messageBody);
+
+  if (messageId) {
+    void markMessageReadAndTyping(messageId).catch((err) => {
+      logError("whatsapp_initial_typing_failed", err, { senderId, messageId });
+    });
+  }
+
+  const typingSession = startTypingSession(senderId, messageId);
+
+  try {
+    let userContext;
+    try {
+      userContext = await lookupUserByPhone(senderId);
+    } catch (err) {
+      if (err instanceof UserRegistryDbError) {
+        logError("user_registry_db_error", err, { senderId });
+        await sendWhatsAppTextMessage({
+          to: senderId,
+          body: "מצטערים, הייתה תקלה זמנית במערכת. אנא נסה שוב בעוד מספר דקות.",
+        });
+        return;
+      }
+      throw err;
+    }
+
+    if (!userContext) {
+      await sendWhatsAppTextMessage({ to: senderId, body: UNAUTHORIZED_MESSAGE });
+      return;
+    }
+
+    await persistInboundMessage(senderId, messageBody, messageId);
+
+    let priorMessages: ChatMessage[] = [];
+    try {
+      const history = await readChatHistory(senderId);
+      const withoutLast = history.entries.slice(0, -1);
+      priorMessages = buildBoundedConversationContext(withoutLast);
+    } catch (err) {
+      logError("chat_history_context_load_failed", err, { senderId });
+    }
+
+    let processResult;
+    try {
+      processResult = await processBaselineQuery({
+        senderPhone: senderId,
+        query: messageBody,
+        userContext,
+        priorMessages,
+        buttonId: event.buttonId,
+      });
+    } catch (err) {
+      logError("baseline_process_failed", err, { senderId, messageId });
+      await sendWhatsAppTextMessage({ to: senderId, body: FALLBACK_ERROR_MESSAGE });
+      throw err;
+    }
+
+    if (processResult.kind === "interactive_sent") {
+      return;
+    }
+
+    const outbound =
+      processResult.kind === "already_sent_prompt"
+        ? processResult.answer
+        : processResult.answer || FALLBACK_ERROR_MESSAGE;
+
+    if (outbound) {
+      try {
+        await sendWhatsAppTextMessage({ to: senderId, body: outbound });
+      } catch (err) {
+        logError("whatsapp_reply_send_failed", err, { senderId, messageId });
+        throw err;
+      }
+
+      if (processResult.ragMetrics) {
+        try {
+          await recordBaselineRagMetrics({
+            query: messageBody,
+            userContext,
+            result: processResult.ragMetrics,
+          });
+        } catch (err) {
+          logError("baseline_post_send_metrics_failed", err, { senderId });
+        }
+      }
+
+      await persistOutboundMessage(senderId, outbound);
+    }
+  } finally {
+    typingSession.stop();
   }
 }
 
@@ -185,9 +273,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: true, ignored: "מטען JSON לא תקין." }, { status: 200 });
   }
 
-  const event = parseIncomingTextEvent(body);
+  if (isStatusOnlyWebhook(body)) {
+    return NextResponse.json({ ok: true, ignored: "status_update" }, { status: 200 });
+  }
+
+  const event = parseInboundEvent(body);
   if (!event) {
-    return NextResponse.json({ ok: true, ignored: "לא נמצאה הודעת טקסט נתמכת במטען." }, { status: 200 });
+    return NextResponse.json({ ok: true, ignored: "לא נמצאה הודעה נתמכת במטען." }, { status: 200 });
   }
 
   if (event.messageId) {
