@@ -39,8 +39,7 @@ export class GeminiAdapter implements LlmAdapter {
     if (!apiKey) {
       throw new Error("Missing GEMINI_API_KEY environment variable.");
     }
-
-    const model = input.model ?? process.env.GEMINI_MODEL ?? "gemini-2.0-flash";
+    const model = input.model ?? process.env.GEMINI_MODEL ?? "gemini-3.5-flash";
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
     const { systemInstruction, contents } = buildGeminiContents(input);

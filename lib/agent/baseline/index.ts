@@ -173,6 +173,7 @@ Strict Guidelines:
 1. Tone & Language: Respond ONLY in Hebrew. Maintain an empathetic, professional, and educational tone.
 2. Privacy: NEVER identify real students, share names, or rank children.
 3. Structure & Scannability: Break the text into 2 short paragraphs with line breaks. Use bullet points (•) or numbered lists for actionable steps.
+IMPORTANT FORMATTING RULE: Format your response for WhatsApp. Use a single asterisk for bold text (*text*) and NEVER use double asterisks (**text**).
 `
       ].join("\n"),
     },
@@ -188,7 +189,7 @@ Strict Guidelines:
     messages: llmMessages,
     temperature: 0.3, 
   });
-    
+  answer = answer.replace(/\*\*/g, "*");
   genTrace.end({ answer });
 
   const result: BaselineRagResult = {

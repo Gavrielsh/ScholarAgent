@@ -6,7 +6,7 @@ import type { ChatMessage } from "@/lib/agent/state";
 import { appendChatEntries, readChatHistory } from "@/lib/chat/history";
 import { buildBoundedConversationContext, truncateInboundMessage } from "@/lib/chat/context";
 import { lookupUserByPhone, UserRegistryDbError } from "@/lib/auth/userRegistry";
-import { logError } from "@/lib/logger";
+import { logError, logInfo } from "@/lib/logger";
 import { runAfterResponse } from "@/lib/server/postResponse";
 import { sendWhatsAppTextMessage } from "@/lib/whatsapp/sendMessage";
 
@@ -39,7 +39,35 @@ interface ParsedTextEvent {
   messageId: string | null;
 }
 
-const activeMessagesCache = new Set<string>();
+const processingMessageIds = new Set<string>();
+const processedMessageIds = new Map<string, number>();
+const IDEMPOTENCY_TTL_MS = 30 * 60 * 1000;
+
+function pruneProcessedMessageCache(nowMs: number): void {
+  for (const [messageId, expiresAt] of processedMessageIds.entries()) {
+    if (expiresAt <= nowMs) {
+      processedMessageIds.delete(messageId);
+    }
+  }
+}
+
+function beginMessageProcessing(messageId: string): boolean {
+  const now = Date.now();
+  pruneProcessedMessageCache(now);
+  if (processingMessageIds.has(messageId)) return false;
+  if ((processedMessageIds.get(messageId) ?? 0) > now) return false;
+  processingMessageIds.add(messageId);
+  return true;
+}
+
+function markMessageProcessed(messageId: string): void {
+  processingMessageIds.delete(messageId);
+  processedMessageIds.set(messageId, Date.now() + IDEMPOTENCY_TTL_MS);
+}
+
+function clearMessageProcessing(messageId: string): void {
+  processingMessageIds.delete(messageId);
+}
 
 function parseIncomingTextEvent(payload: WhatsAppWebhookPayload): ParsedTextEvent | null {
   const firstMessage = payload?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
@@ -172,18 +200,32 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   if (event.messageId) {
-    if (activeMessagesCache.has(event.messageId)) {
-      console.log(`[DEDUPLICATION] Skipping duplicate WhatsApp request for messageId: ${event.messageId}`);
+    if (!beginMessageProcessing(event.messageId)) {
+      logInfo("whatsapp_webhook_duplicate_ignored", "Duplicate message skipped by idempotency guard.", {
+        messageId: event.messageId,
+      });
       return NextResponse.json({ ok: true, status: "duplicate_ignored" }, { status: 200 });
     }
-    
-    activeMessagesCache.add(event.messageId);
-    setTimeout(() => {
-      activeMessagesCache.delete(event.messageId!);
-    }, 5 * 60 * 1000);
   }
 
-  await runAfterResponse(() => processIncomingMessage(event));
+  runAfterResponse(async () => {
+    try {
+      await processIncomingMessage(event);
+      if (event.messageId) {
+        markMessageProcessed(event.messageId);
+      }
+    } catch (err) {
+      if (event.messageId) {
+        clearMessageProcessing(event.messageId);
+      }
+      throw err;
+    }
+  }).catch((err) => {
+    logError("whatsapp_webhook_background_schedule_failed", err, {
+      messageId: event.messageId ?? null,
+      senderId: event.senderId,
+    });
+  });
 
   return NextResponse.json({ ok: true }, { status: 200 });
 }

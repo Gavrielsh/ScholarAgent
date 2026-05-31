@@ -14,6 +14,7 @@ const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 5;
 const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 8_000;
+const RTL_MARK = "\u200F";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -29,6 +30,13 @@ function backoffDelayMs(attempt: number, retryAfterHeader: string | null): numbe
   const exponential = BASE_DELAY_MS * 2 ** attempt;
   const jitter = Math.floor(Math.random() * 250);
   return Math.min(exponential + jitter, MAX_DELAY_MS);
+}
+
+function ensureRtl(text: string): string {
+  const nonWhitespaceStart = text.trimStart();
+  if (!nonWhitespaceStart) return text;
+  if (nonWhitespaceStart.startsWith(RTL_MARK)) return text;
+  return `${RTL_MARK}${text}`;
 }
 
 /** Validates WhatsApp Cloud API credentials before any outbound request. */
@@ -53,11 +61,12 @@ export function getWhatsAppConfig(): WhatsAppConfig {
 export async function sendWhatsAppTextMessage(input: SendWhatsAppTextInput): Promise<void> {
   const { accessToken, phoneNumberId } = getWhatsAppConfig();
   const endpoint = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
+  const rtlBody = ensureRtl(input.body);
   const payload = JSON.stringify({
     messaging_product: "whatsapp",
     to: input.to,
     type: "text",
-    text: { body: input.body },
+    text: { body: rtlBody },
   });
 
   let lastError: Error | null = null;

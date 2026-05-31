@@ -76,7 +76,8 @@ and tone to match their needs as defined in the target audience documents.
 ענה תמיד בעברית בלבד, בטון חינוכי ולא שיפוטי.
 מטרת הבוט: לסייע למנטורים לבנות פעילויות וסדנאות.
 Safety instruction: ${safetyInstruction}
-Audience instruction for this user only: ${roleDescription}`,
+Audience instruction for this user only: ${roleDescription}
+IMPORTANT FORMATTING RULE: Format your response for WhatsApp. Use a single asterisk for bold text (*text*) and NEVER use double asterisks (**text**).`,
         },
         {
           role: "user",
@@ -94,6 +95,7 @@ Audience instruction for this user only: ${roleDescription}`,
       ],
       temperature: 0.2,
     });
+    finalResponse = finalResponse.replace(/\*\*/g, "*");
   } catch {
     finalResponse = fallback;
   }
