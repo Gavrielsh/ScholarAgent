@@ -1,5 +1,3 @@
-import type { AgentGraphState, IntentCategory } from "@/lib/agent/state";
-
 // Fast lexical screens before retrieval. Deterministic handoff and privacy
 // guardrails keep the bot in its educational, non-identifying scope.
 
@@ -103,6 +101,8 @@ const EDUCATIONAL_SCOPE_PATTERNS: RegExp[] = [
   /\bprevention\b/i,
 ];
 
+export type IntentCategory = "VALID_EDUCATIONAL" | "BORDERLINE" | "PROBLEMATIC";
+
 const AMBIGUOUS_REFERENCE_PATTERNS: RegExp[] = [
   /המקרה\s+הזה/i,
   /הילד\s+הזה/i,
@@ -139,15 +139,6 @@ export const MANDATORY_HANDOFF_RESPONSE_HE =
 
 function hasAny(patterns: RegExp[], text: string): boolean {
   return patterns.some((pattern) => pattern.test(text));
-}
-
-function latestUserMessage(messages: AgentGraphState["messages"]): string {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index].role === "user") {
-      return messages[index].content;
-    }
-  }
-  return "";
 }
 
 function buildSafeRewrite(text: string): string | null {
@@ -244,16 +235,3 @@ export function classifySafetySignals(text: string): SafetySignals {
   };
 }
 
-export async function safetySignalsNode(
-  state: AgentGraphState
-): Promise<Partial<AgentGraphState>> {
-  const latestMessage = latestUserMessage(state.messages);
-  const signals = classifySafetySignals(latestMessage);
-
-  return {
-    safetyRiskScore: signals.safetyRiskScore,
-    intentCategory: signals.intentCategory,
-    rewrittenQuery: signals.rewrittenQuery,
-    final_response: signals.finalResponse,
-  };
-}

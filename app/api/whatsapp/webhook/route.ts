@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { runBaselineRag } from "@/lib/agent/baseline";
-import { runAgentWorkflow } from "@/lib/agent/graph";
 import type { ChatMessage } from "@/lib/agent/state";
 import { appendChatEntries, readChatHistory } from "@/lib/chat/history";
 import { buildBoundedConversationContext, truncateInboundMessage } from "@/lib/chat/context";
@@ -12,9 +11,10 @@ import { sendWhatsAppTextMessage } from "@/lib/whatsapp/sendMessage";
 
 export const runtime = "nodejs";
 
-const RAG_MODE = (process.env.RAG_MODE ?? "baseline").toLowerCase();
 const UNAUTHORIZED_MESSAGE =
   "המספר אינו מזוהה במערכת. יש לפנות לאחד האחראים כדי להסדיר את הגישה.";
+const FALLBACK_ERROR_MESSAGE =
+  "מצטערים, אירעה תקלה בעיבוד ההודעה. אפשר לנסות שוב בעוד רגע.";
 
 interface WhatsAppTextMessageEvent {
   from: string;
@@ -42,8 +42,9 @@ interface ParsedTextEvent {
 const processingMessageIds = new Set<string>();
 const processedMessageIds = new Map<string, number>();
 const IDEMPOTENCY_TTL_MS = 30 * 60 * 1000;
+const CACHE_PRUNE_INTERVAL_MS = 15 * 60 * 1000;
 
-function pruneProcessedMessageCache(nowMs: number): void {
+function pruneProcessedMessageCache(nowMs = Date.now()): void {
   for (const [messageId, expiresAt] of processedMessageIds.entries()) {
     if (expiresAt <= nowMs) {
       processedMessageIds.delete(messageId);
@@ -51,9 +52,12 @@ function pruneProcessedMessageCache(nowMs: number): void {
   }
 }
 
+if (typeof setInterval !== "undefined") {
+  setInterval(() => pruneProcessedMessageCache(), CACHE_PRUNE_INTERVAL_MS);
+}
+
 function beginMessageProcessing(messageId: string): boolean {
   const now = Date.now();
-  pruneProcessedMessageCache(now);
   if (processingMessageIds.has(messageId)) return false;
   if ((processedMessageIds.get(messageId) ?? 0) > now) return false;
   processingMessageIds.add(messageId);
@@ -65,8 +69,9 @@ function markMessageProcessed(messageId: string): void {
   processedMessageIds.set(messageId, Date.now() + IDEMPOTENCY_TTL_MS);
 }
 
-function clearMessageProcessing(messageId: string): void {
+function abandonMessageProcessing(messageId: string): void {
   processingMessageIds.delete(messageId);
+  processedMessageIds.delete(messageId);
 }
 
 function parseIncomingTextEvent(payload: WhatsAppWebhookPayload): ParsedTextEvent | null {
@@ -129,37 +134,23 @@ async function processIncomingMessage(event: ParsedTextEvent): Promise<void> {
     logError("chat_history_context_load_failed", err, { senderId });
   }
 
-  let responseText: string;
+  let responseText = FALLBACK_ERROR_MESSAGE;
   try {
-    if (RAG_MODE === "agentic") {
-      const result = await runAgentWorkflow({
-        senderId,
-        mission: messageBody,
-        incomingMessage: messageBody,
-        userContext,
-        priorMessages,
-      });
-      responseText = String(
-        result.final_response ??
-          "קיבלתי את ההודעה שלך, ואני צריך עוד רגע כדי לספק תשובה מלאה יותר."
-      );
-    } else {
-      const result = await runBaselineRag({
-        query: messageBody,
-        userContext,
-        priorMessages,
-      });
-      responseText = result.answer;
-    }
-  } catch (err) {
-    logError("rag_workflow_failed", err, { senderId, ragMode: RAG_MODE });
-    responseText = "מצטערים, אירעה תקלה בעיבוד ההודעה. אפשר לנסות שוב בעוד רגע.";
-  }
-
-  try {
+    const result = await runBaselineRag({
+      query: messageBody,
+      userContext,
+      priorMessages,
+    });
+    responseText = result.answer;
     await sendWhatsAppTextMessage({ to: senderId, body: responseText });
   } catch (err) {
-    logError("whatsapp_reply_send_failed", err, { senderId });
+    logError("baseline_rag_or_whatsapp_send_failed", err, { senderId, messageId });
+    try {
+      await sendWhatsAppTextMessage({ to: senderId, body: FALLBACK_ERROR_MESSAGE });
+    } catch (sendErr) {
+      logError("whatsapp_fallback_send_failed", sendErr, { senderId, messageId });
+    }
+    throw err;
   }
 
   try {
@@ -216,11 +207,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       }
     } catch (err) {
       if (event.messageId) {
-        clearMessageProcessing(event.messageId);
+        abandonMessageProcessing(event.messageId);
       }
-      throw err;
+      logError("whatsapp_webhook_background_task_failed", err, {
+        messageId: event.messageId ?? null,
+        senderId: event.senderId,
+      });
     }
   }).catch((err) => {
+    if (event.messageId) {
+      abandonMessageProcessing(event.messageId);
+    }
     logError("whatsapp_webhook_background_schedule_failed", err, {
       messageId: event.messageId ?? null,
       senderId: event.senderId,

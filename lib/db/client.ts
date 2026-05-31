@@ -4,6 +4,7 @@ import type { PermissionLevel } from "@/lib/auth/types";
 import { logError } from "@/lib/logger";
 
 let pool: Pool | null = null;
+let servicePool: Pool | null = null;
 
 function createPool(): Pool {
   const connectionString = process.env.DATABASE_URL;
@@ -31,6 +32,32 @@ function createPool(): Pool {
   return instance;
 }
 
+function createServicePool(): Pool {
+  const connectionString = process.env.DATABASE_SERVICE_URL?.trim() || process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error("Missing DATABASE_SERVICE_URL or DATABASE_URL for service-role access.");
+  }
+
+  const instance = new Pool({
+    connectionString,
+    max: Number(process.env.PG_SERVICE_POOL_MAX ?? 3),
+    min: Number(process.env.PG_SERVICE_POOL_MIN ?? 0),
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 5_000,
+    ssl: process.env.PG_SSLMODE === "disable" ? false : { rejectUnauthorized: false },
+    keepAlive: true,
+    allowExitOnIdle: true,
+  });
+
+  instance.on("error", (err) => {
+    logError("postgres_service_pool_idle_client_error", err, {
+      hint: "Service-role pooled client disconnected.",
+    });
+  });
+
+  return instance;
+}
+
 /** Lazily initialized singleton pool — safe for serverless warm instances. */
 export function getPool(): Pool {
   if (!pool) {
@@ -40,22 +67,46 @@ export function getPool(): Pool {
 }
 
 /**
+ * Pool for DLS evaluation and other admin paths. Uses DATABASE_SERVICE_URL when set
+ * (role should bypass RLS or own the table); otherwise falls back to DATABASE_URL.
+ */
+export function getServicePool(): Pool {
+  if (!servicePool) {
+    servicePool = createServicePool();
+  }
+  return servicePool;
+}
+
+/**
  * Runs a callback with a checked-out client. Always releases the client in `finally`,
  * including on connection errors, to avoid pool starvation.
  */
-export async function withClient<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+async function withPoolClient<T>(
+  poolInstance: Pool,
+  event: string,
+  fn: (client: PoolClient) => Promise<T>
+): Promise<T> {
   let client: PoolClient | null = null;
   try {
-    client = await getPool().connect();
+    client = await poolInstance.connect();
     return await fn(client);
   } catch (err) {
-    logError("postgres_with_client_error", err);
+    logError(event, err);
     throw err;
   } finally {
     if (client) {
       client.release();
     }
   }
+}
+
+export async function withClient<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  return withPoolClient(getPool(), "postgres_with_client_error", fn);
+}
+
+/** Service-role client — no RLS session variables; used for unrestricted retrieval (DLS). */
+export async function withServiceClient<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  return withPoolClient(getServicePool(), "postgres_with_service_client_error", fn);
 }
 
 export async function withRlsTransaction<T>(
@@ -103,6 +154,16 @@ export async function closePool(): Promise<void> {
       throw err;
     } finally {
       pool = null;
+    }
+  }
+  if (servicePool) {
+    try {
+      await servicePool.end();
+    } catch (err) {
+      logError("postgres_service_pool_close_error", err);
+      throw err;
+    } finally {
+      servicePool = null;
     }
   }
 }

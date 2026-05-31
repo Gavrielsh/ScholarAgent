@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
-import { withClient, withRlsTransaction } from "@/lib/db/client";
+import { withClient, withRlsTransaction, withServiceClient } from "@/lib/db/client";
+import type { PoolClient } from "pg";
 import type { PermissionLevel } from "@/lib/auth/types";
 import { embedText, embedTextBatch } from "@/lib/ingestion/embeddings";
 import { logWarn } from "@/lib/logger";
@@ -298,23 +299,12 @@ function reciprocalRankFusion(
     .map(({ doc, rrf }) => ({ ...doc, rrfScore: rrf }));
 }
 
-// RLS-aware hybrid retrieval: dense HNSW + BM25 (tsvector), fused with RRF.
-export async function querySimilarDocuments(
+async function executeHybridRetrieval(
+  client: PoolClient,
   queryText: string,
-  permissionLevel: PermissionLevel,
-  options?: number | QuerySimilarOptions
+  vectorLiteral: string,
+  opts: Required<QuerySimilarOptions>
 ): Promise<SimilarDocument[]> {
-  const opts = normalizeQueryOptions(options);
-  if (!queryText.trim()) {
-    return [];
-  }
-
-  const queryEmbedding = await embedText(queryText);
-  if (queryEmbedding.length === 0) {
-    return [];
-  }
-
-  const vectorLiteral = toVectorLiteral(queryEmbedding);
   const overfetch = opts.overfetch;
 
   const vectorSql = `
@@ -334,35 +324,79 @@ export async function querySimilarDocuments(
     LIMIT $2;
   `;
 
-  const fused = await withRlsTransaction(permissionLevel, async (client) => {
-    const vecRes = await client.query<RetrievedRow>(vectorSql, [vectorLiteral, overfetch]);
-    const vectorRows = vecRes.rows.map(mapRow);
+  const vecRes = await client.query<RetrievedRow>(vectorSql, [vectorLiteral, overfetch]);
+  const vectorRows = vecRes.rows.map(mapRow);
 
-    let bm25Rows: SimilarDocument[] = [];
-    try {
-      const bmRes = await client.query<RetrievedRow>(bm25Sql, [queryText, overfetch]);
-      bm25Rows = bmRes.rows.map(mapRow);
-    } catch (err) {
-      // Older DBs without content_tsv / GIN — fall back to dense-only.
-      logWarn(
-        "retrieval_bm25_leg_skipped",
-        err instanceof Error ? err.message : String(err),
-        {
-          sqlPreview: bm25Sql.slice(0, 120),
-          stack: err instanceof Error ? err.stack : undefined,
-        }
-      );
-    }
+  let bm25Rows: SimilarDocument[] = [];
+  try {
+    const bmRes = await client.query<RetrievedRow>(bm25Sql, [queryText, overfetch]);
+    bm25Rows = bmRes.rows.map(mapRow);
+  } catch (err) {
+    logWarn(
+      "retrieval_bm25_leg_skipped",
+      err instanceof Error ? err.message : String(err),
+      {
+        sqlPreview: bm25Sql.slice(0, 120),
+        stack: err instanceof Error ? err.stack : undefined,
+      }
+    );
+  }
 
-    if (bm25Rows.length === 0) {
-      return vectorRows.slice(0, opts.limit);
-    }
+  if (bm25Rows.length === 0) {
+    return vectorRows.slice(0, opts.limit);
+  }
 
-    const merged = reciprocalRankFusion(vectorRows, bm25Rows, opts.rrfK);
-    return merged.slice(0, opts.limit);
-  });
+  const merged = reciprocalRankFusion(vectorRows, bm25Rows, opts.rrfK);
+  return merged.slice(0, opts.limit);
+}
 
-  return fused;
+async function prepareHybridRetrieval(
+  queryText: string,
+  options?: number | QuerySimilarOptions
+): Promise<{ vectorLiteral: string; opts: Required<QuerySimilarOptions> } | null> {
+  const opts = normalizeQueryOptions(options);
+  if (!queryText.trim()) {
+    return null;
+  }
+
+  const queryEmbedding = await embedText(queryText);
+  if (queryEmbedding.length === 0) {
+    return null;
+  }
+
+  return { vectorLiteral: toVectorLiteral(queryEmbedding), opts };
+}
+
+/** RLS-scoped hybrid retrieval for user-facing access paths. */
+export async function querySimilarDocuments(
+  queryText: string,
+  permissionLevel: PermissionLevel,
+  options?: number | QuerySimilarOptions
+): Promise<SimilarDocument[]> {
+  const prepared = await prepareHybridRetrieval(queryText, options);
+  if (!prepared) return [];
+
+  const { vectorLiteral, opts } = prepared;
+  return withRlsTransaction(permissionLevel, (client) =>
+    executeHybridRetrieval(client, queryText, vectorLiteral, opts)
+  );
+}
+
+/**
+ * Unrestricted hybrid retrieval for DLS evaluation (service-role / RLS bypass).
+ * Returns chunks across all classification levels so leakage can be measured.
+ */
+export async function querySimilarDocumentsBypassRls(
+  queryText: string,
+  options?: number | QuerySimilarOptions
+): Promise<SimilarDocument[]> {
+  const prepared = await prepareHybridRetrieval(queryText, options);
+  if (!prepared) return [];
+
+  const { vectorLiteral, opts } = prepared;
+  return withServiceClient((client) =>
+    executeHybridRetrieval(client, queryText, vectorLiteral, opts)
+  );
 }
 
 /**

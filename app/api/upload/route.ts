@@ -19,7 +19,7 @@ const ALLOWED_MIME_TYPES = new Set<string>([
 // Only Manager (L1) and Admin (L0) may upload knowledge into the corpus.
 const MIN_UPLOAD_LEVEL: PermissionLevel = 1;
 
-const VALID_CLASSIFICATION_LEVELS: ReadonlySet<number> = new Set([0, 1, 2, 3, 4]);
+const VALID_CLASSIFICATION_LEVELS: ReadonlySet<number> = new Set([0, 1, 2, 3]);
 
 function jsonError(status: number, message: string, extra?: Record<string, unknown>) {
   return NextResponse.json({ ok: false, error: message, ...extra }, { status });
@@ -69,7 +69,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   ) {
     return jsonError(
       400,
-      `classificationLevel לא תקין: "${classificationRaw}". הערכים המותרים הם 0–4.`
+      `classificationLevel לא תקין: "${classificationRaw}". הערכים המותרים הם 0–3.`
     );
   }
 

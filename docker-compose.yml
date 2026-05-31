@@ -35,7 +35,6 @@ services:
       PG_SSLMODE: disable
       PG_POOL_MAX: "10"
       PG_POOL_MIN: "1"
-      RAG_MODE: baseline
       LLM_PROVIDER: mock
       WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-dev-verify-token}
       WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}

@@ -1,15 +1,20 @@
 // Baseline RAG — control configuration for comparative evaluation (proposal §6.2).
 // Retrieve -> optional cross-encoder re-rank -> single LLM call. No LangGraph planner loop.
-
 import type { PermissionLevel, UserContext } from "@/lib/auth/types";
 import { ROLE_DESCRIPTIONS } from "@/lib/auth/types";
+import { filterAuthorizedChunks } from "@/lib/auth/rbac";
 import type { ChatMessage } from "@/lib/agent/state";
 import { insertRagAuditLog } from "@/lib/db/auditLogs";
-import { DEFAULT_RETRIEVAL_OVERFETCH, querySimilarDocuments, type SimilarDocument } from "@/lib/db/pgvector";
+import {
+  DEFAULT_RETRIEVAL_OVERFETCH,
+  querySimilarDocumentsBypassRls,
+  type SimilarDocument,
+} from "@/lib/db/pgvector";
 import { getLlmAdapter } from "@/lib/llm/adapter";
 import { computeDls, type DlsResult } from "@/lib/metrics/dls";
 import type { KnowledgeChunk } from "@/lib/auth/types";
 import type { LlmMessage } from "@/lib/llm/types";
+import { logError } from "@/lib/logger";
 import { defaultScoreReranker, type DocumentReranker, type RerankCandidate } from "@/lib/agent/baseline/reranker";
 import {
   containsMandatoryHandoffSignals,
@@ -46,9 +51,6 @@ export interface BaselineRagResult {
   latencyMs: number;
 }
 
-const PROMPT_INJECTION_RESPONSE_HE =
-  "לא ניתן לעבד את הבקשה מטעמי בטיחות. נסו להסיר הוראות מערכת או ניסיונות שינוי התנהגות.";
-
 function toCandidates(docs: SimilarDocument[]): RerankCandidate[] {
   return docs.map((d) => ({
     id: d.id,
@@ -83,13 +85,12 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
 
   const finish = async (
     payload: BaselineRagResult,
-    log?: { safety?: boolean; injection?: boolean }
+    log?: { safety?: boolean }
   ): Promise<BaselineRagResult> => {
     if (log?.safety) {
-      console.error("baseline_rag.safety_handoff", { userId: userContext.userId });
-    }
-    if (log?.injection) {
-      console.error("baseline_rag.prompt_injection_blocked", { userId: userContext.userId });
+      logError("baseline_rag.safety_handoff", new Error("mandatory safety handoff"), {
+        userId: userContext.userId,
+      });
     }
     try {
       await insertRagAuditLog({
@@ -99,7 +100,7 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
         latencyMs: Date.now() - startMs,
       });
     } catch (err) {
-      console.error("audit_logs insert failed:", err);
+      logError("baseline_rag.audit_log_insert_failed", err, { userId: userContext.userId });
     }
     trace.endRoot({
       answer: payload.answer,
@@ -123,7 +124,8 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
     );
   }
 
-  const fused = await querySimilarDocuments(query, userContext.permissionLevel, {
+  // DLS experiment: unrestricted retrieval (service-role bypasses RLS) before RBAC filtering.
+  const fused = await querySimilarDocumentsBypassRls(query, {
     limit: DEFAULT_RETRIEVAL_OVERFETCH,
     overfetch: DEFAULT_RETRIEVAL_OVERFETCH,
   });
@@ -131,22 +133,21 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
     chunkIds: fused.map((d) => d.id),
     fusedCount: fused.length,
   });
+  const rerankedAll = await reranker.rerank(query, toCandidates(fused), retrievalLimit);
+  trace.rerankSpan.end({ chunkIds: rerankedAll.map((d) => d.id) });
 
-  const reranked = await reranker.rerank(query, toCandidates(fused), retrievalLimit);
-  trace.rerankSpan.end({ chunkIds: reranked.map((d) => d.id) });
-
-  const retrievedChunks = fromCandidates(reranked);
-  
-  const chunksForDls: KnowledgeChunk[] = reranked.map((d) => ({
+  const retrievedChunks = fromCandidates(rerankedAll);
+  const chunksForDls: KnowledgeChunk[] = rerankedAll.map((d) => ({
     id: d.id,
     content: d.text,
     classificationLevel: d.classificationLevel,
   }));
   const dls = computeDls(userContext, chunksForDls);
 
+  const authorizedChunks = filterAuthorizedChunks(userContext, chunksForDls);
   const contextBlock =
-    reranked.length > 0
-      ? reranked.map((d, i) => `[${i + 1}] ${d.text}`).join("\n\n")
+    authorizedChunks.length > 0
+      ? authorizedChunks.map((d, i) => `[${i + 1}] ${d.content}`).join("\n\n")
       : "אין מידע ספציפי במסמכים לשאילתה זו. עליך להסתמך על הידע המקצועי הכללי שלך כאיש חינוך.";
 
   const adapter = getLlmAdapter();
@@ -160,21 +161,19 @@ export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineR
   const roleName = userContext.roleName;
   const roleDescription = ROLE_DESCRIPTIONS[userContext.permissionLevel] || "";
 
-  // Enhanced System Prompt focusing on structural line breaks and 200 words target length
   const llmMessages: LlmMessage[] = [
     {
       role: "system",
       content: [
-`You are an expert mentor in the 'Adam LeAdam Ze Lev' project, assisting mentors with social dilemmas, boycott prevention, and violence reduction. 
-The user is a ${roleName}. ${roleDescription}
-
-Strict Guidelines:
-****. Length Control: Keep the response concise to save tokens. The total length MUST NOT exceed 150 words.
-1. Tone & Language: Respond ONLY in Hebrew. Maintain an empathetic, professional, and educational tone.
-2. Privacy: NEVER identify real students, share names, or rank children.
-3. Structure & Scannability: Break the text into 2 short paragraphs with line breaks. Use bullet points (•) or numbered lists for actionable steps.
-IMPORTANT FORMATTING RULE: Format your response for WhatsApp. Use a single asterisk for bold text (*text*) and NEVER use double asterisks (**text**).
-`
+        `You are an expert mentor in the 'Adam LeAdam Ze Lev' project, assisting mentors with social dilemmas, boycott prevention, and violence reduction.`,
+        `The user is a ${roleName}. ${roleDescription}`,
+        "",
+        "Strict Guidelines:",
+        "1. Length Control: The total length MUST be between 150 and 215 words.",
+        "2. Tone & Language: Respond ONLY in Hebrew. Maintain an empathetic, professional, and educational tone.",
+        "3. Privacy: NEVER identify real students, share names, or rank children.",
+        "4. Structure & Scannability: Break the text into 2 short paragraphs with line breaks. Use bullet points (•) or numbered lists for actionable steps.",
+        "IMPORTANT FORMATTING RULE: Format your response for WhatsApp. Use a single asterisk for bold text (*text*) and NEVER use double asterisks (**text**). Return a detailed response of approximately 215 words.",
       ].join("\n"),
     },
     ...conversationContext,
@@ -187,7 +186,7 @@ IMPORTANT FORMATTING RULE: Format your response for WhatsApp. Use a single aster
   const genTrace = trace.attachLlmGeneration(llmMessages);
   let answer = await adapter.generateText({
     messages: llmMessages,
-    temperature: 0.3, 
+    temperature: 0.3,
   });
   answer = answer.replace(/\*\*/g, "*");
   genTrace.end({ answer });
