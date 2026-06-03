@@ -5,10 +5,15 @@ export interface SendWhatsAppTextInput {
   body: string;
 }
 
-interface WhatsAppConfig {
+export interface WhatsAppConfig {
   accessToken: string;
   phoneNumberId: string;
+  apiBaseUrl: string;
+  apiVersion: string;
 }
+
+const DEFAULT_API_BASE_URL = "https://graph.facebook.com";
+const DEFAULT_API_VERSION = "v20.0";
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 5;
@@ -39,10 +44,26 @@ function ensureRtl(text: string): string {
   return `${RTL_MARK}${text}`;
 }
 
-/** Validates WhatsApp Cloud API credentials before any outbound request. */
+function normalizeApiBaseUrl(value: string | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed) return DEFAULT_API_BASE_URL;
+  return trimmed.replace(/\/+$/, "");
+}
+
+function normalizeApiVersion(value: string | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed) return DEFAULT_API_VERSION;
+  return trimmed.startsWith("v") ? trimmed : `v${trimmed}`;
+}
+
+/** Validates WhatsApp Cloud API credentials and endpoint settings before any outbound request. */
 export function getWhatsAppConfig(): WhatsAppConfig {
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN?.trim();
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID?.trim();
+  const apiBaseUrl = normalizeApiBaseUrl(process.env.WHATSAPP_API_BASE_URL);
+  const apiVersion = normalizeApiVersion(
+    process.env.WHATSAPP_API_VERSION ?? process.env.WHATSAPP_GRAPH_API_VERSION
+  );
 
   if (!accessToken) {
     throw new Error(
@@ -55,12 +76,16 @@ export function getWhatsAppConfig(): WhatsAppConfig {
     );
   }
 
-  return { accessToken, phoneNumberId };
+  return { accessToken, phoneNumberId, apiBaseUrl, apiVersion };
+}
+
+export function buildWhatsAppMessagesEndpoint(config: WhatsAppConfig): string {
+  return `${config.apiBaseUrl}/${config.apiVersion}/${config.phoneNumberId}/messages`;
 }
 
 export async function sendWhatsAppTextMessage(input: SendWhatsAppTextInput): Promise<void> {
-  const { accessToken, phoneNumberId } = getWhatsAppConfig();
-  const endpoint = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
+  const config = getWhatsAppConfig();
+  const endpoint = buildWhatsAppMessagesEndpoint(config);
   const rtlBody = ensureRtl(input.body);
   const payload = JSON.stringify({
     messaging_product: "whatsapp",
@@ -76,7 +101,7 @@ export async function sendWhatsAppTextMessage(input: SendWhatsAppTextInput): Pro
       const response = await fetch(endpoint, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${accessToken}`,
+          Authorization: `Bearer ${config.accessToken}`,
           "Content-Type": "application/json",
         },
         body: payload,

@@ -1,8 +1,10 @@
 import { logError, logWarn } from "@/lib/logger";
 
-import { getWhatsAppConfig } from "@/lib/whatsapp/sendMessage";
+import {
+  buildWhatsAppMessagesEndpoint,
+  getWhatsAppConfig,
+} from "@/lib/whatsapp/sendMessage";
 
-const GRAPH_API_VERSION = process.env.WHATSAPP_GRAPH_API_VERSION ?? "v20.0";
 const TYPING_REFRESH_MS = 20_000;
 const TYPING_MAX_DURATION_MS = 120_000;
 
@@ -13,13 +15,13 @@ interface GraphSendResult {
 }
 
 async function postToWhatsAppMessages(payload: Record<string, unknown>): Promise<GraphSendResult> {
-  const { accessToken, phoneNumberId } = getWhatsAppConfig();
-  const endpoint = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`;
+  const config = getWhatsAppConfig();
+  const endpoint = buildWhatsAppMessagesEndpoint(config);
 
   const response = await fetch(endpoint, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${accessToken}`,
+      Authorization: `Bearer ${config.accessToken}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),

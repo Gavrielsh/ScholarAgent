@@ -130,8 +130,7 @@ export async function runBaselineRagCore(input: BaselineRagInput): Promise<Basel
         "2. Tone & Language: Respond ONLY in Hebrew. Maintain an empathetic, professional, and educational tone.",
         "3. Privacy: NEVER identify real students, share names, or rank children.",
         "4. Structure & Scannability: Break the text into 2 short paragraphs with line breaks. Use bullet points (•) or numbered lists for actionable steps.",
-        "IMPORTANT FORMATTING RULE: Format your response for WhatsApp. Use a single asterisk for bold text (*text*) and NEVER use double asterisks (**text**). Return a detailed response of approximately 250 words.",
-      ].join("\n"),
+        "IMPORTANT FORMATTING RULE: Format your response for WhatsApp. Use a single asterisk for bold text (*text*) and NEVER use double asterisks (**text**). Return a detailed response of approximately 150 - 250 words.",      ].join("\n"),
     },
     ...conversationContext,
     {

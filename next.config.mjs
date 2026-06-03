@@ -3,6 +3,7 @@ const nextConfig = {
   output: "standalone",
   experimental: {
     serverComponentsExternalPackages: ["pg"],
+    instrumentationHook: true,
   },
 };
 
