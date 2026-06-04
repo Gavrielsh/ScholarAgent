@@ -1,10 +1,6 @@
 import { randomUUID } from "node:crypto";
 import mammoth from "mammoth";
 
-// אומרים ל-TypeScript להתעלם משגיאת הטיפוסים של הספרייה המיושנת
-// @ts-ignore
-import pdfParse from "pdf-parse";
-
 import type { PermissionLevel } from "@/lib/auth/types";
 import { upsertDocumentsBatch, type EmbeddingRecord } from "@/lib/db/pgvector";
 import { chunkText } from "@/lib/ingestion/chunker";
@@ -74,38 +70,41 @@ export async function ingestDocument(input: UploadDocumentInput): Promise<Upload
   };
 }
 
+type TextExtractor = (bytes: ArrayBuffer) => Promise<string>;
+
+const EXTRACTORS: Record<string, TextExtractor> = {
+  "text/plain": async (bytes) => new TextDecoder("utf-8").decode(bytes),
+  "text/markdown": async (bytes) => new TextDecoder("utf-8").decode(bytes),
+  "text/csv": async (bytes) => new TextDecoder("utf-8").decode(bytes),
+
+  "application/pdf": async (bytes) => {
+    // pdf-parse v2 exports a PDFParse class — there is no default callable function.
+    // Uint8Array is preferred: TypedArrays are transferred to the pdfjs worker,
+    // reducing main-thread memory pressure.
+    const { PDFParse } = await import("pdf-parse");
+    const parser = new PDFParse({ data: new Uint8Array(bytes) });
+    try {
+      const { text } = await parser.getText();
+      return text ?? "";
+    } finally {
+      // destroy() releases the underlying pdfjs DocumentLoadingTask and worker —
+      // critical when processing many files in a batch to avoid resource leaks.
+      await parser.destroy();
+    }
+  },
+
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+    async (bytes) =>
+      (await mammoth.extractRawText({ buffer: Buffer.from(bytes) })).value ?? "",
+};
+
 export async function extractTextFromUpload(
   bytes: ArrayBuffer,
   mimeType: string
 ): Promise<string> {
-  switch (mimeType) {
-    case "text/plain":
-    case "text/markdown":
-    case "text/csv":
-      return new TextDecoder("utf-8").decode(bytes);
-
-    case "application/pdf":
-      try {
-        const buffer = Buffer.from(bytes);
-        
-        // מוודא שאנחנו תופסים את הפונקציה הנכונה, לא משנה איך המערכת יבאה אותה
-        const parse = typeof pdfParse === 'function' ? pdfParse : (pdfParse as any).default;
-        
-        if (!parse || typeof parse !== 'function') {
-           throw new Error("פונקציית החילוץ לא נמצאה בתוך המודול.");
-        }
-
-        const data = await parse(buffer);
-        return data.text ?? "";
-      } catch (error) {
-        console.error("PDF Parsing Error:", error);
-        throw new Error(`מודול PDF לא נטען כראוי: ${error}`);
-      }
-
-    case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-      return (await mammoth.extractRawText({ buffer: Buffer.from(bytes) })).value ?? "";
-
-    default:
-      throw new Error(`Unsupported MIME type for text extraction: ${mimeType}`);
+  const extractor = EXTRACTORS[mimeType];
+  if (!extractor) {
+    throw new Error(`Unsupported MIME type for text extraction: ${mimeType}`);
   }
+  return extractor(bytes);
 }
