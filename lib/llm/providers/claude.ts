@@ -78,12 +78,17 @@ export class ClaudeAdapter implements LlmAdapter {
       );
     }
 
-    const model =
-      input.model ??
-      process.env.CLAUDE_MODEL?.trim() ??
-      DEFAULT_MODEL;
+    // Resolve the incoming model parameter to an official Anthropic model string
+    let modelRequested = input.model?.trim() ?? process.env.CLAUDE_MODEL?.trim() ?? DEFAULT_MODEL;
 
-    const payload = buildAnthropicPayload(input, model);
+    // Normalize generic aliases used by evaluation runners or configs to official full names
+    if (modelRequested.toLowerCase() === "claude" || modelRequested.toLowerCase() === "claude-3-5-sonnet") {
+      modelRequested = DEFAULT_MODEL;
+    } else if (modelRequested.toLowerCase() === "claude-fast" || modelRequested.toLowerCase() === "claude-3-haiku") {
+      modelRequested = DEFAULT_FAST_MODEL;
+    }
+
+    const payload = buildAnthropicPayload(input, modelRequested);
 
     const response = await fetch(ENDPOINT, {
       method: "POST",

@@ -2,27 +2,27 @@
  * evaluate_runner.ts — ScholarAgent Academic Evaluation Pipeline
  *
  * Executes the Golden Dataset against 4 system configurations:
- *   A — No RLS  (bypass retrieval, all chunks visible to LLM)
- *   B — RLS     (row-level security, only authorised chunks retrieved)
- *   C — Agentic RAG + Claude (Haiku)   (orchestrator, fast/lean Claude model)
- *   D — Agentic RAG + Gemini    (orchestrator, commercial LLM)
+ * A — No RLS  (bypass retrieval, all chunks visible to LLM)
+ * B — RLS     (row-level security, only authorised chunks retrieved)
+ * C — Agentic RAG + Claude (Haiku)   (orchestrator, fast/lean Claude model)
+ * D — Agentic RAG + Gemini    (orchestrator, commercial LLM)
  *
  * For each (record × config) pair the script measures:
- *   · DLS   — Data Leakage Score (%)
- *   · RAGAS — Faithfulness, Answer Relevancy, Context Precision/Recall
- *   · E2E Latency (ms)
+ * · DLS   — Data Leakage Score (%)
+ * · RAGAS — Faithfulness, Answer Relevancy, Context Precision/Recall
+ * · E2E Latency (ms)
  *
  * Concurrency note:
- *   Queries within each phase are processed with a configurable semaphore.
- *   Configs C and D mutate process.env.LLM_PROVIDER; each config phase runs
- *   in full before the next phase begins, so there are no env-var race conditions.
+ * Queries within each phase are processed with a configurable semaphore.
+ * Configs C and D mutate process.env.LLM_PROVIDER; each config phase runs
+ * in full before the next phase begins, so there are no env-var race conditions.
  *
  * Usage:
- *   npm run evaluate
+ * npx tsx scripts/evaluate_runner.ts
  *
  * Output:
- *   · Markdown summary table → stdout
- *   · Granular CSV           → scripts/output/evaluation_results_<TIMESTAMP>.csv
+ * · Markdown summary table → stdout
+ * · Granular CSV           → scripts/output/evaluation_results_<TIMESTAMP>.csv
  */
 
 // ts-node path aliases (tsconfig-paths) must be registered before aliased imports.
@@ -45,6 +45,8 @@ import {
   type SimilarDocument,
 } from "@/lib/db/pgvector";
 import { GOLDEN_DATASET, type EvalRecord, type QueryCategory } from "./data/golden_dataset";
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -52,8 +54,9 @@ import { GOLDEN_DATASET, type EvalRecord, type QueryCategory } from "./data/gold
 
 const RETRIEVAL_LIMIT = 5;
 const RETRIEVAL_OVERFETCH = 50;
-const SEMAPHORE_CONCURRENCY = parseInt(process.env.EVAL_CONCURRENCY ?? "2", 10);
-const INTER_QUERY_DELAY_MS = parseInt(process.env.EVAL_INTER_QUERY_DELAY_MS ?? "500", 10);
+// Fallback to 1 for concurrency and 2000ms delay to prevent LLM API 429 Rate Limits
+const SEMAPHORE_CONCURRENCY = parseInt(process.env.EVAL_CONCURRENCY ?? "1", 10);
+const INTER_QUERY_DELAY_MS = parseInt(process.env.EVAL_INTER_QUERY_DELAY_MS ?? "2000", 10);
 const OUTPUT_DIR = path.join(__dirname, "output");
 
 type ConfigName = "A" | "B" | "C" | "D";

@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import mammoth from "mammoth";
 
+// אומרים ל-TypeScript להתעלם משגיאת הטיפוסים של הספרייה המיושנת
+// @ts-ignore
+import pdfParse from "pdf-parse";
+
 import type { PermissionLevel } from "@/lib/auth/types";
 import { upsertDocumentsBatch, type EmbeddingRecord } from "@/lib/db/pgvector";
 import { chunkText } from "@/lib/ingestion/chunker";
@@ -23,10 +27,6 @@ export interface UploadDocumentResult {
   failures: Array<{ index: number; error: string }>;
 }
 
-// Orchestrates the full ingestion pipeline:
-//   raw text → chunks → embeddings → DB rows (with classification level).
-// Each chunk is inserted as its own knowledge_base row, all sharing a
-// `documentId` in metadata so they can be grouped or deleted together.
 export async function ingestDocument(input: UploadDocumentInput): Promise<UploadDocumentResult> {
   if (!input.text.trim()) {
     throw new Error("Cannot ingest a document with no extractable text.");
@@ -51,8 +51,6 @@ export async function ingestDocument(input: UploadDocumentInput): Promise<Upload
   const records: EmbeddingRecord[] = chunks.map((chunk, i) => ({
     text: chunk.text,
     classificationLevel: input.classificationLevel,
-    // Pass the precomputed vector so upsertDocument skips the redundant
-    // embedText() call — one Gemini API round-trip per chunk instead of two.
     embedding: vectors[i],
     metadata: {
       ...(input.extraMetadata ?? {}),
@@ -76,8 +74,6 @@ export async function ingestDocument(input: UploadDocumentInput): Promise<Upload
   };
 }
 
-// Decodes uploaded file bytes into UTF-8 text. PDF/DOCX extraction is left
-// as a TODO so the basic text/markdown path stays dependency-free.
 export async function extractTextFromUpload(
   bytes: ArrayBuffer,
   mimeType: string
@@ -89,15 +85,21 @@ export async function extractTextFromUpload(
       return new TextDecoder("utf-8").decode(bytes);
 
     case "application/pdf":
-      {
-        const parser = (await import("pdf-parse")) as unknown as {
-          default?: (buf: Buffer) => Promise<{ text?: string }>;
-        };
-        const parsePdf = parser.default;
-        if (!parsePdf) {
-          throw new Error("מודול PDF לא נטען כראוי.");
+      try {
+        const buffer = Buffer.from(bytes);
+        
+        // מוודא שאנחנו תופסים את הפונקציה הנכונה, לא משנה איך המערכת יבאה אותה
+        const parse = typeof pdfParse === 'function' ? pdfParse : (pdfParse as any).default;
+        
+        if (!parse || typeof parse !== 'function') {
+           throw new Error("פונקציית החילוץ לא נמצאה בתוך המודול.");
         }
-        return (await parsePdf(Buffer.from(bytes))).text ?? "";
+
+        const data = await parse(buffer);
+        return data.text ?? "";
+      } catch (error) {
+        console.error("PDF Parsing Error:", error);
+        throw new Error(`מודול PDF לא נטען כראוי: ${error}`);
       }
 
     case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":

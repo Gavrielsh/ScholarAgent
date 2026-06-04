@@ -2,11 +2,14 @@ import fs from "fs/promises";
 import path from "path";
 import { extractTextFromUpload, ingestDocument } from "../lib/ingestion/uploader";
 import { closePool } from "../lib/db/client";
+import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
 
-// הנתיב לתיקייה שבה נמצאים המסמכים שלך (שנה בהתאם לצורך)
-const DIRECTORY = path.join(process.cwd(), "local_data", "documents");
+// Base directory for local documents
+const BASE_DIRECTORY = path.join(process.cwd(), "local_data", "documents");
 
-// פונקציית עזר לזיהוי MIME Type לפי סיומת הקובץ
+// Helper function to identify MIME Type by file extension
 function getMimeType(filename: string): string | null {
   const ext = path.extname(filename).toLowerCase();
   switch (ext) {
@@ -19,51 +22,64 @@ function getMimeType(filename: string): string | null {
   }
 }
 
-async function run() {
-  console.log(`Starting ingestion from directory: ${DIRECTORY}`);
-  
-  try {
-    const files = await fs.readdir(DIRECTORY);
-    
-    for (const file of files) {
-      const filePath = path.join(DIRECTORY, file);
-      const mimeType = getMimeType(file);
+// Recursive function for deep directory scanning
+async function processDirectory(currentPath: string) {
+  // Read all entries in the directory (files and subdirectories)
+  const entries = await fs.readdir(currentPath, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const fullPath = path.join(currentPath, entry.name);
+
+    if (entry.isDirectory()) {
+      console.log(`[DIR] Entering directory: ${fullPath}`);
+      // If it's a directory - recursive call to traverse deeper
+      await processDirectory(fullPath); 
+    } else if (entry.isFile()) {
+      // If it's a file - process it based on its extension
+      const mimeType = getMimeType(entry.name);
 
       if (!mimeType) {
-        console.warn(`[SKIPPED] Unsupported file type: ${file}`);
+        console.warn(`[SKIPPED] Unsupported file type: ${fullPath}`);
         continue;
       }
 
-      console.log(`[PROCESSING] ${file}...`);
+      console.log(`[PROCESSING] ${fullPath}...`);
       
       try {
-        // קריאת הקובץ מהדיסק
-        const fileBuffer = await fs.readFile(filePath);
-        // המרה ל-ArrayBuffer כפי שהפונקציה שלך דורשת
+        const fileBuffer = await fs.readFile(fullPath);
         const arrayBuffer = fileBuffer.buffer.slice(fileBuffer.byteOffset, fileBuffer.byteOffset + fileBuffer.byteLength);
-
-        // חילוץ טקסט בעזרת הפונקציה שלך מ-uploader.ts
         const text = await extractTextFromUpload(arrayBuffer, mimeType);
 
-        // שמירה והמרה לווקטורים ב-DB
+        // Extract the relative path (to keep the directory structure in the DB metadata)
+        const relativePath = path.relative(BASE_DIRECTORY, fullPath);
+
         const result = await ingestDocument({
-          filename: file,
+          filename: relativePath, 
           mimeType: mimeType,
           text: text,
-          classificationLevel: 1, // *חשוב: עדכן את הערך הזה בהתאם ל-Enum של PermissionLevel במערכת שלך*
-          uploadedByUserId: "system-batch-script", // מזהה פיקטיבי שמעיד שההעלאה בוצעה אוטומטית
+          classificationLevel: 1, // TIP: You can set this dynamically based on the 'relativePath' or folder name
+          uploadedByUserId: "system-batch-script",
         });
 
-        console.log(`[SUCCESS] ${file} -> Document ID: ${result.documentId} | Chunks: ${result.chunkCount}`);
+        console.log(`[SUCCESS] ${relativePath} -> Document ID: ${result.documentId} | Chunks: ${result.chunkCount}`);
         
       } catch (error) {
-        console.error(`[ERROR] Failed to process ${file}:`, error);
+        console.error(`[ERROR] Failed to process ${fullPath}:`, error);
       }
     }
+  }
+}
+
+async function run() {
+  console.log(`Starting recursive ingestion from base directory: ${BASE_DIRECTORY}`);
+  
+  try {
+    // Start the recursive scan from the root directory
+    await processDirectory(BASE_DIRECTORY);
   } catch (error) {
     console.error("Fatal error accessing directory:", error);
   } finally {
-    // קריטי: סגירת חיבור ה-Postgres כדי שהסקריפט יסיים את הריצה ולא ייתקע באוויר
+    // Ensure the database connection pool is closed after completion
     await closePool();
     console.log("Ingestion complete. Database connection closed.");
   }
