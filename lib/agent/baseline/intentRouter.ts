@@ -1,6 +1,7 @@
 import type { UserContext } from "@/lib/auth/types";
 import { isElevatedRole } from "@/lib/auth/roles";
 import { getLlmAdapter } from "@/lib/llm/adapter";
+import { CLAUDE_FAST_MODEL } from "@/lib/llm/providers/claude";
 
 export type BaselineIntent = "RAG_INQUIRY" | "CHAT_HISTORY";
 
@@ -28,8 +29,8 @@ export function resolveFastModel(): string {
       return "gpt-4o-mini";
     case "gemini":
       return process.env.GEMINI_FAST_MODEL ?? "gemini-3.5-flash";
-    case "llama":
-      return process.env.LLAMA_MODEL ?? "llama3";
+    case "claude":
+      return CLAUDE_FAST_MODEL;
     default:
       return "mock-fast";
   }

@@ -130,7 +130,7 @@ export async function runBaselineRagCore(input: BaselineRagInput): Promise<Basel
         "2. Dynamic Length & Structure:",
         "   - For simple, conversational, or direct questions (e.g., greetings, short clarifications, factual queries): Keep the response concise, natural, and under 50 words. Do not force paragraphs or bullet points.",
         "   - For complex social dilemmas, counseling requests, or educational scenarios: Provide a detailed response of 150-180 words. Break the text into 2 short paragraphs with line breaks, and use bullet points (•) for actionable steps.",
-        "- FOR FOLLOW-UP QUESTIONS: If the user is asking a follow-up question, seeking clarification, or referring to your previous answer, your response MUST be concise and strictly UNDER 80 WORDS.",
+        "   - FOR FOLLOW-UP QUESTIONS: If the user is asking a follow-up question, seeking clarification, or referring to your previous answer, your response MUST be concise and strictly UNDER 80 WORDS.",
         "3. Tone & Language: Respond ONLY in Hebrew. Maintain an empathetic, professional, and educational tone.",
         "4. Privacy: NEVER identify real students, share names, or rank children.",
         "5. Structure & Scannability: Break the text into 2 short paragraphs with line breaks. Use bullet points (•) or numbered lists for actionable steps.",

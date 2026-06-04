@@ -1,0 +1,594 @@
+/**
+ * evaluate_runner.ts — ScholarAgent Academic Evaluation Pipeline
+ *
+ * Executes the Golden Dataset against 4 system configurations:
+ *   A — No RLS  (bypass retrieval, all chunks visible to LLM)
+ *   B — RLS     (row-level security, only authorised chunks retrieved)
+ *   C — Agentic RAG + Claude (Haiku)   (orchestrator, fast/lean Claude model)
+ *   D — Agentic RAG + Gemini    (orchestrator, commercial LLM)
+ *
+ * For each (record × config) pair the script measures:
+ *   · DLS   — Data Leakage Score (%)
+ *   · RAGAS — Faithfulness, Answer Relevancy, Context Precision/Recall
+ *   · E2E Latency (ms)
+ *
+ * Concurrency note:
+ *   Queries within each phase are processed with a configurable semaphore.
+ *   Configs C and D mutate process.env.LLM_PROVIDER; each config phase runs
+ *   in full before the next phase begins, so there are no env-var race conditions.
+ *
+ * Usage:
+ *   npm run evaluate
+ *
+ * Output:
+ *   · Markdown summary table → stdout
+ *   · Granular CSV           → scripts/output/evaluation_results_<TIMESTAMP>.csv
+ */
+
+// ts-node path aliases (tsconfig-paths) must be registered before aliased imports.
+
+import fs from "node:fs/promises";
+import path from "node:path";
+import chalk from "chalk";
+
+import { filterAuthorizedChunks } from "@/lib/auth/rbac";
+import { PERMISSION_ROLE, ROLE_DESCRIPTIONS } from "@/lib/auth/types";
+import type { KnowledgeChunk, PermissionLevel, UserContext } from "@/lib/auth/types";
+import { runBaselineRagCore } from "@/lib/agent/baseline/index";
+import { getLlmAdapter } from "@/lib/llm/adapter";
+import type { LlmMessage } from "@/lib/llm/types";
+import { computeDls, type DlsResult } from "@/lib/metrics/dls";
+import { evaluateRagas, type RagasScores } from "@/lib/metrics/ragas";
+import {
+  querySimilarDocuments,
+  querySimilarDocumentsBypassRls,
+  type SimilarDocument,
+} from "@/lib/db/pgvector";
+import { GOLDEN_DATASET, type EvalRecord, type QueryCategory } from "./data/golden_dataset";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+const RETRIEVAL_LIMIT = 5;
+const RETRIEVAL_OVERFETCH = 50;
+const SEMAPHORE_CONCURRENCY = parseInt(process.env.EVAL_CONCURRENCY ?? "2", 10);
+const INTER_QUERY_DELAY_MS = parseInt(process.env.EVAL_INTER_QUERY_DELAY_MS ?? "500", 10);
+const OUTPUT_DIR = path.join(__dirname, "output");
+
+type ConfigName = "A" | "B" | "C" | "D";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Result types
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface SingleConfigResult {
+  dls: DlsResult;
+  ragas: RagasScores;
+  answer: string;
+  /** Wall-clock time from retrieval start to RAGAS evaluation end. */
+  latencyMs: number;
+  error?: string;
+}
+
+interface EvalRow {
+  recordId: string;
+  category: QueryCategory;
+  userRole: PermissionLevel;
+  /** Truncated to 80 chars for display; full text in CSV. */
+  question: string;
+  config: ConfigName;
+  dlsScore: number;
+  dlsPassed: boolean;
+  faithfulness: number;
+  answerRelevancy: number;
+  contextPrecision: number;
+  contextRecall: number;
+  latencyMs: number;
+  error: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Semaphore — bounded concurrency without external deps
+// ─────────────────────────────────────────────────────────────────────────────
+
+class Semaphore {
+  private running = 0;
+  private readonly queue: Array<() => void> = [];
+
+  constructor(private readonly concurrency: number) {}
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    await this.acquire();
+    try {
+      return await fn();
+    } finally {
+      this.release();
+    }
+  }
+
+  private acquire(): Promise<void> {
+    if (this.running < this.concurrency) {
+      this.running++;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => this.queue.push(resolve));
+  }
+
+  private release(): void {
+    this.running--;
+    const next = this.queue.shift();
+    if (next) {
+      this.running++;
+      next();
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function buildUserContext(record: EvalRecord): UserContext {
+  return {
+    userId: `eval-${record.id}`,
+    permissionLevel: record.userRole,
+    roleName: PERMISSION_ROLE[record.userRole] ?? "Unknown",
+  };
+}
+
+function toKnowledgeChunks(docs: SimilarDocument[]): KnowledgeChunk[] {
+  return docs.map((d) => ({
+    id: d.id,
+    content: d.text,
+    classificationLevel: d.classificationLevel,
+  }));
+}
+
+function buildContextBlock(texts: string[]): string {
+  return texts.length > 0
+    ? texts.map((t, i) => `[${i + 1}] ${t}`).join("\n\n")
+    : "אין מידע ספציפי במסמכים לשאילתה זו. עליך להסתמך על הידע המקצועי הכללי שלך.";
+}
+
+function buildDirectLlmMessages(
+  question: string,
+  contextBlock: string,
+  userContext: UserContext
+): LlmMessage[] {
+  const roleDescription = ROLE_DESCRIPTIONS[userContext.permissionLevel] ?? "";
+  return [
+    {
+      role: "system",
+      content: [
+        "You are an expert mentor in the 'Adam LeAdam Ze Lev' project, assisting with social dilemmas, boycott prevention, and violence reduction.",
+        `The user is a ${userContext.roleName}. ${roleDescription}`,
+        "Respond ONLY in Hebrew. Be empathetic, professional, and concise (under 180 words).",
+        "IMPORTANT FORMATTING RULE: Format your response for WhatsApp. Use a single asterisk for bold text (*text*) and NEVER use double asterisks (**text**).",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: `שאלה: ${question}\n\nהקשר:\n${contextBlock}`,
+    },
+  ];
+}
+
+function errorResult(errMsg: string): SingleConfigResult {
+  const zeroRagas: RagasScores = {
+    contextPrecision: 0,
+    contextRecall: 0,
+    faithfulness: 0,
+    answerRelevancy: 0,
+    latencyMs: 0,
+  };
+  return {
+    dls: { score: 0, totalChunks: 0, unauthorizedChunks: 0, passed: true },
+    ragas: zeroRagas,
+    answer: "",
+    latencyMs: 0,
+    error: errMsg,
+  };
+}
+
+function toEvalRow(
+  record: EvalRecord,
+  config: ConfigName,
+  result: SingleConfigResult
+): EvalRow {
+  return {
+    recordId: record.id,
+    category: record.category,
+    userRole: record.userRole,
+    question: record.question,
+    config,
+    dlsScore: parseFloat(result.dls.score.toFixed(2)),
+    dlsPassed: result.dls.passed,
+    faithfulness: parseFloat(result.ragas.faithfulness.toFixed(4)),
+    answerRelevancy: parseFloat(result.ragas.answerRelevancy.toFixed(4)),
+    contextPrecision: parseFloat(result.ragas.contextPrecision.toFixed(4)),
+    contextRecall: parseFloat(result.ragas.contextRecall.toFixed(4)),
+    latencyMs: result.latencyMs,
+    error: result.error ?? "",
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Config A — No RLS (bypass retrieval; all chunks forwarded to LLM)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function runConfigA(record: EvalRecord): Promise<SingleConfigResult> {
+  const started = Date.now();
+  const userContext = buildUserContext(record);
+
+  try {
+    const docs = await querySimilarDocumentsBypassRls(record.question, {
+      limit: RETRIEVAL_LIMIT,
+      overfetch: RETRIEVAL_OVERFETCH,
+    });
+
+    const chunks = toKnowledgeChunks(docs);
+    const dls = computeDls(userContext, chunks);
+
+    // Config A deliberately passes ALL retrieved chunks to the LLM — no RBAC filter.
+    const contextTexts = docs.map((d) => d.text);
+    const contextBlock = buildContextBlock(contextTexts);
+    const messages = buildDirectLlmMessages(record.question, contextBlock, userContext);
+
+    const answer = await getLlmAdapter().generateText({ messages, temperature: 0.3 });
+
+    const ragas = await evaluateRagas({
+      question: record.question,
+      answer,
+      contexts: contextTexts,
+      groundTruth: record.groundTruthAnswer,
+    });
+
+    return { dls, ragas, answer, latencyMs: Date.now() - started };
+  } catch (err) {
+    return errorResult(err instanceof Error ? err.message : String(err));
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Config B — RLS enforced (only authorised chunks retrieved and used)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function runConfigB(record: EvalRecord): Promise<SingleConfigResult> {
+  const started = Date.now();
+  const userContext = buildUserContext(record);
+
+  try {
+    const docs = await querySimilarDocuments(record.question, record.userRole, {
+      limit: RETRIEVAL_LIMIT,
+      overfetch: RETRIEVAL_OVERFETCH,
+    });
+
+    const chunks = toKnowledgeChunks(docs);
+    // RLS already filtered the results; DLS should be 0.
+    const dls = computeDls(userContext, chunks);
+
+    const contextTexts = docs.map((d) => d.text);
+    const contextBlock = buildContextBlock(contextTexts);
+    const messages = buildDirectLlmMessages(record.question, contextBlock, userContext);
+
+    const answer = await getLlmAdapter().generateText({ messages, temperature: 0.3 });
+
+    const ragas = await evaluateRagas({
+      question: record.question,
+      answer,
+      contexts: contextTexts,
+      groundTruth: record.groundTruthAnswer,
+    });
+
+    return { dls, ragas, answer, latencyMs: Date.now() - started };
+  } catch (err) {
+    return errorResult(err instanceof Error ? err.message : String(err));
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Config C / D — Agentic RAG via runBaselineRagCore
+// (LLM_PROVIDER is pre-set by the phase runner before calling these functions.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function runAgenticConfig(record: EvalRecord): Promise<SingleConfigResult> {
+  const started = Date.now();
+  const userContext = buildUserContext(record);
+
+  try {
+    const result = await runBaselineRagCore({ query: record.question, userContext });
+
+    // Build RAGAS context from the AUTHORIZED chunks only (what the LLM actually saw).
+    const allChunks = toKnowledgeChunks(
+      result.retrievedChunks.map((c) => ({
+        id: c.id,
+        text: c.text,
+        metadata: null,
+        classificationLevel: c.classificationLevel,
+        similarity: c.similarity,
+      }))
+    );
+    const authorizedChunks = filterAuthorizedChunks(userContext, allChunks);
+    const contextTexts =
+      authorizedChunks.length > 0
+        ? authorizedChunks.map((c) => c.content)
+        : allChunks.map((c) => c.content);
+
+    const ragas = await evaluateRagas({
+      question: record.question,
+      answer: result.answer,
+      contexts: contextTexts,
+      groundTruth: record.groundTruthAnswer,
+    });
+
+    return {
+      dls: result.dls,
+      ragas,
+      answer: result.answer,
+      latencyMs: Date.now() - started,
+    };
+  } catch (err) {
+    return errorResult(err instanceof Error ? err.message : String(err));
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase runner — processes all records for one config with bounded concurrency
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function runPhase(
+  config: ConfigName,
+  records: EvalRecord[],
+  sem: Semaphore,
+  runner: (r: EvalRecord) => Promise<SingleConfigResult>
+): Promise<EvalRow[]> {
+  console.log(chalk.cyan(`\n▶  Phase ${config} — running ${records.length} queries (concurrency ${SEMAPHORE_CONCURRENCY})`));
+
+  const rows: EvalRow[] = [];
+  const tasks = records.map((record, idx) =>
+    sem.run(async () => {
+      process.stdout.write(
+        chalk.gray(`   [${String(idx + 1).padStart(2)}/${records.length}] ${record.id} … `)
+      );
+
+      const result = await runner(record);
+      const row = toEvalRow(record, config, result);
+      rows.push(row);
+
+      const status = result.error
+        ? chalk.red("ERROR: " + result.error.slice(0, 60))
+        : chalk.green(
+            `DLS=${row.dlsScore.toFixed(1)}%  F=${(row.faithfulness * 100).toFixed(0)}%  R=${(row.answerRelevancy * 100).toFixed(0)}%  ${row.latencyMs}ms`
+          );
+      console.log(status);
+
+      await sleep(INTER_QUERY_DELAY_MS);
+    })
+  );
+
+  await Promise.all(tasks);
+
+  // Preserve original dataset order in output.
+  rows.sort((a, b) => {
+    const ai = records.findIndex((r) => r.id === a.recordId);
+    const bi = records.findIndex((r) => r.id === b.recordId);
+    return ai - bi;
+  });
+
+  return rows;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Aggregation
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface ConfigAggregates {
+  config: ConfigName;
+  avgDls: number;
+  avgFaithfulness: number;
+  avgAnswerRelevancy: number;
+  avgContextPrecision: number;
+  avgContextRecall: number;
+  avgLatencyMs: number;
+  errorCount: number;
+  n: number;
+}
+
+function aggregate(rows: EvalRow[]): ConfigAggregates {
+  if (rows.length === 0) {
+    return {
+      config: rows[0]?.config ?? "A",
+      avgDls: 0,
+      avgFaithfulness: 0,
+      avgAnswerRelevancy: 0,
+      avgContextPrecision: 0,
+      avgContextRecall: 0,
+      avgLatencyMs: 0,
+      errorCount: 0,
+      n: 0,
+    };
+  }
+  const valid = rows.filter((r) => !r.error);
+  const n = valid.length;
+  const sum = <K extends keyof EvalRow>(k: K) =>
+    valid.reduce((acc, r) => acc + (r[k] as number), 0);
+
+  return {
+    config: rows[0].config,
+    avgDls: n ? sum("dlsScore") / n : 0,
+    avgFaithfulness: n ? sum("faithfulness") / n : 0,
+    avgAnswerRelevancy: n ? sum("answerRelevancy") / n : 0,
+    avgContextPrecision: n ? sum("contextPrecision") / n : 0,
+    avgContextRecall: n ? sum("contextRecall") / n : 0,
+    avgLatencyMs: n ? sum("latencyMs") / n : 0,
+    errorCount: rows.filter((r) => !!r.error).length,
+    n: rows.length,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Markdown summary table
+// ─────────────────────────────────────────────────────────────────────────────
+
+function printMarkdownTable(aggs: ConfigAggregates[]): void {
+  const fmt = (n: number, pct = false) =>
+    pct ? `${(n).toFixed(1)}%` : (n * 100).toFixed(1) + "%";
+  const ms = (n: number) => Math.round(n).toString() + " ms";
+
+  const header = [
+    "| Configuration",
+    "| Avg DLS (%) ↓",
+    "| Avg Faithfulness ↑",
+    "| Avg Answer Relevancy ↑",
+    "| Avg Context Precision ↑",
+    "| Avg Context Recall ↑",
+    "| Avg Latency ↑ = worst |",
+  ].join(" ");
+
+  const sep = header.replace(/[^|]/g, "-").replace(/--/g, "--");
+
+  console.log(chalk.bold("\n\n═══════════════════════════════════════════════════════════════════"));
+  console.log(chalk.bold("  ScholarAgent — Evaluation Pipeline Results"));
+  console.log(chalk.bold("═══════════════════════════════════════════════════════════════════\n"));
+  console.log(header);
+  console.log(sep);
+
+  const configLabels: Record<ConfigName, string> = {
+    A: "A — No RLS (Baseline)",
+    B: "B — With RLS",
+    C: "C — Agentic / Claude (Haiku)",
+    D: "D — Agentic / Gemini",
+  };
+
+  for (const agg of aggs) {
+    const errors = agg.errorCount > 0 ? chalk.red(` (${agg.errorCount} errors)`) : "";
+    const row = [
+      `| **${configLabels[agg.config]}**${errors}`,
+      `| ${fmt(agg.avgDls, true)}`,
+      `| ${fmt(agg.avgFaithfulness)}`,
+      `| ${fmt(agg.avgAnswerRelevancy)}`,
+      `| ${fmt(agg.avgContextPrecision)}`,
+      `| ${fmt(agg.avgContextRecall)}`,
+      `| ${ms(agg.avgLatencyMs)} |`,
+    ].join(" ");
+    console.log(row);
+  }
+  console.log();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CSV export
+// ─────────────────────────────────────────────────────────────────────────────
+
+function escapeCsvField(value: string | number | boolean): string {
+  const s = String(value);
+  return s.includes(",") || s.includes('"') || s.includes("\n")
+    ? `"${s.replace(/"/g, '""')}"`
+    : s;
+}
+
+async function exportCsv(allRows: EvalRow[], timestamp: string): Promise<string> {
+  const headers: Array<keyof EvalRow> = [
+    "recordId",
+    "category",
+    "userRole",
+    "config",
+    "dlsScore",
+    "dlsPassed",
+    "faithfulness",
+    "answerRelevancy",
+    "contextPrecision",
+    "contextRecall",
+    "latencyMs",
+    "error",
+    "question",
+  ];
+
+  const headerLine = headers.map(escapeCsvField).join(",");
+  const dataLines = allRows.map((row) =>
+    headers.map((h) => escapeCsvField(row[h])).join(",")
+  );
+
+  const csv = [headerLine, ...dataLines].join("\n");
+
+  await fs.mkdir(OUTPUT_DIR, { recursive: true });
+  const filePath = path.join(OUTPUT_DIR, `evaluation_results_${timestamp}.csv`);
+  await fs.writeFile(filePath, csv, "utf-8");
+  return filePath;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entry point
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function main(): Promise<void> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-").replace("T", "_").slice(0, 19);
+  const sem = new Semaphore(SEMAPHORE_CONCURRENCY);
+
+  console.log(chalk.bold.green("\n🎓  ScholarAgent — Academic Evaluation Pipeline"));
+  console.log(`Dataset: ${GOLDEN_DATASET.length} records (${GOLDEN_DATASET.filter((r) => r.category === "standard").length} standard / ${GOLDEN_DATASET.filter((r) => r.category === "adversarial").length} adversarial)`);
+  console.log(`Concurrency: ${SEMAPHORE_CONCURRENCY} · Inter-query delay: ${INTER_QUERY_DELAY_MS} ms`);
+
+  // ── Phase A: No RLS ────────────────────────────────────────────────────────
+  const rowsA = await runPhase("A", GOLDEN_DATASET, sem, runConfigA);
+
+  // ── Phase B: With RLS ──────────────────────────────────────────────────────
+  const rowsB = await runPhase("B", GOLDEN_DATASET, sem, runConfigB);
+
+  // ── Phase C: Agentic + Claude Haiku ───────────────────────────────────────
+  const originalProvider = process.env.LLM_PROVIDER;
+  process.env.LLM_PROVIDER = "claude";
+  console.log(chalk.yellow(`\n⚙  LLM_PROVIDER overridden → claude`));
+  const rowsC = await runPhase("C", GOLDEN_DATASET, sem, runAgenticConfig);
+
+  // ── Phase D: Agentic + Gemini ──────────────────────────────────────────────
+  process.env.LLM_PROVIDER = "gemini";
+  console.log(chalk.yellow(`\n⚙  LLM_PROVIDER overridden → gemini`));
+  const rowsD = await runPhase("D", GOLDEN_DATASET, sem, runAgenticConfig);
+
+  // Restore original provider.
+  process.env.LLM_PROVIDER = originalProvider;
+
+  // ── Aggregation ────────────────────────────────────────────────────────────
+  const aggregates: ConfigAggregates[] = [
+    aggregate(rowsA),
+    aggregate(rowsB),
+    aggregate(rowsC),
+    aggregate(rowsD),
+  ];
+
+  // ── Markdown table ─────────────────────────────────────────────────────────
+  printMarkdownTable(aggregates);
+
+  // ── Adversarial-only DLS breakdown ─────────────────────────────────────────
+  console.log(chalk.bold("  Adversarial Queries — DLS Breakdown (security focus)\n"));
+  const adversarialAgg = (rows: EvalRow[], config: ConfigName): ConfigAggregates => {
+    const adv = rows.filter((r) => r.category === "adversarial");
+    return aggregate(adv.length > 0 ? adv : [{ ...rows[0], config }]);
+  };
+  printMarkdownTable([
+    adversarialAgg(rowsA, "A"),
+    adversarialAgg(rowsB, "B"),
+    adversarialAgg(rowsC, "C"),
+    adversarialAgg(rowsD, "D"),
+  ]);
+
+  // ── CSV export ─────────────────────────────────────────────────────────────
+  const allRows = [...rowsA, ...rowsB, ...rowsC, ...rowsD];
+  const csvPath = await exportCsv(allRows, timestamp);
+
+  console.log(chalk.bold.green(`\n✅  Evaluation complete.`));
+  console.log(`   Raw results → ${chalk.underline(csvPath)}`);
+  console.log(`   Total rows  : ${allRows.length} (${GOLDEN_DATASET.length} queries × 4 configs)`);
+  console.log(`   Errors      : ${allRows.filter((r) => !!r.error).length}\n`);
+}
+
+main().catch((err) => {
+  console.error(chalk.red("\n❌  Fatal error in evaluation runner:"), err);
+  process.exit(1);
+});
