@@ -4,9 +4,9 @@ import type { GenerateTextInput, LlmAdapter } from "@/lib/llm/types";
 // Uses raw fetch to match the pattern of all other providers in this codebase.
 // Docs: https://docs.anthropic.com/en/api/messages
 
-const DEFAULT_MODEL = "claude-3-5-sonnet-20240620";
+const DEFAULT_MODEL = "claude-sonnet-4-6";
 /** Lightweight model for fast intent-classification calls. */
-const DEFAULT_FAST_MODEL = "claude-3-haiku-20240307";
+const DEFAULT_FAST_MODEL = "claude-haiku-4-5-20251001";
 const ANTHROPIC_VERSION = "2023-06-01";
 const ENDPOINT = "https://api.anthropic.com/v1/messages";
 
@@ -18,6 +18,13 @@ interface AnthropicRequestMessage {
 interface AnthropicResponseContent {
   type: string;
   text?: string;
+}
+
+interface AnthropicErrorBody {
+  error?: {
+    type?: string;
+    message?: string;
+  };
 }
 
 interface AnthropicResponse {
@@ -68,6 +75,23 @@ function buildAnthropicPayload(
   return payload;
 }
 
+/**
+ * Parses Anthropic's JSON error body and returns a human-readable detail string.
+ * Falls back to the raw text if the body is not valid JSON.
+ */
+function parseAnthropicError(bodyText: string): string {
+  try {
+    const parsed = JSON.parse(bodyText) as AnthropicErrorBody;
+    const { type, message } = parsed.error ?? {};
+    if (message) {
+      return type ? `[${type}] ${message}` : message;
+    }
+  } catch {
+    // body is plain text — use as-is
+  }
+  return bodyText;
+}
+
 export class ClaudeAdapter implements LlmAdapter {
   async generateText(input: GenerateTextInput): Promise<string> {
     const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
@@ -78,13 +102,15 @@ export class ClaudeAdapter implements LlmAdapter {
       );
     }
 
-    // Resolve the incoming model parameter to an official Anthropic model string
-    let modelRequested = input.model?.trim() ?? process.env.CLAUDE_MODEL?.trim() ?? DEFAULT_MODEL;
+    // Resolve the incoming model parameter to an official Anthropic model string.
+    let modelRequested =
+      input.model?.trim() ?? process.env.CLAUDE_MODEL?.trim() ?? DEFAULT_MODEL;
 
-    // Normalize generic aliases used by evaluation runners or configs to official full names
-    if (modelRequested.toLowerCase() === "claude" || modelRequested.toLowerCase() === "claude-3-5-sonnet") {
+    // Normalize generic aliases used by evaluation runners or configs.
+    const lower = modelRequested.toLowerCase();
+    if (lower === "claude" || lower === "claude-3-5-sonnet") {
       modelRequested = DEFAULT_MODEL;
-    } else if (modelRequested.toLowerCase() === "claude-fast" || modelRequested.toLowerCase() === "claude-3-haiku") {
+    } else if (lower === "claude-fast" || lower === "claude-3-haiku") {
       modelRequested = DEFAULT_FAST_MODEL;
     }
 
@@ -101,8 +127,11 @@ export class ClaudeAdapter implements LlmAdapter {
     });
 
     if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Anthropic Claude request failed: HTTP ${response.status} — ${body}`);
+      const bodyText = await response.text();
+      const detail = parseAnthropicError(bodyText);
+      throw new Error(
+        `Anthropic Claude request failed: HTTP ${response.status} | model="${modelRequested}" | ${detail}`
+      );
     }
 
     const json = (await response.json()) as AnthropicResponse;
