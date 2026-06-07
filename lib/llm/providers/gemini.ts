@@ -14,7 +14,8 @@ interface GeminiResponse {
 }
 
 // Maps our internal roles to Gemini's role format.
-// Gemini only supports "user" and "model" roles; system messages are prepended to the first user turn.
+// Gemini enforces strict user→model alternation and rejects empty text parts.
+// This function merges consecutive same-role turns and guards every edge case.
 function buildGeminiContents(input: GenerateTextInput): {
   systemInstruction: string | null;
   contents: GeminiContent[];
@@ -25,10 +26,28 @@ function buildGeminiContents(input: GenerateTextInput): {
   const systemInstruction =
     systemParts.length > 0 ? systemParts.map((m) => m.content).join("\n") : null;
 
-  const contents: GeminiContent[] = nonSystemMessages.map((m) => ({
-    role: m.role === "assistant" ? "model" : "user",
-    parts: [{ text: m.content }],
-  }));
+  const contents: GeminiContent[] = [];
+
+  for (const m of nonSystemMessages) {
+    const geminiRole: "user" | "model" = m.role === "assistant" ? "model" : "user";
+
+    // Gemini rejects empty text parts with a 400; substitute a safe placeholder.
+    const safeContent =
+      m.content.trim() === "" ? "[Empty message / No context]" : m.content;
+
+    const last = contents[contents.length - 1];
+    if (last && last.role === geminiRole) {
+      // Merge consecutive same-role turns — Gemini requires strict alternation.
+      last.parts.push({ text: safeContent });
+    } else {
+      contents.push({ role: geminiRole, parts: [{ text: safeContent }] });
+    }
+  }
+
+  // Gemini requires the conversation to start with a user turn.
+  if (contents.length > 0 && contents[0].role === "model") {
+    contents.unshift({ role: "user", parts: [{ text: "[Conversation Start]" }] });
+  }
 
   return { systemInstruction, contents };
 }

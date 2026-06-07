@@ -2,10 +2,10 @@
  * evaluate_runner.ts — ScholarAgent Academic Evaluation Pipeline
  *
  * Executes the Golden Dataset against 4 system configurations:
- * A — No RLS  (bypass retrieval, all chunks visible to LLM)
- * B — RLS     (row-level security, only authorised chunks retrieved)
- * C — Agentic RAG + Claude (Haiku)   (orchestrator, fast/lean Claude model)
- * D — Agentic RAG + Gemini    (orchestrator, commercial LLM)
+ * A — Claude   · No RLS/RBAC  (bypass retrieval, all chunks forwarded to LLM)
+ * B — Gemini   · No RLS/RBAC  (bypass retrieval, all chunks forwarded to LLM)
+ * C — Claude   · Secured Agent (hardened RLS + intent routing + safety signals)
+ * D — Gemini   · Secured Agent (hardened RLS + intent routing + safety signals)
  *
  * For each (record × config) pair the script measures:
  * · DLS   — Data Leakage Score (%)
@@ -477,10 +477,10 @@ function printMarkdownTable(aggs: ConfigAggregates[]): void {
   console.log(sep);
 
   const configLabels: Record<ConfigName, string> = {
-    A: "A — No RLS (Baseline)",
-    B: "B — With RLS",
-    C: "C — Agentic / Claude (Haiku)",
-    D: "D — Agentic / Gemini",
+    A: "A — Claude (No RLS/RBAC)",
+    B: "B — Gemini (No RLS/RBAC)",
+    C: "C — Claude (Secured Agent)",
+    D: "D — Gemini (Secured Agent)",
   };
 
   for (const agg of aggs) {
@@ -554,19 +554,24 @@ async function main(): Promise<void> {
   console.log(`Dataset: ${GOLDEN_DATASET.length} records (${GOLDEN_DATASET.filter((r) => r.category === "standard").length} standard / ${GOLDEN_DATASET.filter((r) => r.category === "adversarial").length} adversarial)`);
   console.log(`Concurrency: ${SEMAPHORE_CONCURRENCY} · Inter-query delay: ${INTER_QUERY_DELAY_MS} ms`);
 
-  // ── Phase A: No RLS ────────────────────────────────────────────────────────
+  const originalProvider = process.env.LLM_PROVIDER;
+
+  // ── Phase A: Claude — No RLS (bypass retrieval; all chunks forwarded to LLM) ─
+  process.env.LLM_PROVIDER = "claude";
+  console.log(chalk.yellow(`\n⚙  LLM_PROVIDER overridden → claude`));
   const rowsA = await runPhase("A", GOLDEN_DATASET, sem, runConfigA);
 
-  // ── Phase B: With RLS ──────────────────────────────────────────────────────
-  const rowsB = await runPhase("B", GOLDEN_DATASET, sem, runConfigB);
+  // ── Phase B: Gemini — No RLS (bypass retrieval; all chunks forwarded to LLM) ─
+  process.env.LLM_PROVIDER = "gemini";
+  console.log(chalk.yellow(`\n⚙  LLM_PROVIDER overridden → gemini`));
+  const rowsB = await runPhase("B", GOLDEN_DATASET, sem, runConfigA);
 
-  // ── Phase C: Agentic + Claude Haiku ───────────────────────────────────────
-  const originalProvider = process.env.LLM_PROVIDER;
+  // ── Phase C: Claude — Secured Agentic RAG (hardened RLS + routing + safety) ─
   process.env.LLM_PROVIDER = "claude";
   console.log(chalk.yellow(`\n⚙  LLM_PROVIDER overridden → claude`));
   const rowsC = await runPhase("C", GOLDEN_DATASET, sem, runAgenticConfig);
 
-  // ── Phase D: Agentic + Gemini ──────────────────────────────────────────────
+  // ── Phase D: Gemini — Secured Agentic RAG (hardened RLS + routing + safety) ─
   process.env.LLM_PROVIDER = "gemini";
   console.log(chalk.yellow(`\n⚙  LLM_PROVIDER overridden → gemini`));
   const rowsD = await runPhase("D", GOLDEN_DATASET, sem, runAgenticConfig);
