@@ -10,7 +10,10 @@ import {
   runBaselineRagCore,
   type BaselineRagCoreResult,
 } from "@/lib/agent/baseline/index";
-import { containsMandatoryHandoffSignals, MANDATORY_HANDOFF_RESPONSE_HE } from "@/lib/agent/baseline/safetySignals";
+import {
+  checkSafetySignals,
+  MANDATORY_HANDOFF_RESPONSE_HE,
+} from "@/lib/agent/baseline/safetySignals";
 
 export type BaselineDeliveryKind = "text" | "interactive_sent" | "already_sent_prompt";
 
@@ -36,19 +39,25 @@ export async function processBaselineQuery(
   const { query, userContext, priorMessages = [], buttonId, senderPhone } = input;
   const skipGuardrails = shouldSkipGuardrails(userContext);
 
-  if (!skipGuardrails && containsMandatoryHandoffSignals(query)) {
-    const safetyPayload: BaselineRagCoreResult = {
-      answer: MANDATORY_HANDOFF_RESPONSE_HE,
-      retrievedChunks: [],
-      dls: { score: 0, totalChunks: 0, unauthorizedChunks: 0, passed: true },
-      latencyMs: 0,
-    };
-    return {
-      kind: "text",
-      answer: MANDATORY_HANDOFF_RESPONSE_HE,
-      ragMetrics: safetyPayload,
-      intent: "RAG_INQUIRY",
-    };
+  // Emergency short-circuit: evaluated BEFORE intent routing and RAG.
+  // If the message contains distress signals, we NEVER let the LLM handle it.
+  if (!skipGuardrails) {
+    const safety = checkSafetySignals(query);
+    if (safety.isEmergency) {
+      const emergencyResponse = safety.response ?? MANDATORY_HANDOFF_RESPONSE_HE;
+      const safetyPayload: BaselineRagCoreResult = {
+        answer: emergencyResponse,
+        retrievedChunks: [],
+        dls: { score: 0, totalChunks: 0, unauthorizedChunks: 0, passed: true },
+        latencyMs: 0,
+      };
+      return {
+        kind: "text",
+        answer: emergencyResponse,
+        ragMetrics: safetyPayload,
+        intent: "RAG_INQUIRY",
+      };
+    }
   }
 
   const intent = buttonId
@@ -78,6 +87,16 @@ export async function processBaselineQuery(
   if (userContext.permissionLevel === 1 && intent === "CHAT_HISTORY") {
     const answer = await resolveL1ChatHistoryFlow();
     return { kind: "text", answer, ragMetrics: null, intent };
+  }
+
+  if (intent === "CHIT_CHAT") {
+    return {
+      kind: "text",
+      answer:
+        "שלום! אני הבוט המנטורי של מיזם 'אדם לאדם'. אשמח לסייע לך בשאלות פדגוגיות, התמודדות עם קונפליקטים, תכנון פעילויות ולוגיסטיקה של הצהרון.",
+      ragMetrics: null,
+      intent,
+    };
   }
 
   const rag = await runBaselineRagCore({

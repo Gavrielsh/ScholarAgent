@@ -3,7 +3,7 @@ import { isElevatedRole } from "@/lib/auth/roles";
 import { getLlmAdapter } from "@/lib/llm/adapter";
 import { CLAUDE_FAST_MODEL } from "@/lib/llm/providers/claude";
 
-export type BaselineIntent = "RAG_INQUIRY" | "CHAT_HISTORY";
+export type BaselineIntent = "RAG_INQUIRY" | "CHAT_HISTORY" | "CHIT_CHAT";
 
 const CHAT_HISTORY_HEURISTICS: RegExp[] = [
   /היסטורי(?:ת|ות)?\s*(?:שיחה|צ'אט|צאט|whatsapp)?/i,
@@ -39,6 +39,7 @@ export function resolveFastModel(): string {
 function parseIntentFromLlm(raw: string): BaselineIntent {
   const normalized = raw.trim().toUpperCase();
   if (normalized.includes("CHAT_HISTORY")) return "CHAT_HISTORY";
+  if (normalized.includes("CHIT_CHAT")) return "CHIT_CHAT";
   return "RAG_INQUIRY";
 }
 
@@ -65,10 +66,31 @@ export async function classifyBaselineIntent(
       messages: [
         {
           role: "system",
-          content:
-            'Classify the user message into exactly one label: "CHAT_HISTORY" or "RAG_INQUIRY". ' +
-            "CHAT_HISTORY = requests to summarize, review, or export today's WhatsApp conversations of staff/mentors. " +
-            "RAG_INQUIRY = educational content questions. Reply with the label only.",
+          content: [
+            'Classify the user message into exactly one label: "CHAT_HISTORY", "RAG_INQUIRY", or "CHIT_CHAT".',
+            "",
+            "Label definitions:",
+            "  CHAT_HISTORY  — Requests to summarize, review, or export today's WhatsApp conversations of staff/mentors.",
+            "  NEEDS_RETRIEVAL / RAG_INQUIRY — Any question about pedagogy, conflict resolution, social dynamics,",
+            "    activity planning, logistics, working with children, mentoring scenarios, or operational guidance.",
+            "    When in doubt, default to RAG_INQUIRY — it is ALWAYS better to retrieve than to skip retrieval.",
+            "  CHIT_CHAT     — Generic greetings, small-talk, or messages with no pedagogical or logistical content.",
+            "",
+            "Few-shot examples:",
+            'User: "שני חניכים התחילו לריב ולקלל אחד את השני באמצע המשחק."',
+            "→ RAG_INQUIRY  (Topic: Conflict Resolution)",
+            "",
+            'User: "איך כדאי לי לארגן את לוגיסטיקת חלוקת הציוד מחר מול מנהל הצהרון?"',
+            "→ RAG_INQUIRY  (Topic: Logistics & Planning)",
+            "",
+            'User: "יש לי חניך שיושב בצד בהפסקה, איך לשלב אותו?"',
+            "→ RAG_INQUIRY  (Topic: Social Inclusion)",
+            "",
+            'User: "היי, מה קורה?"',
+            "→ CHIT_CHAT",
+            "",
+            "Reply with the label only — no explanation.",
+          ].join("\n"),
         },
         { role: "user", content: query },
       ],

@@ -134,7 +134,7 @@ export function containsMandatoryHandoffSignals(text: string): boolean {
 
 export const MANDATORY_HANDOFF_RESPONSE_HE =
   "זוהתה פנייה רגישה שדורשת מענה אנושי מיידי. " +
-  "אנא פנו עכשיו למבוגר אחראי בארגון, לקו חירום רלוונטי, או לשירותי בריאות הנפש (למשל קו ער\"ן 1201 לילדים ונוער / קו חירום 101). " +
+  'אנא פנו עכשיו למבוגר אחראי בארגון, ליועצת בית הספר, או לקווי חירום (ער"ן 1201 / משטרה 100 / מד"א 101). ' +
   "הבוט אינו מספק ייעוץ בזמן אמת במצבי סיכון.";
 
 function hasAny(patterns: RegExp[], text: string): boolean {
@@ -153,6 +153,25 @@ function buildSafeRewrite(text: string): string | null {
   }
 
   return null;
+}
+
+export interface SafetyCheckResult {
+  /** True when the message matches a life-threatening / severe distress pattern. */
+  isEmergency: boolean;
+  /** Hardcoded handoff response to return immediately; present only when isEmergency=true. */
+  response?: string;
+}
+
+/**
+ * Hard-fail guard that must be evaluated BEFORE the intent router and RAG pipeline.
+ * When isEmergency is true, callers MUST short-circuit the entire flow and return
+ * the provided response verbatim — the LLM must never handle these situations.
+ */
+export function checkSafetySignals(text: string): SafetyCheckResult {
+  if (containsMandatoryHandoffSignals(text)) {
+    return { isEmergency: true, response: MANDATORY_HANDOFF_RESPONSE_HE };
+  }
+  return { isEmergency: false };
 }
 
 export function classifySafetySignals(text: string): SafetySignals {

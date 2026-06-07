@@ -19,6 +19,9 @@ const EMBEDDING_DIMENSION = 768;
 const RETRY_DELAYS_MS = [2000, 4000, 8000, 16000, 32000] as const;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// In-memory cache to prevent redundant API calls and save tokens
+const embeddingCache = new Map<string, number[]>();
+
 function endpoint(path: string): string {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -30,6 +33,11 @@ function endpoint(path: string): string {
 export async function embedText(text: string): Promise<number[]> {
   const trimmed = text.trim();
   if (!trimmed) return [];
+
+  // Check cache first to save API tokens
+  if (embeddingCache.has(trimmed)) {
+    return embeddingCache.get(trimmed)!;
+  }
 
   for (let attempt = 0; attempt < RETRY_DELAYS_MS.length + 1; attempt++) {
     try {
@@ -58,7 +66,11 @@ export async function embedText(text: string): Promise<number[]> {
           `Gemini embedding dimension mismatch: got ${values.length}, expected ${EMBEDDING_DIMENSION}.`
         );
       }
+      
+      // Store the successful embedding in the cache
+      embeddingCache.set(trimmed, values);
       return values;
+      
     } catch (error: any) {
       if (attempt < RETRY_DELAYS_MS.length && (error.message.includes("Rate limit") || error.message.includes("429"))) {
         console.warn(`[RATE LIMIT] Gemini embedText hit 429. Retrying in ${RETRY_DELAYS_MS[attempt]}ms...`);
@@ -75,73 +87,95 @@ export async function embedTextBatch(texts: string[]): Promise<number[][]> {
   const filtered = texts.map((t) => t.trim()).filter((t) => t.length > 0);
   if (filtered.length === 0) return [];
 
-  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length + 1; attempt++) {
-    try {
-      const response = await fetch(endpoint("batchEmbedContents"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          requests: filtered.map((text) => ({
-            model: `models/${EMBEDDING_MODEL}`,
-            content: { parts: [{ text }] },
-            outputDimensionality: EMBEDDING_DIMENSION, 
-          })),
-        }),
-      });
+  // Identify which texts need to be fetched and which are already cached
+  const missingTexts: string[] = [];
+  for (const text of filtered) {
+    if (!embeddingCache.has(text)) {
+      missingTexts.push(text);
+    }
+  }
 
-      if (!response.ok) {
-        const body = await response.text();
-        if (response.status === 429 || response.status >= 500) {
-          throw new Error(`Batch Rate limit hit: ${response.status} ${body}`);
+  // Fetch only the missing texts from the API
+  if (missingTexts.length > 0) {
+    let batchSuccess = false;
+    
+    for (let attempt = 0; attempt < RETRY_DELAYS_MS.length + 1; attempt++) {
+      try {
+        const response = await fetch(endpoint("batchEmbedContents"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            requests: missingTexts.map((text) => ({
+              model: `models/${EMBEDDING_MODEL}`,
+              content: { parts: [{ text }] },
+              outputDimensionality: EMBEDDING_DIMENSION, 
+            })),
+          }),
+        });
+
+        if (!response.ok) {
+          const body = await response.text();
+          if (response.status === 429 || response.status >= 500) {
+            throw new Error(`Batch Rate limit hit: ${response.status} ${body}`);
+          }
+          throw new Error(`Batch embed HTTP ${response.status} ${body}`);
         }
-        throw new Error(`Batch embed HTTP ${response.status} ${body}`);
-      }
 
-      const json = (await response.json()) as GeminiBatchEmbeddingResponse;
-      const vectors = json.embeddings ?? [];
-      if (vectors.length !== filtered.length) {
-        throw new Error(
-          `Batch embed returned ${vectors.length} vectors, expected ${filtered.length}.`
-        );
-      }
-      return vectors.map((v) => {
-        const values = v.values ?? [];
-        if (values.length > 0 && values.length !== EMBEDDING_DIMENSION) {
+        const json = (await response.json()) as GeminiBatchEmbeddingResponse;
+        const vectors = json.embeddings ?? [];
+        if (vectors.length !== missingTexts.length) {
           throw new Error(
-            `Gemini embedding dimension mismatch: got ${values.length}, expected ${EMBEDDING_DIMENSION}.`
+            `Batch embed returned ${vectors.length} vectors, expected ${missingTexts.length}.`
           );
         }
-        return values;
-      });
-    } catch (err: any) {
-      if (attempt < RETRY_DELAYS_MS.length && (err.message.includes("Rate limit") || err.message.includes("429"))) {
-        console.warn(`[RATE LIMIT] Gemini batch embed hit 429. Retrying in ${RETRY_DELAYS_MS[attempt]}ms...`);
-        await sleep(RETRY_DELAYS_MS[attempt]);
-        continue;
+        
+        // Cache the newly fetched vectors
+        vectors.forEach((v, idx) => {
+          const values = v.values ?? [];
+          if (values.length > 0 && values.length !== EMBEDDING_DIMENSION) {
+            throw new Error(
+              `Gemini embedding dimension mismatch: got ${values.length}, expected ${EMBEDDING_DIMENSION}.`
+            );
+          }
+          embeddingCache.set(missingTexts[idx], values);
+        });
+
+        batchSuccess = true;
+        break; // Exit the retry loop on success
+      } catch (err: any) {
+        if (attempt < RETRY_DELAYS_MS.length && (err.message.includes("Rate limit") || err.message.includes("429"))) {
+          console.warn(`[RATE LIMIT] Gemini batch embed hit 429. Retrying in ${RETRY_DELAYS_MS[attempt]}ms...`);
+          await sleep(RETRY_DELAYS_MS[attempt]);
+          continue;
+        }
+        
+        logWarn(
+          "embed_text_batch_fallback_sequential",
+          err instanceof Error ? err.message : String(err),
+          { stack: err instanceof Error ? err.stack : undefined }
+        );
+        break; 
       }
-      
-      logWarn(
-        "embed_text_batch_fallback_sequential",
-        err instanceof Error ? err.message : String(err),
-        { stack: err instanceof Error ? err.stack : undefined }
-      );
-      break; 
+    }
+
+    // Fallback: execute sequentially if batch fails completely
+    if (!batchSuccess) {
+      try {
+        for (const t of missingTexts) {
+          // embedText already implements caching internally
+          await embedText(t); 
+        }
+      } catch (err) {
+        logWarn(
+          "embed_text_batch_sequential_failed",
+          err instanceof Error ? err.message : String(err),
+          { stack: err instanceof Error ? err.stack : undefined }
+        );
+        throw err;
+      }
     }
   }
 
-  // Fallback: execute sequentially if batch fails completely (now protected by the delay inside embedText)
-  try {
-    const out: number[][] = [];
-    for (const t of filtered) {
-      out.push(await embedText(t)); 
-    }
-    return out;
-  } catch (err) {
-    logWarn(
-      "embed_text_batch_sequential_failed",
-      err instanceof Error ? err.message : String(err),
-      { stack: err instanceof Error ? err.stack : undefined }
-    );
-    throw err;
-  }
+  // Reconstruct and return the final array in the exact original order using the cache
+  return filtered.map((text) => embeddingCache.get(text)!);
 }
