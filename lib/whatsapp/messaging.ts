@@ -31,20 +31,36 @@ async function postToWhatsAppMessages(payload: Record<string, unknown>): Promise
   return { ok: response.ok, status: response.status, body };
 }
 
-/** Marks inbound message as read and shows the typing indicator (max ~25s per call). */
-export async function markMessageReadAndTyping(messageId: string): Promise<void> {
-  const result = await postToWhatsAppMessages({
-    messaging_product: "whatsapp",
-    status: "read",
-    message_id: messageId,
-    typing_indicator: { type: "text" },
-  });
-
-  if (!result.ok) {
-    logWarn("whatsapp_mark_read_typing_failed", result.body, {
-      messageId,
-      status: result.status,
+/**
+ * Marks the inbound message as read and switches the typing indicator on
+ * (Meta keeps it visible for ~25s per call).
+ *
+ * NEVER THROWS. This runs on the worker's critical path purely for UX, so a Graph
+ * API outage, expired token, or network error must not fail the job or block the
+ * RAG pipeline. Returns whether Meta accepted the call, for callers that care.
+ */
+export async function markMessageReadAndTyping(messageId: string): Promise<boolean> {
+  try {
+    const result = await postToWhatsAppMessages({
+      messaging_product: "whatsapp",
+      status: "read",
+      message_id: messageId,
+      typing_indicator: { type: "text" },
     });
+
+    if (!result.ok) {
+      logWarn("whatsapp_mark_read_typing_failed", result.body, {
+        messageId,
+        status: result.status,
+      });
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    // Covers fetch/DNS/TLS failures and a missing WhatsApp config.
+    logError("whatsapp_mark_read_typing_error", err, { messageId });
+    return false;
   }
 }
 
@@ -53,10 +69,14 @@ export interface TypingSessionController {
 }
 
 /**
- * Keeps the typing indicator active during long RAG runs by re-sending every 20s
- * (Meta dismisses typing after ~25s or when a reply is sent).
+ * Keeps an already-visible typing indicator alive during long RAG runs by
+ * re-sending every 20s (Meta dismisses typing after ~25s or when a reply is sent).
+ *
+ * Deliberately does NOT send on start: the caller sends the first indicator via
+ * markMessageReadAndTyping so the user sees it immediately, and firing here too
+ * would double every message's Graph API traffic.
  */
-export function startTypingSession(
+export function startTypingKeepAlive(
   to: string,
   messageId: string | null
 ): TypingSessionController {
@@ -67,16 +87,16 @@ export function startTypingSession(
   let stopped = false;
   const startedAt = Date.now();
 
-  const refresh = (): void => {
+  const interval = setInterval(() => {
     if (stopped) return;
     if (Date.now() - startedAt > TYPING_MAX_DURATION_MS) return;
-    void markMessageReadAndTyping(messageId).catch((err) => {
-      logError("whatsapp_typing_refresh_failed", err, { to, messageId });
+    void markMessageReadAndTyping(messageId).then((ok) => {
+      if (!ok) logWarn("whatsapp_typing_refresh_failed", "Typing refresh rejected.", { to, messageId });
     });
-  };
+  }, TYPING_REFRESH_MS);
 
-  refresh();
-  const interval = setInterval(refresh, TYPING_REFRESH_MS);
+  // Never let the indicator timer hold the Node process open on shutdown.
+  interval.unref?.();
 
   return {
     stop: () => {

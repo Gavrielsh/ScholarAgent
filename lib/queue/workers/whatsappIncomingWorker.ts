@@ -3,6 +3,10 @@ import { Worker, type Job } from "bullmq";
 import { getQueueConnection } from "@/lib/queue/connection";
 import { releaseWhatsAppMessageClaim } from "@/lib/redis/idempotency";
 import { logError, logInfo } from "@/lib/logger";
+import {
+  markMessageReadAndTyping,
+  startTypingKeepAlive,
+} from "@/lib/whatsapp/messaging";
 import { processIncomingMessage } from "@/lib/whatsapp/incomingMessageProcessor";
 import type { ParsedInboundEvent } from "@/lib/whatsapp/types";
 import { WHATSAPP_INCOMING_QUEUE_NAME } from "@/lib/whatsapp/types";
@@ -36,7 +40,21 @@ export function createWhatsAppIncomingWorker(): Worker<ParsedInboundEvent> {
   const worker = new Worker<ParsedInboundEvent>(
     WHATSAPP_INCOMING_QUEUE_NAME,
     async (job) => {
-      await processIncomingMessage(job.data);
+      const { messageId, senderId } = job.data;
+
+      // UX first: the RAG + LLM pipeline takes 1–3s, so acknowledge the message
+      // and show "typing…" before any of that work starts. markMessageReadAndTyping
+      // never throws, so a Graph API failure cannot fail or retry the job.
+      if (messageId) {
+        await markMessageReadAndTyping(messageId);
+      }
+
+      const typing = startTypingKeepAlive(senderId, messageId);
+      try {
+        await processIncomingMessage(job.data);
+      } finally {
+        typing.stop();
+      }
     },
     {
       connection: getQueueConnection(),

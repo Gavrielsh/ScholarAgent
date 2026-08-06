@@ -5,10 +5,6 @@ import { appendChatEntries, readChatHistory } from "@/lib/chat/history";
 import { buildBoundedConversationContext, truncateInboundMessage } from "@/lib/chat/context";
 import { lookupUserByPhone, UserRegistryDbError } from "@/lib/auth/userRegistry";
 import { logError } from "@/lib/logger";
-import {
-  markMessageReadAndTyping,
-  startTypingSession,
-} from "@/lib/whatsapp/messaging";
 import { sendWhatsAppTextMessage } from "@/lib/whatsapp/sendMessage";
 import type { ParsedInboundEvent } from "@/lib/whatsapp/types";
 
@@ -46,97 +42,91 @@ async function persistOutboundMessage(senderId: string, content: string): Promis
   }
 }
 
+/**
+ * Business logic for one inbound message. Runs inside the BullMQ worker, which
+ * owns the read receipt and typing-indicator lifecycle around this call.
+ */
 export async function processIncomingMessage(event: ParsedInboundEvent): Promise<void> {
   const { senderId, messageId } = event;
   const messageBody = truncateInboundMessage(event.messageBody);
 
-  if (messageId) {
-    void markMessageReadAndTyping(messageId).catch((err) => {
-      logError("whatsapp_initial_typing_failed", err, { senderId, messageId });
-    });
+  let userContext;
+  try {
+    userContext = await lookupUserByPhone(senderId);
+  } catch (err) {
+    if (err instanceof UserRegistryDbError) {
+      logError("user_registry_db_error", err, { senderId });
+      await sendWhatsAppTextMessage({
+        to: senderId,
+        body: "מצטערים, הייתה תקלה זמנית במערכת. אנא נסה שוב בעוד מספר דקות.",
+      });
+      return;
+    }
+    throw err;
   }
 
-  const typingSession = startTypingSession(senderId, messageId);
+  if (!userContext) {
+    await sendWhatsAppTextMessage({ to: senderId, body: UNAUTHORIZED_MESSAGE });
+    return;
+  }
+
+  await persistInboundMessage(senderId, messageBody, messageId);
+
+  let priorMessages: ChatMessage[] = [];
+  try {
+    const history = await readChatHistory(senderId);
+    const withoutLast = history.entries.slice(0, -1);
+    priorMessages = buildBoundedConversationContext(withoutLast);
+  } catch (err) {
+    logError("chat_history_context_load_failed", err, { senderId });
+  }
+
+  let processResult;
+  try {
+    processResult = await processBaselineQuery({
+      senderPhone: senderId,
+      query: messageBody,
+      userContext,
+      priorMessages,
+      buttonId: event.buttonId,
+    });
+  } catch (err) {
+    logError("baseline_process_failed", err, { senderId, messageId });
+    await sendWhatsAppTextMessage({ to: senderId, body: FALLBACK_ERROR_MESSAGE });
+    throw err;
+  }
+
+  if (processResult.kind === "interactive_sent") {
+    return;
+  }
+
+  const outbound =
+    processResult.kind === "already_sent_prompt"
+      ? processResult.answer
+      : processResult.answer || FALLBACK_ERROR_MESSAGE;
+
+  if (!outbound) {
+    return;
+  }
 
   try {
-    let userContext;
+    await sendWhatsAppTextMessage({ to: senderId, body: outbound });
+  } catch (err) {
+    logError("whatsapp_reply_send_failed", err, { senderId, messageId });
+    throw err;
+  }
+
+  if (processResult.ragMetrics) {
     try {
-      userContext = await lookupUserByPhone(senderId);
-    } catch (err) {
-      if (err instanceof UserRegistryDbError) {
-        logError("user_registry_db_error", err, { senderId });
-        await sendWhatsAppTextMessage({
-          to: senderId,
-          body: "מצטערים, הייתה תקלה זמנית במערכת. אנא נסה שוב בעוד מספר דקות.",
-        });
-        return;
-      }
-      throw err;
-    }
-
-    if (!userContext) {
-      await sendWhatsAppTextMessage({ to: senderId, body: UNAUTHORIZED_MESSAGE });
-      return;
-    }
-
-    await persistInboundMessage(senderId, messageBody, messageId);
-
-    let priorMessages: ChatMessage[] = [];
-    try {
-      const history = await readChatHistory(senderId);
-      const withoutLast = history.entries.slice(0, -1);
-      priorMessages = buildBoundedConversationContext(withoutLast);
-    } catch (err) {
-      logError("chat_history_context_load_failed", err, { senderId });
-    }
-
-    let processResult;
-    try {
-      processResult = await processBaselineQuery({
-        senderPhone: senderId,
+      await recordBaselineRagMetrics({
         query: messageBody,
         userContext,
-        priorMessages,
-        buttonId: event.buttonId,
+        result: processResult.ragMetrics,
       });
     } catch (err) {
-      logError("baseline_process_failed", err, { senderId, messageId });
-      await sendWhatsAppTextMessage({ to: senderId, body: FALLBACK_ERROR_MESSAGE });
-      throw err;
+      logError("baseline_post_send_metrics_failed", err, { senderId });
     }
-
-    if (processResult.kind === "interactive_sent") {
-      return;
-    }
-
-    const outbound =
-      processResult.kind === "already_sent_prompt"
-        ? processResult.answer
-        : processResult.answer || FALLBACK_ERROR_MESSAGE;
-
-    if (outbound) {
-      try {
-        await sendWhatsAppTextMessage({ to: senderId, body: outbound });
-      } catch (err) {
-        logError("whatsapp_reply_send_failed", err, { senderId, messageId });
-        throw err;
-      }
-
-      if (processResult.ragMetrics) {
-        try {
-          await recordBaselineRagMetrics({
-            query: messageBody,
-            userContext,
-            result: processResult.ragMetrics,
-          });
-        } catch (err) {
-          logError("baseline_post_send_metrics_failed", err, { senderId });
-        }
-      }
-
-      await persistOutboundMessage(senderId, outbound);
-    }
-  } finally {
-    typingSession.stop();
   }
+
+  await persistOutboundMessage(senderId, outbound);
 }
