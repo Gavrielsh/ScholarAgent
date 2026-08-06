@@ -1,9 +1,10 @@
-import type { UserContext } from "@/lib/auth/types";
-import { isElevatedRole } from "@/lib/auth/roles";
-import { getLlmAdapter } from "@/lib/llm/adapter";
+// Lexical intent gate. Deliberately LLM-free: an extra model round-trip purely to
+// pick a label added a full network hop to TTFT on every message. RAG_INQUIRY vs
+// chit-chat is now resolved inside the single main generation call instead.
+
 import { CLAUDE_FAST_MODEL } from "@/lib/llm/providers/claude";
 
-export type BaselineIntent = "RAG_INQUIRY" | "CHAT_HISTORY" | "CHIT_CHAT";
+export type BaselineIntent = "RAG_INQUIRY" | "CHAT_HISTORY";
 
 const CHAT_HISTORY_HEURISTICS: RegExp[] = [
   /היסטורי(?:ת|ות)?\s*(?:שיחה|צ'אט|צאט|whatsapp)?/i,
@@ -15,10 +16,15 @@ const CHAT_HISTORY_HEURISTICS: RegExp[] = [
   /daily\s*summary/i,
 ];
 
-function matchesChatHistoryHeuristic(query: string): boolean {
+/**
+ * Synchronous O(n) lexical probe for chat-history requests.
+ * Consumed by the orchestrator's single-pass sweep — never call an LLM for this.
+ */
+export function matchesChatHistoryHeuristic(query: string): boolean {
   return CHAT_HISTORY_HEURISTICS.some((pattern) => pattern.test(query));
 }
 
+/** Cheap/fast model tier, used by the L0/L1 chat-history summarisers. */
 export function resolveFastModel(): string {
   const provider = (process.env.LLM_PROVIDER ?? "mock").toLowerCase();
   const explicit = process.env.LLM_FAST_MODEL?.trim();
@@ -33,70 +39,5 @@ export function resolveFastModel(): string {
       return CLAUDE_FAST_MODEL;
     default:
       return "mock-fast";
-  }
-}
-
-function parseIntentFromLlm(raw: string): BaselineIntent {
-  const normalized = raw.trim().toUpperCase();
-  if (normalized.includes("CHAT_HISTORY")) return "CHAT_HISTORY";
-  if (normalized.includes("CHIT_CHAT")) return "CHIT_CHAT";
-  return "RAG_INQUIRY";
-}
-
-/**
- * Fast intent gate before pgvector retrieval. Only L0/L1 can trigger CHAT_HISTORY routing.
- */
-export async function classifyBaselineIntent(
-  query: string,
-  userContext: UserContext
-): Promise<BaselineIntent> {
-  if (!isElevatedRole(userContext.permissionLevel)) {
-    return "RAG_INQUIRY";
-  }
-
-  if (matchesChatHistoryHeuristic(query)) {
-    return "CHAT_HISTORY";
-  }
-
-  const adapter = getLlmAdapter();
-  try {
-    const raw = await adapter.generateText({
-      model: resolveFastModel(),
-      temperature: 0,
-      messages: [
-        {
-          role: "system",
-          content: [
-            'Classify the user message into exactly one label: "CHAT_HISTORY", "RAG_INQUIRY", or "CHIT_CHAT".',
-            "",
-            "Label definitions:",
-            "  CHAT_HISTORY  — Requests to summarize, review, or export today's WhatsApp conversations of staff/mentors.",
-            "  NEEDS_RETRIEVAL / RAG_INQUIRY — Any question about pedagogy, conflict resolution, social dynamics,",
-            "    activity planning, logistics, working with children, mentoring scenarios, or operational guidance.",
-            "    When in doubt, default to RAG_INQUIRY — it is ALWAYS better to retrieve than to skip retrieval.",
-            "  CHIT_CHAT     — Generic greetings, small-talk, or messages with no pedagogical or logistical content.",
-            "",
-            "Few-shot examples:",
-            'User: "שני חניכים התחילו לריב ולקלל אחד את השני באמצע המשחק."',
-            "→ RAG_INQUIRY  (Topic: Conflict Resolution)",
-            "",
-            'User: "איך כדאי לי לארגן את לוגיסטיקת חלוקת הציוד מחר מול מנהל הצהרון?"',
-            "→ RAG_INQUIRY  (Topic: Logistics & Planning)",
-            "",
-            'User: "יש לי חניך שיושב בצד בהפסקה, איך לשלב אותו?"',
-            "→ RAG_INQUIRY  (Topic: Social Inclusion)",
-            "",
-            'User: "היי, מה קורה?"',
-            "→ CHIT_CHAT",
-            "",
-            "Reply with the label only — no explanation.",
-          ].join("\n"),
-        },
-        { role: "user", content: query },
-      ],
-    });
-    return parseIntentFromLlm(raw);
-  } catch {
-    return "RAG_INQUIRY";
   }
 }

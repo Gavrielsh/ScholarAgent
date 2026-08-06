@@ -1,11 +1,14 @@
 import type { ChatMessage } from "@/lib/agent/state";
 import type { UserContext } from "@/lib/auth/types";
-import { shouldSkipGuardrails } from "@/lib/auth/roles";
+import { isElevatedRole, shouldSkipGuardrails } from "@/lib/auth/roles";
 import {
   resolveL0AdminFlow,
   resolveL1ChatHistoryFlow,
 } from "@/lib/agent/baseline/chatHistoryHandlers";
-import { classifyBaselineIntent, type BaselineIntent } from "@/lib/agent/baseline/intentRouter";
+import {
+  matchesChatHistoryHeuristic,
+  type BaselineIntent,
+} from "@/lib/agent/baseline/intentRouter";
 import {
   runBaselineRagCore,
   type BaselineRagCoreResult,
@@ -33,36 +36,68 @@ export interface BaselineProcessInput {
   buttonId?: string;
 }
 
-export async function processBaselineQuery(
-  input: BaselineProcessInput
-): Promise<BaselineProcessResult> {
-  const { query, userContext, priorMessages = [], buttonId, senderPhone } = input;
-  const skipGuardrails = shouldSkipGuardrails(userContext);
+const EMPTY_DLS = { score: 0, totalChunks: 0, unauthorizedChunks: 0, passed: true } as const;
 
-  // Emergency short-circuit: evaluated BEFORE intent routing and RAG.
-  // If the message contains distress signals, we NEVER let the LLM handle it.
-  if (!skipGuardrails) {
+/** Outcome of the single synchronous pre-flight pass over the raw query. */
+type LexicalVerdict =
+  | { kind: "emergency"; response: string }
+  | { kind: "chat_history" }
+  | { kind: "rag" };
+
+/**
+ * Single O(n) lexical sweep run before any I/O.
+ *
+ * Safety and chat-history routing used to be two separate sequential passes, the
+ * second of which could escalate to an LLM round-trip. Both are pure regex work,
+ * so they collapse into one synchronous function that costs microseconds and adds
+ * zero network latency to TTFT.
+ */
+function sweepQueryLexically(query: string, userContext: UserContext): LexicalVerdict {
+  // Safety first: distress signals must never reach the LLM, and must be checked
+  // before routing so no other branch can swallow the query.
+  if (!shouldSkipGuardrails(userContext)) {
     const safety = checkSafetySignals(query);
     if (safety.isEmergency) {
-      const emergencyResponse = safety.response ?? MANDATORY_HANDOFF_RESPONSE_HE;
-      const safetyPayload: BaselineRagCoreResult = {
-        answer: emergencyResponse,
-        retrievedChunks: [],
-        dls: { score: 0, totalChunks: 0, unauthorizedChunks: 0, passed: true },
-        latencyMs: 0,
-      };
       return {
-        kind: "text",
-        answer: emergencyResponse,
-        ragMetrics: safetyPayload,
-        intent: "RAG_INQUIRY",
+        kind: "emergency",
+        response: safety.response ?? MANDATORY_HANDOFF_RESPONSE_HE,
       };
     }
   }
 
-  const intent = buttonId
-    ? "CHAT_HISTORY"
-    : await classifyBaselineIntent(query, userContext);
+  // Only L0/L1 may pull staff chat history.
+  if (isElevatedRole(userContext.permissionLevel) && matchesChatHistoryHeuristic(query)) {
+    return { kind: "chat_history" };
+  }
+
+  return { kind: "rag" };
+}
+
+export async function processBaselineQuery(
+  input: BaselineProcessInput
+): Promise<BaselineProcessResult> {
+  const { query, userContext, priorMessages = [], buttonId, senderPhone } = input;
+
+  const sweep = sweepQueryLexically(query, userContext);
+
+  if (sweep.kind === "emergency") {
+    const safetyPayload: BaselineRagCoreResult = {
+      answer: sweep.response,
+      retrievedChunks: [],
+      dls: { ...EMPTY_DLS },
+      latencyMs: 0,
+    };
+    return {
+      kind: "text",
+      answer: sweep.response,
+      ragMetrics: safetyPayload,
+      intent: "RAG_INQUIRY",
+    };
+  }
+
+  // An interactive button reply is always a chat-history menu selection.
+  const intent: BaselineIntent =
+    buttonId || sweep.kind === "chat_history" ? "CHAT_HISTORY" : "RAG_INQUIRY";
 
   if (userContext.permissionLevel === 0) {
     const l0 = await resolveL0AdminFlow({
@@ -89,16 +124,8 @@ export async function processBaselineQuery(
     return { kind: "text", answer, ragMetrics: null, intent };
   }
 
-  if (intent === "CHIT_CHAT") {
-    return {
-      kind: "text",
-      answer:
-        "שלום! אני הבוט המנטורי של מיזם 'אדם לאדם'. אשמח לסייע לך בשאלות פדגוגיות, התמודדות עם קונפליקטים, תכנון פעילויות ולוגיסטיקה של הצהרון.",
-      ragMetrics: null,
-      intent,
-    };
-  }
-
+  // Greetings and small talk are handled by the system directives inside the main
+  // generation call, so no separate classification hop is needed here.
   const rag = await runBaselineRagCore({
     query,
     userContext,

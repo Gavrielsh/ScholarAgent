@@ -5,9 +5,6 @@ export interface BaselineTraceHandles {
   retrievalSpan: {
     end: (output: { chunkIds: string[]; fusedCount: number }) => void;
   };
-  rerankSpan: {
-    end: (output: { chunkIds: string[] }) => void;
-  };
   /** Call after the final `messages` array for the baseline LLM is assembled. */
   attachLlmGeneration: (messages: LlmMessage[]) => {
     end: (output: { answer: string }) => void;
@@ -20,7 +17,6 @@ function noopTrace(): BaselineTraceHandles {
   return {
     endRoot: () => {},
     retrievalSpan: noop,
-    rerankSpan: noop,
     attachLlmGeneration: () => noopGen,
   };
 }
@@ -32,7 +28,7 @@ type LangfuseClient = any;
 
 /**
  * Optional Langfuse tracing. Set LANGFUSE_SECRET_KEY (+ LANGFUSE_PUBLIC_KEY for cloud).
- * Traces retrieval, re-ranking, the exact LLM message list, and the model answer.
+ * Traces retrieval, the exact LLM message list, and the model answer.
  */
 export async function startBaselineRagTrace(args: {
   userId: string;
@@ -59,7 +55,6 @@ export async function startBaselineRagTrace(args: {
     });
 
     const retrieval = root.span({ name: "retrieval", input: { query: args.query } });
-    const rerank = root.span({ name: "rerank" });
 
     return {
       endRoot: (output: { answer: string; chunkIds: string[]; latencyMs: number }) => {
@@ -71,11 +66,6 @@ export async function startBaselineRagTrace(args: {
       retrievalSpan: {
         end: (output) => {
           if (typeof retrieval.end === "function") retrieval.end({ output });
-        },
-      },
-      rerankSpan: {
-        end: (output) => {
-          if (typeof rerank.end === "function") rerank.end({ output });
         },
       },
       attachLlmGeneration: (messages: LlmMessage[]) => {
