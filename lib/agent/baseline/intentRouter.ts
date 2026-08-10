@@ -24,6 +24,19 @@ export function matchesChatHistoryHeuristic(query: string): boolean {
   return CHAT_HISTORY_HEURISTICS.some((pattern) => pattern.test(query));
 }
 
+// Deliberately whole-message matches (anchored ^...$): an admin's analytics
+// follow-up question might legitimately contain the word "exit"/"יציאה" mid-sentence
+// (e.g. "מי יצא מהיסטוריית השיחה?"), so only a bare exit command should short-circuit.
+const ANALYTICS_EXIT_HEURISTICS: RegExp[] = [/^\s*(cancel|exit|בטל|ביטול|יציאה|צא)\s*$/i];
+
+/**
+ * Cheap lexical check for an explicit exit from ADMIN_ANALYTICS_MODE, tried before
+ * any LLM classification step so "cancel"/"exit" always resolves deterministically.
+ */
+export function matchesAdminAnalyticsExitCommand(query: string): boolean {
+  return ANALYTICS_EXIT_HEURISTICS.some((pattern) => pattern.test(query.trim()));
+}
+
 /** Cheap/fast model tier, used by the L0/L1 chat-history summarisers. */
 export function resolveFastModel(): string {
   const provider = (process.env.LLM_PROVIDER ?? "mock").toLowerCase();

@@ -1,4 +1,4 @@
-import { withClient } from "@/lib/db/client";
+import { withRlsTransaction } from "@/lib/db/client";
 import type { PermissionLevel } from "@/lib/auth/types";
 import { logError } from "@/lib/logger";
 
@@ -18,6 +18,17 @@ export interface UserDirectoryEntry {
   permissionLevel: PermissionLevel;
 }
 
+/** Thrown when an admin-only capability (specific-user lookup) is reached by a
+ * non-admin requesterPermissionLevel. Defense-in-depth: the orchestrator already
+ * gates these flows to L0, but this repository layer re-validates independently so
+ * a future refactor bug elsewhere can never leak another user's chat history. */
+export class ForbiddenAdminActionError extends Error {
+  constructor(action: string, requesterPermissionLevel: PermissionLevel) {
+    super(`Admin-only action "${action}" attempted by permission level ${requesterPermissionLevel}`);
+    this.name = "ForbiddenAdminActionError";
+  }
+}
+
 const REPORT_TIMEZONE = process.env.CHAT_REPORT_TIMEZONE ?? "Asia/Jerusalem";
 
 function todayStartParam(): string {
@@ -25,13 +36,28 @@ function todayStartParam(): string {
 }
 
 /**
- * All chat_history rows for L2/L3 users since local midnight (report timezone).
+ * Report scope is derived exclusively from the trusted, DB-resolved requester
+ * permission level — never from an externally-supplied level list. L0 (Admin) gets
+ * a full bypass across every tier; everyone else keeps the historical L2/L3 scope.
+ */
+function resolveReportLevels(requesterPermissionLevel: PermissionLevel): PermissionLevel[] {
+  return requesterPermissionLevel === 0 ? [0, 1, 2, 3] : [2, 3];
+}
+
+/**
+ * All chat_history rows in scope for the requester since local midnight (report
+ * timezone). Scope is computed server-side from requesterPermissionLevel; the SQL
+ * `WHERE u.permission_level = ANY($1)` clause is an app-level guarantee on top of
+ * the `rls_chat_history_select` RLS policy (set via withRlsTransaction below), so
+ * unauthorized rows are excluded even if one of the two layers is misconfigured.
  */
 export async function fetchTodayStaffChatHistories(
-  levels: PermissionLevel[] = [2, 3]
+  requesterPermissionLevel: PermissionLevel
 ): Promise<StaffChatRow[]> {
+  const levels = resolveReportLevels(requesterPermissionLevel);
+
   try {
-    const result = await withClient((client) =>
+    const result = await withRlsTransaction(requesterPermissionLevel, (client) =>
       client.query<{
         phone_number: string;
         display_name: string | null;
@@ -60,17 +86,29 @@ export async function fetchTodayStaffChatHistories(
       occurredAt: row.occurred_at.toISOString(),
     }));
   } catch (err) {
-    logError("admin_history_fetch_staff_failed", err, { levels });
+    logError("admin_history_fetch_staff_failed", err, { requesterPermissionLevel, levels });
     throw err;
   }
 }
 
-export async function findUsersByDisplayName(name: string): Promise<UserDirectoryEntry[]> {
+/**
+ * Directory search used by the L0 "Specific User" report flow. Admin-only: it can
+ * surface any registered user (including L0/L1), so it must never be reachable by
+ * a non-admin requester.
+ */
+export async function findUsersByDisplayName(
+  name: string,
+  requesterPermissionLevel: PermissionLevel
+): Promise<UserDirectoryEntry[]> {
+  if (requesterPermissionLevel !== 0) {
+    throw new ForbiddenAdminActionError("findUsersByDisplayName", requesterPermissionLevel);
+  }
+
   const trimmed = name.trim();
   if (!trimmed) return [];
 
   try {
-    const result = await withClient((client) =>
+    const result = await withRlsTransaction(requesterPermissionLevel, (client) =>
       client.query<{
         id: string;
         phone_number: string;
@@ -93,14 +131,26 @@ export async function findUsersByDisplayName(name: string): Promise<UserDirector
       permissionLevel: row.permission_level,
     }));
   } catch (err) {
-    logError("admin_history_find_user_failed", err, { name: trimmed });
+    logError("admin_history_find_user_failed", err, { name: trimmed, requesterPermissionLevel });
     throw err;
   }
 }
 
-export async function fetchTodayChatHistoryForPhone(phoneNumber: string): Promise<StaffChatRow[]> {
+/**
+ * Full-day chat history for one arbitrary phone number. Admin-only: unlike the
+ * daily summary (scoped by permission level), this can target any single user, so
+ * it must never be reachable by a non-admin requester.
+ */
+export async function fetchTodayChatHistoryForPhone(
+  phoneNumber: string,
+  requesterPermissionLevel: PermissionLevel
+): Promise<StaffChatRow[]> {
+  if (requesterPermissionLevel !== 0) {
+    throw new ForbiddenAdminActionError("fetchTodayChatHistoryForPhone", requesterPermissionLevel);
+  }
+
   try {
-    const result = await withClient((client) =>
+    const result = await withRlsTransaction(requesterPermissionLevel, (client) =>
       client.query<{
         phone_number: string;
         display_name: string | null;
@@ -129,14 +179,20 @@ export async function fetchTodayChatHistoryForPhone(phoneNumber: string): Promis
       occurredAt: row.occurred_at.toISOString(),
     }));
   } catch (err) {
-    logError("admin_history_fetch_user_day_failed", err, { phoneNumber });
+    logError("admin_history_fetch_user_day_failed", err, { phoneNumber, requesterPermissionLevel });
     throw err;
   }
 }
 
-export function formatStaffRowsForLlm(rows: StaffChatRow[]): string {
+export function formatStaffRowsForLlm(
+  rows: StaffChatRow[],
+  requesterPermissionLevel: PermissionLevel
+): string {
   if (rows.length === 0) {
-    return "אין הודעות היום ממשתמשי L2 או L3.";
+    // Empty result sets are formatted, human-readable Hebrew — never thrown as errors.
+    return requesterPermissionLevel === 0
+      ? "אין הודעות היום מאף אחד מהמשתמשים (L0 עד L3)."
+      : "אין הודעות היום ממשתמשי L2 או L3.";
   }
 
   const byUser = new Map<string, StaffChatRow[]>();

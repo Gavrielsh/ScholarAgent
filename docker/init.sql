@@ -78,6 +78,33 @@ CREATE TABLE IF NOT EXISTS chat_history (
 CREATE INDEX IF NOT EXISTS chat_history_sender_occurred_idx
   ON chat_history (sender_id, occurred_at ASC, created_at ASC);
 
--- 7) Default session parameter
+-- 7) Row-Level Security on chat_history (migration 005)
+-- Defense-in-depth on top of the app-level filter in lib/chat/adminHistory.ts:
+-- L0 admin sessions get a full SELECT bypass; other sessions that explicitly opt in
+-- (via withRlsTransaction) only see L2/L3 senders. Sessions that never set
+-- app.user_permission_level (plain chat persistence / own-history reads) are left
+-- unrestricted by the IS NULL clause, so ordinary message traffic is unaffected.
+ALTER TABLE chat_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE chat_history FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS rls_chat_history_select ON chat_history;
+CREATE POLICY rls_chat_history_select ON chat_history
+  FOR SELECT
+  USING (
+    current_setting('app.user_permission_level', true) IS NULL
+    OR current_setting('app.user_permission_level', true)::integer = 0
+    OR EXISTS (
+      SELECT 1 FROM users u
+       WHERE u.phone_number = chat_history.sender_id
+         AND u.permission_level = ANY(ARRAY[2, 3])
+    )
+  );
+
+DROP POLICY IF EXISTS rls_chat_history_insert ON chat_history;
+CREATE POLICY rls_chat_history_insert ON chat_history
+  FOR INSERT
+  WITH CHECK (true);
+
+-- 8) Default session parameter
 -- Fallback to the lowest registered level (3) if no permission level is explicitly set.
 SELECT set_config('app.user_permission_level', '3', false);
