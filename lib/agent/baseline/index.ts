@@ -11,6 +11,7 @@ import { computeDls, type DlsResult } from "@/lib/metrics/dls";
 import type { LlmMessage } from "@/lib/llm/types";
 import { logError } from "@/lib/logger";
 import { startBaselineRagTrace } from "@/lib/observability/tracing";
+import { formatWhatsAppMarkdown } from "@/lib/whatsapp/formatting";
 
 /**
  * Per-leg (vector / BM25) DB fetch depth, expressed as a multiple of the final
@@ -25,7 +26,7 @@ const MIN_FUSION_DEPTH = 20;
 const CONVERSATION_WINDOW_TURNS = 6;
 
 const CHIT_CHAT_REPLY_HE =
-  "שלום! אני הבוט המנטורי של מיזם 'אדם לאדם'. אשמח לסייע לך בשאלות פדגוגיות, התמודדות עם קונפליקטים, תכנון פעילויות ולוגיסטיקה של הצהרון.";
+  "שלום! אני הבוט המנטורי של מיזם 'אדם לאדם '. אשמח לסייע לך בשאלות פדגוגיות, התמודדות עם קונפליקטים, תכנון פעילויות ולוגיסטיקה של הצהרון.";
 
 function isConversationMessage(message: ChatMessage): message is ChatMessage & {
   role: "user" | "assistant";
@@ -181,7 +182,7 @@ export async function runBaselineRagCore(input: BaselineRagInput): Promise<Basel
     messages: llmMessages,
     temperature: 0.3,
   });
-  answer = answer.replace(/\*\*/g, "*");
+  answer = formatWhatsAppMarkdown(answer);
   genTrace.end({ answer });
 
   const latencyMs = Date.now() - startMs;

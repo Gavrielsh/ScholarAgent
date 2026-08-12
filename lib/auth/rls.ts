@@ -65,6 +65,10 @@ export const KNOWLEDGE_BASE_SCHEMA_SQL = `
 // once, not re-hardcoded as a magic `0` across call sites.
 export const ADMIN_PERMISSION_LEVEL: PermissionLevel = 0;
 
+// The L1 Manager tier. Centralised alongside ADMIN_PERMISSION_LEVEL so the two
+// elevated roles are defined in one place rather than as magic numbers.
+export const MANAGER_PERMISSION_LEVEL: PermissionLevel = 1;
+
 // Schema definition for the chat_history RLS policy (for reference; run via
 // migrations/005_chat_history_rls.sql). Applied via withRlsTransaction(), which sets
 // app.user_permission_level per-transaction before the admin report queries run.

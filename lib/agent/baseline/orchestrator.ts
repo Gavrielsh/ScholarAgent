@@ -1,6 +1,11 @@
 import type { ChatMessage } from "@/lib/agent/state";
 import type { UserContext } from "@/lib/auth/types";
-import { isElevatedRole, shouldSkipGuardrails } from "@/lib/auth/roles";
+import {
+  isAdminRole,
+  isElevatedRole,
+  isManagerRole,
+  shouldSkipGuardrails,
+} from "@/lib/auth/roles";
 import { resolveAdminAnalyticsFollowUp } from "@/lib/agent/baseline/adminAnalyticsHandler";
 import {
   resolveL0AdminFlow,
@@ -85,8 +90,8 @@ export async function processBaselineQuery(
   // treated as a generic RAG_INQUIRY. A button click or an in-progress L0 menu
   // selection (l0AdminSession) is an explicit fresh action, so only free text
   // outside those flows is eligible to be treated as an analytics follow-up.
-  // resolveAdminAnalyticsFollowUp re-validates permissionLevel === 0 internally.
-  if (userContext.permissionLevel === 0 && !buttonId && !getL0AdminSession(senderPhone)) {
+  // resolveAdminAnalyticsFollowUp re-validates the admin role internally.
+  if (isAdminRole(userContext.permissionLevel) && !buttonId && !getL0AdminSession(senderPhone)) {
     const analytics = await resolveAdminAnalyticsFollowUp({
       adminPhone: senderPhone,
       query,
@@ -118,7 +123,7 @@ export async function processBaselineQuery(
   const intent: BaselineIntent =
     buttonId || sweep.kind === "chat_history" ? "CHAT_HISTORY" : "RAG_INQUIRY";
 
-  if (userContext.permissionLevel === 0) {
+  if (isAdminRole(userContext.permissionLevel)) {
     const l0 = await resolveL0AdminFlow({
       adminPhone: senderPhone,
       query,
@@ -141,7 +146,7 @@ export async function processBaselineQuery(
     // L0 non–chat-history queries fall through to standard RAG below.
   }
 
-  if (userContext.permissionLevel === 1 && intent === "CHAT_HISTORY") {
+  if (isManagerRole(userContext.permissionLevel) && intent === "CHAT_HISTORY") {
     const answer = await resolveL1ChatHistoryFlow(userContext.permissionLevel);
     return { kind: "text", answer, ragMetrics: null, intent };
   }

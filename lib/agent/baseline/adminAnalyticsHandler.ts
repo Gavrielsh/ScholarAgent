@@ -1,4 +1,5 @@
 import { getLlmAdapter } from "@/lib/llm/adapter";
+import { isAdminRole } from "@/lib/auth/roles";
 import type { PermissionLevel } from "@/lib/auth/types";
 import { fetchTodayStaffChatHistories, formatStaffRowsForLlm } from "@/lib/chat/adminHistory";
 import {
@@ -98,7 +99,7 @@ export async function resolveAdminAnalyticsFollowUp(input: {
   // Security: only L0 admins can ever enter/consult ADMIN_ANALYTICS_MODE. This
   // mirrors the guard in resolveL0AdminFlow - requesterPermissionLevel is always
   // DB-resolved, never taken from the message payload.
-  if (input.requesterPermissionLevel !== 0) {
+  if (!isAdminRole(input.requesterPermissionLevel)) {
     return { handled: false };
   }
 

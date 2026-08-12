@@ -1,4 +1,5 @@
 import { getLlmAdapter } from "@/lib/llm/adapter";
+import { isAdminRole } from "@/lib/auth/roles";
 import type { PermissionLevel } from "@/lib/auth/types";
 import {
   fetchTodayChatHistoryForPhone,
@@ -14,6 +15,7 @@ import {
   setL0AdminSession,
 } from "@/lib/chat/l0AdminSession";
 import { logError } from "@/lib/logger";
+import { formatWhatsAppMarkdown } from "@/lib/whatsapp/formatting";
 import { sendWhatsAppInteractiveButtons } from "@/lib/whatsapp/messaging";
 
 import { resolveFastModel } from "./intentRouter";
@@ -30,10 +32,11 @@ async function summarizeStaffDay(
   rawData: string,
   requesterPermissionLevel: PermissionLevel
 ): Promise<string> {
-  const systemPrompt =
-    requesterPermissionLevel === 0 ? FULL_SCOPE_SUMMARY_PROMPT : STAFF_ONLY_SUMMARY_PROMPT;
+  const systemPrompt = isAdminRole(requesterPermissionLevel)
+    ? FULL_SCOPE_SUMMARY_PROMPT
+    : STAFF_ONLY_SUMMARY_PROMPT;
   const adapter = getLlmAdapter();
-  let answer = await adapter.generateText({
+  const answer = await adapter.generateText({
     model: resolveFastModel(),
     temperature: 0.2,
     messages: [
@@ -41,8 +44,7 @@ async function summarizeStaffDay(
       { role: "user", content: rawData },
     ],
   });
-  answer = answer.replace(/\*\*/g, "*");
-  return answer.trim();
+  return formatWhatsAppMarkdown(answer);
 }
 
 export async function runL1DailyStaffSummary(
@@ -131,7 +133,7 @@ export async function resolveL0AdminFlow(input: {
   // id. This flow grants access to every user's chat history, so if it is ever
   // reached by a non-admin (e.g. a future refactor bug), fail closed and log it
   // rather than trust the caller.
-  if (input.requesterPermissionLevel !== 0) {
+  if (!isAdminRole(input.requesterPermissionLevel)) {
     logError(
       "l0_admin_flow_permission_violation",
       new Error("non-admin reached L0 admin flow"),

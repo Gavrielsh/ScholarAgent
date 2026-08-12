@@ -1,4 +1,5 @@
 import { withRlsTransaction } from "@/lib/db/client";
+import { isAdminRole } from "@/lib/auth/roles";
 import type { PermissionLevel } from "@/lib/auth/types";
 import { logError } from "@/lib/logger";
 
@@ -41,7 +42,7 @@ function todayStartParam(): string {
  * a full bypass across every tier; everyone else keeps the historical L2/L3 scope.
  */
 function resolveReportLevels(requesterPermissionLevel: PermissionLevel): PermissionLevel[] {
-  return requesterPermissionLevel === 0 ? [0, 1, 2, 3] : [2, 3];
+  return isAdminRole(requesterPermissionLevel) ? [0, 1, 2, 3] : [2, 3];
 }
 
 /**
@@ -100,7 +101,7 @@ export async function findUsersByDisplayName(
   name: string,
   requesterPermissionLevel: PermissionLevel
 ): Promise<UserDirectoryEntry[]> {
-  if (requesterPermissionLevel !== 0) {
+  if (!isAdminRole(requesterPermissionLevel)) {
     throw new ForbiddenAdminActionError("findUsersByDisplayName", requesterPermissionLevel);
   }
 
@@ -145,7 +146,7 @@ export async function fetchTodayChatHistoryForPhone(
   phoneNumber: string,
   requesterPermissionLevel: PermissionLevel
 ): Promise<StaffChatRow[]> {
-  if (requesterPermissionLevel !== 0) {
+  if (!isAdminRole(requesterPermissionLevel)) {
     throw new ForbiddenAdminActionError("fetchTodayChatHistoryForPhone", requesterPermissionLevel);
   }
 
@@ -190,7 +191,7 @@ export function formatStaffRowsForLlm(
 ): string {
   if (rows.length === 0) {
     // Empty result sets are formatted, human-readable Hebrew — never thrown as errors.
-    return requesterPermissionLevel === 0
+    return isAdminRole(requesterPermissionLevel)
       ? "אין הודעות היום מאף אחד מהמשתמשים (L0 עד L3)."
       : "אין הודעות היום ממשתמשי L2 או L3.";
   }
