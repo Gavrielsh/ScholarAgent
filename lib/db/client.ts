@@ -145,6 +145,34 @@ export async function query<T extends QueryResultRow = QueryResultRow>(
   }
 }
 
+/** Subset of `pg`'s DatabaseError that we actually branch on. */
+interface PostgresErrorShape {
+  code?: unknown;
+  constraint?: unknown;
+}
+
+function asPostgresError(err: unknown): PostgresErrorShape | null {
+  if (typeof err !== "object" || err === null) return null;
+  return err as PostgresErrorShape;
+}
+
+/**
+ * True for SQLSTATE 23505 (unique_violation).
+ *
+ * Treated as success, never as a retryable failure: it means the row this
+ * attempt was trying to write is already there, which under BullMQ retries is
+ * the expected outcome rather than an error. Retrying would loop forever.
+ */
+export function isUniqueViolation(err: unknown): boolean {
+  return asPostgresError(err)?.code === "23505";
+}
+
+/** Constraint name behind a 23505, when the driver reported one. */
+export function uniqueViolationConstraint(err: unknown): string | null {
+  const constraint = asPostgresError(err)?.constraint;
+  return typeof constraint === "string" ? constraint : null;
+}
+
 export async function closePool(): Promise<void> {
   if (pool) {
     try {

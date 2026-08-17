@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { withClient, withRlsTransaction, withServiceClient } from "@/lib/db/client";
 import type { PoolClient } from "pg";
 import type { PermissionLevel } from "@/lib/auth/types";
+import { buildChunkMetadata } from "@/lib/ingestion/chunkMetadata";
+import type { Chunk } from "@/lib/ingestion/chunker";
 import { embedText, embedTextBatch } from "@/lib/ingestion/embeddings";
 import { logWarn } from "@/lib/logger";
 
@@ -397,6 +399,170 @@ export async function querySimilarDocumentsBypassRls(
   return withServiceClient((client) =>
     executeHybridRetrieval(client, queryText, vectorLiteral, opts)
   );
+}
+
+// ---------------------------------------------------------------------------
+// Transactional document ingestion (migration 007)
+// ---------------------------------------------------------------------------
+
+export interface DocumentChunkRecord {
+  text: string;
+  chunk: Pick<Chunk, "index" | "charStart" | "charEnd">;
+  /** Pre-computed. Embedding inside the transaction would hold it open for minutes. */
+  embedding: number[];
+}
+
+export interface IngestedDocumentRecord {
+  documentId: string;
+  /** 'whatsapp' | 'upload_api' | … */
+  source: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number | null;
+  sha256: string | null;
+  externalMediaId: string | null;
+  /** Meta message id. Doubles as the idempotency key (migration 007). */
+  externalMessageId: string | null;
+  uploadedByUserId: string;
+  uploadedByPhone: string | null;
+  classificationLevel: PermissionLevel;
+  documentMetadata?: Record<string, unknown>;
+  /** Channel-specific extras merged into every chunk's metadata. */
+  chunkMetadata?: Record<string, unknown>;
+  chunks: DocumentChunkRecord[];
+}
+
+export interface InsertDocumentResult {
+  documentId: string;
+  insertedChunkIds: string[];
+  /** True when a previous attempt already committed this exact message. */
+  alreadyIngested: boolean;
+}
+
+const INSERT_INGESTED_DOCUMENT_SQL = `
+  INSERT INTO ingested_documents (
+    id, source, filename, mime_type, size_bytes, sha256,
+    external_media_id, external_message_id, uploaded_by_user_id, uploaded_by_phone,
+    classification_level, chunk_count, metadata
+  )
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
+  ON CONFLICT (external_message_id) WHERE external_message_id IS NOT NULL
+  DO NOTHING
+  RETURNING id;
+`;
+
+/**
+ * Writes the document row and all of its chunks in ONE transaction.
+ *
+ * The alternative — `upsertDocumentsBatch` followed by a separate document
+ * insert — can leave orphaned chunks in the corpus if the process dies between
+ * the two statements, and orphaned chunks are unreachable by
+ * `hardDeleteKnowledgeChunksByDocumentId` bookkeeping while still being fully
+ * retrievable by RAG. Either everything lands or nothing does.
+ *
+ * Embeddings must already be computed: an HTTP round trip inside an open
+ * transaction pins a pool connection for the whole embedding run.
+ */
+export async function insertDocumentWithChunks(
+  input: IngestedDocumentRecord
+): Promise<InsertDocumentResult> {
+  if (input.chunks.length === 0) {
+    throw new Error("Cannot ingest a document with zero chunks.");
+  }
+
+  const chunkIds = input.chunks.map(() => randomUUID());
+  const texts = input.chunks.map((c) => c.text);
+  const levels = input.chunks.map(() => input.classificationLevel);
+  // Serialised before BEGIN so a dimension mismatch aborts before a connection
+  // is ever put into a transaction.
+  const embeddings = input.chunks.map((c) => toVectorLiteral(c.embedding));
+  const metadata = input.chunks.map((c) =>
+    JSON.stringify(
+      buildChunkMetadata({
+        documentId: input.documentId,
+        filename: input.filename,
+        mimeType: input.mimeType,
+        uploadedByUserId: input.uploadedByUserId,
+        classificationLevel: input.classificationLevel,
+        chunk: c.chunk,
+        extra: input.chunkMetadata,
+      })
+    )
+  );
+
+  return withClient(async (client) => {
+    try {
+      await client.query("BEGIN");
+
+      const documentRes = await client.query<{ id: string }>(INSERT_INGESTED_DOCUMENT_SQL, [
+        input.documentId,
+        input.source,
+        input.filename,
+        input.mimeType,
+        input.sizeBytes,
+        input.sha256,
+        input.externalMediaId,
+        input.externalMessageId,
+        input.uploadedByUserId,
+        input.uploadedByPhone,
+        input.classificationLevel,
+        input.chunks.length,
+        JSON.stringify(input.documentMetadata ?? {}),
+      ]);
+
+      // DO NOTHING fired: this message was ingested by an earlier attempt. Writing
+      // the chunks again would duplicate the whole document in the corpus, so the
+      // transaction closes here and the caller reports success.
+      if (documentRes.rowCount === 0) {
+        const existing = await client.query<{ id: string }>(
+          "SELECT id FROM ingested_documents WHERE external_message_id = $1 LIMIT 1;",
+          [input.externalMessageId]
+        );
+        await client.query("COMMIT");
+        return {
+          documentId: existing.rows[0]?.id ?? input.documentId,
+          insertedChunkIds: [],
+          alreadyIngested: true,
+        };
+      }
+
+      const chunkRes = await client.query<{ id: string }>(BULK_UPSERT_SQL, [
+        chunkIds,
+        texts,
+        metadata,
+        levels,
+        embeddings,
+      ]);
+
+      // A short count means UNNEST silently dropped rows (mismatched array
+      // lengths). Throwing rolls back the document row too, rather than
+      // registering a document whose corpus content is partial.
+      if (chunkRes.rows.length !== input.chunks.length) {
+        throw new Error(
+          `Chunk insert wrote ${chunkRes.rows.length} rows, expected ${input.chunks.length}.`
+        );
+      }
+
+      await client.query("COMMIT");
+
+      return {
+        documentId: input.documentId,
+        insertedChunkIds: chunkRes.rows.map((row) => row.id),
+        alreadyIngested: false,
+      };
+    } catch (err) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackErr) {
+        logWarn(
+          "document_ingestion_rollback_failed",
+          rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+          { documentId: input.documentId }
+        );
+      }
+      throw err;
+    }
+  });
 }
 
 /**

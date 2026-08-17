@@ -1,5 +1,12 @@
 // Fast lexical screens before retrieval. Deterministic handoff and privacy
 // guardrails keep the bot in its educational, non-identifying scope.
+//
+// Entry point for the runtime pipeline is `evaluateInboundSafety` at the bottom
+// of this file. It is called from lib/whatsapp/incomingMessageProcessor.ts
+// BEFORE any database write, LLM call, or trace — nothing else may run first.
+
+import { shouldSkipPrivacyGuardrails } from "@/lib/auth/roles";
+import type { UserContext } from "@/lib/auth/types";
 
 const DISTRESS_PATTERNS: RegExp[] = [
   /\bkill\s+myself\b/i,
@@ -252,5 +259,60 @@ export function classifySafetySignals(text: string): SafetySignals {
     intentCategory: "VALID_EDUCATIONAL",
     rewrittenQuery: null,
   };
+}
+
+export type InboundSafetyDecision =
+  /** Life-safety. Reply verbatim and stop — no retrieval, no LLM, no exceptions. */
+  | { action: "handoff"; response: string; signals: SafetySignals }
+  /** Privacy violation. Reply verbatim and stop. Non-elevated tiers only. */
+  | { action: "block"; response: string; signals: SafetySignals }
+  /**
+   * Continue. `query` is what retrieval and the LLM must use — it is either the
+   * original redacted text or a de-identified rewrite, never the raw input.
+   */
+  | { action: "proceed"; query: string; signals: SafetySignals };
+
+/**
+ * The single safety gate for inbound traffic.
+ *
+ * Ordering is the whole point of this function, so it is spelled out:
+ *
+ *   1. Distress is evaluated FIRST and for EVERY tier (L0–L3). No role, flag,
+ *      or config can skip it. A crisis message must never reach an LLM.
+ *   2. Only then does the privilege check apply, and only to privacy rules.
+ *   3. Otherwise a safe rewrite may replace the query for retrieval purposes.
+ *
+ * @param redactedText Output of `redactPii`. Callers must never pass raw input —
+ *   whatever is handed in here is what ends up in logs and traces downstream.
+ */
+export function evaluateInboundSafety(
+  redactedText: string,
+  user: UserContext
+): InboundSafetyDecision {
+  const signals = classifySafetySignals(redactedText);
+
+  // (1) Un-skippable. Checked against the pattern list directly rather than via
+  // the score so no future scoring tweak can accidentally lower this below a
+  // threshold and disable the handoff.
+  if (containsMandatoryHandoffSignals(redactedText)) {
+    return {
+      action: "handoff",
+      response: signals.finalResponse ?? MANDATORY_HANDOFF_RESPONSE_HE,
+      signals,
+    };
+  }
+
+  // (2) Privilege applies to privacy rules only.
+  if (shouldSkipPrivacyGuardrails(user)) {
+    return { action: "proceed", query: redactedText, signals };
+  }
+
+  if (signals.finalResponse) {
+    return { action: "block", response: signals.finalResponse, signals };
+  }
+
+  // (3) A rewrite strips identifying framing while keeping the pedagogical
+  // intent, so the mentor still gets a useful answer instead of a refusal.
+  return { action: "proceed", query: signals.rewrittenQuery ?? redactedText, signals };
 }
 

@@ -55,12 +55,18 @@ services:
       WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
       REDIS_URL: redis://redis:6379
 
+  # The ONLY consumer of the whatsapp-incoming queue. The `app` service is a
+  # producer (webhook -> enqueue -> ACK); it must never run a worker.
   whatsapp-worker:
     build:
       context: .
       dockerfile: docker/Dockerfile.worker
     container_name: scholaragent-whatsapp-worker
     restart: unless-stopped
+    # Must exceed WORKER_SHUTDOWN_TIMEOUT_MS (25s) so the drain can finish
+    # before Docker escalates SIGTERM to SIGKILL. The 10s default would cut
+    # every in-flight RAG call short.
+    stop_grace_period: 40s
     depends_on:
       postgres:
         condition: service_healthy
@@ -76,6 +82,8 @@ services:
       REDIS_URL: redis://redis:6379
       WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
       WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WORKER_SHUTDOWN_TIMEOUT_MS: "25000"
+      WHATSAPP_JOB_TIMEOUT_MS: "90000"
 
 volumes:
   scholaragent-pgdata:

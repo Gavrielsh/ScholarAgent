@@ -14,4 +14,15 @@ COPY package.json package-lock.json tsconfig.json ./
 COPY lib ./lib
 COPY scripts ./scripts
 
-CMD ["npm", "run", "worker:whatsapp"]
+# Exec `node` directly instead of `npm run worker:whatsapp`.
+#
+# `npm run` launches the script through a shell, and neither npm nor `sh -c`
+# reliably forwards SIGTERM to the grandchild. As PID 1 that means Docker's stop
+# signal is swallowed, the graceful shutdown in scripts/whatsapp-worker.ts never
+# runs, and every deploy SIGKILLs the container mid-job. Exec form makes node
+# PID 1 so it receives the signal itself.
+#
+# Node as PID 1 has no default SIGTERM handler and would ignore the signal
+# outright — the handlers registered in whatsapp-worker.ts are what make this
+# work, so the two must stay in sync.
+CMD ["node", "--require", "ts-node/register", "--require", "tsconfig-paths/register", "scripts/whatsapp-worker.ts"]

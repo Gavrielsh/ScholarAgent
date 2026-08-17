@@ -19,11 +19,15 @@
  *
  * CREATE INDEX chat_history_sender_created_idx
  *   ON chat_history (sender_id, created_at DESC);
+ *
+ * -- migrations/006: makes retries idempotent.
+ * CREATE UNIQUE INDEX chat_history_message_id_key
+ *   ON chat_history (message_id) WHERE message_id IS NOT NULL;
  * ```
  */
 
-import { withClient } from "@/lib/db/client";
-import { logError } from "@/lib/logger";
+import { isUniqueViolation, withClient } from "@/lib/db/client";
+import { logError, logInfo } from "@/lib/logger";
 
 export interface ChatHistoryEntry {
   role: "user" | "assistant" | "system";
@@ -47,24 +51,40 @@ function assertSenderId(senderId: string): void {
   }
 }
 
+/**
+ * Appends turns, skipping any whose `message_id` is already stored.
+ *
+ * Idempotent by construction (see migration 006): a BullMQ retry replays the
+ * exact same `message_id`, so the conflict clause turns what used to be a
+ * duplicate row into a no-op. Returns how many rows were actually written so
+ * callers can tell a fresh write from a replay.
+ *
+ * Deliberately returns a count rather than the whole history — the previous
+ * signature re-read all 40 rows after every insert, adding a round trip to the
+ * user's critical path for a value that only one caller ever used.
+ */
 export async function appendChatEntries(
   senderId: string,
   newEntries: ChatHistoryEntry[]
-): Promise<ChatHistoryFile> {
+): Promise<number> {
   assertSenderId(senderId);
 
   if (newEntries.length === 0) {
-    return readChatHistory(senderId);
+    return 0;
   }
 
   try {
-    await withClient(async (client) => {
+    return await withClient(async (client) => {
       await client.query("BEGIN");
       try {
+        let inserted = 0;
         for (const entry of newEntries) {
-          await client.query(
+          // ON CONFLICT must repeat the index predicate verbatim for Postgres to
+          // infer the partial unique index `chat_history_message_id_key`.
+          const result = await client.query(
             `INSERT INTO chat_history (sender_id, role, content, message_id, occurred_at)
-             VALUES ($1, $2, $3, $4, $5)`,
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (message_id) WHERE message_id IS NOT NULL DO NOTHING`,
             [
               senderId,
               entry.role,
@@ -73,19 +93,27 @@ export async function appendChatEntries(
               entry.timestamp ? new Date(entry.timestamp) : new Date(),
             ]
           );
+          inserted += result.rowCount ?? 0;
         }
         await client.query("COMMIT");
+        return inserted;
       } catch (err) {
         await client.query("ROLLBACK").catch(() => undefined);
         throw err;
       }
     });
   } catch (err) {
+    // Belt and braces: ON CONFLICT above covers the inferable case, but a
+    // future constraint (or a race against a concurrent writer on a different
+    // index) can still surface 23505. That is a duplicate, not a failure —
+    // swallow it so the caller does not trigger a pointless BullMQ retry.
+    if (isUniqueViolation(err)) {
+      logInfo("chat_history_append_duplicate", "Duplicate chat turn ignored.", { senderId });
+      return 0;
+    }
     logError("chat_history_append_failed", err, { senderId });
     throw err;
   }
-
-  return readChatHistory(senderId);
 }
 
 export async function readChatHistory(senderId: string): Promise<ChatHistoryFile> {

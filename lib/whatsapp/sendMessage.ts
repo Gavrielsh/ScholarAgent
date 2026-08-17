@@ -1,8 +1,21 @@
+import {
+  abortableSleep,
+  fetchTextWithTimeout,
+  isAbortError,
+  isHttpAbortedError,
+  isHttpTimeoutError,
+} from "@/lib/http/fetchWithTimeout";
 import { logError, logWarn } from "@/lib/logger";
 
 export interface SendWhatsAppTextInput {
   to: string;
   body: string;
+  /**
+   * Job-level cancellation. When it fires the retry loop stops immediately
+   * instead of burning the remaining attempts (and their backoffs) against a
+   * job that is already being torn down.
+   */
+  signal?: AbortSignal | null;
 }
 
 export interface WhatsAppConfig {
@@ -21,9 +34,12 @@ const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 8_000;
 const RTL_MARK = "\u200F";
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+/**
+ * Per-request deadline. Deliberately below the queue's job deadline so a slow
+ * Graph API surfaces as a retryable send failure rather than as a job timeout
+ * that kills the whole pipeline mid-flight.
+ */
+export const WHATSAPP_HTTP_TIMEOUT_MS = Number(process.env.WHATSAPP_HTTP_TIMEOUT_MS ?? 15_000);
 
 function backoffDelayMs(attempt: number, retryAfterHeader: string | null): number {
   if (retryAfterHeader) {
@@ -97,25 +113,34 @@ export async function sendWhatsAppTextMessage(input: SendWhatsAppTextInput): Pro
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    // Re-checked every iteration: the signal can fire during a backoff sleep,
+    // and continuing would send a reply for a job that has already been
+    // abandoned (producing a duplicate once the job is retried).
+    if (input.signal?.aborted) {
+      throw new Error("WhatsApp send cancelled before completion.");
+    }
+
     try {
-      const response = await fetch(endpoint, {
+      const response = await fetchTextWithTimeout(endpoint, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${config.accessToken}`,
           "Content-Type": "application/json",
         },
         body: payload,
+        signal: input.signal,
+        timeoutMs: WHATSAPP_HTTP_TIMEOUT_MS,
+        label: "GraphAPI/messages",
       });
 
       if (response.ok) {
         return;
       }
 
-      const errorText = await response.text();
       const retryable = RETRYABLE_STATUS.has(response.status);
 
       if (!retryable || attempt === MAX_ATTEMPTS - 1) {
-        throw new Error(`WhatsApp send failed: HTTP ${response.status} ${errorText}`);
+        throw new Error(`WhatsApp send failed: HTTP ${response.status} ${response.body}`);
       }
 
       const delay = backoffDelayMs(attempt, response.headers.get("retry-after"));
@@ -124,20 +149,38 @@ export async function sendWhatsAppTextMessage(input: SendWhatsAppTextInput): Pro
         delayMs: delay,
         to: input.to,
       });
-      await sleep(delay);
+      await abortableSleep(delay, input.signal);
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      const isLast = attempt === MAX_ATTEMPTS - 1;
-      if (isLast) {
-        logError("whatsapp_send_exhausted", lastError, { to: input.to, attempts: MAX_ATTEMPTS });
+
+      // Caller-initiated cancellation is terminal — retrying would fight the
+      // shutdown and can still deliver a message the worker no longer owns.
+      if (isHttpAbortedError(lastError) || input.signal?.aborted) {
+        logWarn("whatsapp_send_cancelled", lastError.message, { to: input.to, attempt: attempt + 1 });
         throw lastError;
       }
+
+      const isLast = attempt === MAX_ATTEMPTS - 1;
+      if (isLast) {
+        logError("whatsapp_send_exhausted", lastError, {
+          to: input.to,
+          attempts: MAX_ATTEMPTS,
+          timedOut: isHttpTimeoutError(lastError),
+        });
+        throw lastError;
+      }
+
       const delay = backoffDelayMs(attempt, null);
       logWarn("whatsapp_send_network_retry", lastError.message, {
         attempt: attempt + 1,
         delayMs: delay,
+        // A timeout means the message MAY have been delivered — Meta could have
+        // processed the POST after we stopped listening. Retrying can therefore
+        // duplicate a message; that is the accepted trade-off versus silence.
+        timedOut: isHttpTimeoutError(lastError),
+        aborted: isAbortError(lastError),
       });
-      await sleep(delay);
+      await abortableSleep(delay, input.signal);
     }
   }
 

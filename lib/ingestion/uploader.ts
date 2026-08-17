@@ -7,6 +7,7 @@ import { PDFParse } from "pdf-parse";
 
 import type { PermissionLevel } from "@/lib/auth/types";
 import { upsertDocumentsBatch, type EmbeddingRecord } from "@/lib/db/pgvector";
+import { buildChunkMetadata } from "@/lib/ingestion/chunkMetadata";
 import { chunkText, type ChunkOptions } from "@/lib/ingestion/chunker";
 import { embedTextBatch } from "@/lib/ingestion/embeddings";
 import { redactPii } from "@/lib/ingestion/piiRedact";
@@ -63,18 +64,15 @@ export async function ingestDocument(input: UploadDocumentInput): Promise<Upload
     text: chunk.text,
     classificationLevel: input.classificationLevel,
     embedding: vectors[i],
-    metadata: {
-      ...(input.extraMetadata ?? {}),
-      document_id: documentId,
+    metadata: buildChunkMetadata({
+      documentId,
       filename: input.filename,
-      mime_type: input.mimeType,
-      uploaded_by: input.uploadedByUserId,
-      // Mirrors classificationLevel so consumers can filter in SQL without joining.
-      required_role: input.classificationLevel,
-      chunk_index: chunk.index,
-      char_start: chunk.charStart,
-      char_end: chunk.charEnd,
-    },
+      mimeType: input.mimeType,
+      uploadedByUserId: input.uploadedByUserId,
+      classificationLevel: input.classificationLevel,
+      chunk,
+      extra: input.extraMetadata,
+    }),
   }));
 
   const { insertedIds, failures } = await upsertDocumentsBatch(records);

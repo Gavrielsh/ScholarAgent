@@ -35,10 +35,13 @@ function isConversationMessage(message: ChatMessage): message is ChatMessage & {
 }
 
 export interface BaselineRagInput {
+  /** Redacted + safety-screened. See lib/agent/baseline/safetySignals.ts. */
   query: string;
   userContext: UserContext;
   priorMessages?: ChatMessage[];
   retrievalLimit?: number;
+  /** Job deadline / shutdown cancellation, forwarded to the generation call. */
+  signal?: AbortSignal | null;
 }
 
 export interface BaselineRagCoreResult {
@@ -69,7 +72,7 @@ function toRetrievedChunks(docs: SimilarDocument[]): BaselineRagCoreResult["retr
 
 /** Core RAG — no audit log; call recordBaselineRagMetrics after WhatsApp send. */
 export async function runBaselineRagCore(input: BaselineRagInput): Promise<BaselineRagCoreResult> {
-  const { query, userContext, priorMessages = [], retrievalLimit = 5 } = input;
+  const { query, userContext, priorMessages = [], retrievalLimit = 5, signal } = input;
   const startMs = Date.now();
 
   const trace = await startBaselineRagTrace({
@@ -181,6 +184,9 @@ export async function runBaselineRagCore(input: BaselineRagInput): Promise<Basel
   let answer = await adapter.generateText({
     messages: llmMessages,
     temperature: 0.3,
+    // Cancels the generation if the job deadline expires or the worker is
+    // draining, so a doomed job stops paying for tokens it cannot deliver.
+    signal,
   });
   answer = formatWhatsAppMarkdown(answer);
   genTrace.end({ answer });

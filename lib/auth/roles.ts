@@ -16,7 +16,20 @@ export function isElevatedRole(level: PermissionLevel): boolean {
   return isAdminRole(level) || isManagerRole(level);
 }
 
-export function shouldSkipGuardrails(user: UserContext): boolean {
+/**
+ * Whether the caller bypasses the **privacy** guardrails (identity lookups,
+ * personal-data requests, negative-targeting rewrites).
+ *
+ * L0/L1 run legitimate cross-user analytics, so blocking those queries would
+ * break the admin reporting flows by design.
+ *
+ * This does NOT and MUST NOT gate distress detection. Distress handoff runs for
+ * every tier without exception: an L1 training manager relaying a child's
+ * message is one of the likeliest paths for a crisis to reach this system, and
+ * the previous `shouldSkipGuardrails` silently excluded exactly that case.
+ * See `evaluateInboundSafety` in lib/agent/baseline/safetySignals.ts.
+ */
+export function shouldSkipPrivacyGuardrails(user: UserContext): boolean {
   return isElevatedRole(user.permissionLevel);
 }
 

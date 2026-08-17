@@ -1,12 +1,22 @@
+import { fetchTextWithTimeout } from "@/lib/http/fetchWithTimeout";
 import { logError, logWarn } from "@/lib/logger";
 
 import {
   buildWhatsAppMessagesEndpoint,
   getWhatsAppConfig,
+  WHATSAPP_HTTP_TIMEOUT_MS,
 } from "@/lib/whatsapp/sendMessage";
 
 const TYPING_REFRESH_MS = 20_000;
 const TYPING_MAX_DURATION_MS = 120_000;
+
+/**
+ * Read receipts and typing indicators are pure UX and run on the critical path
+ * before the RAG pipeline, so they get a much tighter budget than a real send.
+ * Blocking a user's answer for 15s to draw a "typing…" bubble is a worse
+ * outcome than not drawing it at all.
+ */
+const TYPING_HTTP_TIMEOUT_MS = Number(process.env.WHATSAPP_TYPING_TIMEOUT_MS ?? 5_000);
 
 interface GraphSendResult {
   ok: boolean;
@@ -14,21 +24,26 @@ interface GraphSendResult {
   body: string;
 }
 
-async function postToWhatsAppMessages(payload: Record<string, unknown>): Promise<GraphSendResult> {
+async function postToWhatsAppMessages(
+  payload: Record<string, unknown>,
+  options: { timeoutMs?: number; signal?: AbortSignal | null } = {}
+): Promise<GraphSendResult> {
   const config = getWhatsAppConfig();
   const endpoint = buildWhatsAppMessagesEndpoint(config);
 
-  const response = await fetch(endpoint, {
+  const response = await fetchTextWithTimeout(endpoint, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${config.accessToken}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(payload),
+    timeoutMs: options.timeoutMs ?? WHATSAPP_HTTP_TIMEOUT_MS,
+    signal: options.signal,
+    label: "GraphAPI/messages",
   });
 
-  const body = await response.text();
-  return { ok: response.ok, status: response.status, body };
+  return { ok: response.ok, status: response.status, body: response.body };
 }
 
 /**
@@ -39,14 +54,20 @@ async function postToWhatsAppMessages(payload: Record<string, unknown>): Promise
  * API outage, expired token, or network error must not fail the job or block the
  * RAG pipeline. Returns whether Meta accepted the call, for callers that care.
  */
-export async function markMessageReadAndTyping(messageId: string): Promise<boolean> {
+export async function markMessageReadAndTyping(
+  messageId: string,
+  signal?: AbortSignal | null
+): Promise<boolean> {
   try {
-    const result = await postToWhatsAppMessages({
-      messaging_product: "whatsapp",
-      status: "read",
-      message_id: messageId,
-      typing_indicator: { type: "text" },
-    });
+    const result = await postToWhatsAppMessages(
+      {
+        messaging_product: "whatsapp",
+        status: "read",
+        message_id: messageId,
+        typing_indicator: { type: "text" },
+      },
+      { timeoutMs: TYPING_HTTP_TIMEOUT_MS, signal }
+    );
 
     if (!result.ok) {
       logWarn("whatsapp_mark_read_typing_failed", result.body, {
@@ -115,22 +136,26 @@ export async function sendWhatsAppInteractiveButtons(input: {
   to: string;
   bodyText: string;
   buttons: InteractiveButton[];
+  signal?: AbortSignal | null;
 }): Promise<void> {
-  const result = await postToWhatsAppMessages({
-    messaging_product: "whatsapp",
-    to: input.to,
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: { text: input.bodyText },
-      action: {
-        buttons: input.buttons.map((button) => ({
-          type: "reply",
-          reply: { id: button.id, title: button.title },
-        })),
+  const result = await postToWhatsAppMessages(
+    {
+      messaging_product: "whatsapp",
+      to: input.to,
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: input.bodyText },
+        action: {
+          buttons: input.buttons.map((button) => ({
+            type: "reply",
+            reply: { id: button.id, title: button.title },
+          })),
+        },
       },
     },
-  });
+    { signal: input.signal }
+  );
 
   if (!result.ok) {
     throw new Error(`WhatsApp interactive send failed: HTTP ${result.status} ${result.body}`);

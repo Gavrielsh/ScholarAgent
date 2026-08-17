@@ -1,3 +1,4 @@
+import { fetchTextWithTimeout, parseJsonBody } from "@/lib/http/fetchWithTimeout";
 import type { GenerateTextInput, LlmAdapter } from "@/lib/llm/types";
 
 // Claude adapter — Anthropic Messages API (thesis comparison: commercial closed-source LLM).
@@ -116,7 +117,9 @@ export class ClaudeAdapter implements LlmAdapter {
 
     const payload = buildAnthropicPayload(input, modelRequested);
 
-    const response = await fetch(ENDPOINT, {
+    const label = `Anthropic(${modelRequested})`;
+
+    const response = await fetchTextWithTimeout(ENDPOINT, {
       method: "POST",
       headers: {
         "x-api-key": apiKey,
@@ -124,17 +127,19 @@ export class ClaudeAdapter implements LlmAdapter {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
+      signal: input.signal,
+      timeoutMs: input.timeoutMs,
+      label,
     });
 
     if (!response.ok) {
-      const bodyText = await response.text();
-      const detail = parseAnthropicError(bodyText);
+      const detail = parseAnthropicError(response.body);
       throw new Error(
         `Anthropic Claude request failed: HTTP ${response.status} | model="${modelRequested}" | ${detail}`
       );
     }
 
-    const json = (await response.json()) as AnthropicResponse;
+    const json = parseJsonBody<AnthropicResponse>(response.body, label);
 
     const text =
       json.content?.find((c) => c.type === "text")?.text?.trim() ?? "";

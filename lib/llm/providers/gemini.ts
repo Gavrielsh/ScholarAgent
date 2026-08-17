@@ -1,3 +1,4 @@
+import { fetchTextWithTimeout, parseJsonBody } from "@/lib/http/fetchWithTimeout";
 import type { GenerateTextInput, LlmAdapter } from "@/lib/llm/types";
 
 interface GeminiContent {
@@ -84,18 +85,24 @@ export class GeminiAdapter implements LlmAdapter {
       };
     }
 
-    const response = await fetch(endpoint, {
+    // `label` is mandatory here: the endpoint carries ?key=<GEMINI_API_KEY>, and
+    // the default label would otherwise put a live credential into error strings.
+    const label = `Gemini(${model})`;
+
+    const response = await fetchTextWithTimeout(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: input.signal,
+      timeoutMs: input.timeoutMs,
+      label,
     });
 
     if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Gemini request failed: ${response.status} ${body}`);
+      throw new Error(`Gemini request failed: ${response.status} ${response.body}`);
     }
 
-    const json = (await response.json()) as GeminiResponse;
+    const json = parseJsonBody<GeminiResponse>(response.body, label);
     return json.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
   }
 }
