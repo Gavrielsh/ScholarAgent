@@ -1,4 +1,9 @@
-import { parseInboundDocumentEvent, parseInboundEvent } from "@/lib/whatsapp/parseWebhook";
+import {
+  parseInboundDelivery,
+  parseInboundDocumentEvent,
+  parseInboundEvent,
+  peekInboundMessageType,
+} from "@/lib/whatsapp/parseWebhook";
 import type { WhatsAppWebhookPayload } from "@/lib/whatsapp/types";
 
 function payload(message: Record<string, unknown>): WhatsAppWebhookPayload {
@@ -83,5 +88,48 @@ describe("parseInboundDocumentEvent", () => {
         payload({ from: "972500000000", id: "wamid.TXT", type: "text", text: { body: "שלום" } })
       )
     ).toEqual({ senderId: "972500000000", messageId: "wamid.TXT", messageBody: "שלום" });
+  });
+});
+
+describe("parseInboundDelivery", () => {
+  it("routes type 'document' to the document-ingestion queue", () => {
+    const delivery = parseInboundDelivery(payload(documentMessage));
+    expect(delivery?.kind).toBe("document");
+    expect(delivery?.event).toMatchObject({ mediaId: "media-123", mimeType: "application/pdf" });
+  });
+
+  it("routes text and interactive replies to the chat queue", () => {
+    expect(
+      parseInboundDelivery(
+        payload({ from: "972500000000", id: "wamid.TXT", type: "text", text: { body: "שלום" } })
+      )?.kind
+    ).toBe("chat");
+
+    expect(
+      parseInboundDelivery(
+        payload({
+          from: "972500000000",
+          id: "wamid.BTN",
+          type: "interactive",
+          interactive: { type: "button_reply", button_reply: { id: "menu_1", title: "היסטוריה" } },
+        })
+      )?.kind
+    ).toBe("chat");
+  });
+
+  it("refuses to downgrade an unusable document into a chat turn", () => {
+    // No media id: the job could do no work, but answering it with the LLM
+    // would be worse — the admin would get a chat reply to a file upload.
+    expect(
+      parseInboundDelivery(
+        payload({ ...documentMessage, document: { mime_type: "application/pdf" } })
+      )
+    ).toBeNull();
+  });
+
+  it("reports the observed type for message kinds no queue owns", () => {
+    const image = payload({ from: "972500000000", id: "wamid.IMG", type: "image" });
+    expect(parseInboundDelivery(image)).toBeNull();
+    expect(peekInboundMessageType(image)).toBe("image");
   });
 });

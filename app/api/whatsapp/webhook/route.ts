@@ -6,7 +6,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { logError, logInfo } from "@/lib/logger";
+import { logError, logInfo, logWarn } from "@/lib/logger";
 import { enqueueDocumentIngestion } from "@/lib/queue/documentIngestionQueue";
 import { enqueueWhatsAppIncomingMessage } from "@/lib/queue/whatsappIncomingQueue";
 import {
@@ -15,13 +15,27 @@ import {
 } from "@/lib/redis/idempotency";
 import {
   isStatusOnlyWebhook,
-  parseInboundDocumentEvent,
-  parseInboundEvent,
+  parseInboundDelivery,
+  peekInboundMessageType,
+  type InboundDelivery,
 } from "@/lib/whatsapp/parseWebhook";
+import { sendWhatsAppTextMessage } from "@/lib/whatsapp/sendMessage";
 import { META_SIGNATURE_HEADER, verifyMetaSignature } from "@/lib/whatsapp/verifySignature";
 import type { WhatsAppWebhookPayload } from "@/lib/whatsapp/types";
 
 export const runtime = "nodejs";
+
+const DOCUMENT_RECEIPT_MESSAGE = "המסמך התקבל ונכנס לתור עיבוד.";
+
+/**
+ * Budget for the receipt send, well inside Meta's webhook patience.
+ *
+ * `sendWhatsAppTextMessage` retries up to 5 times with backoff, which can run
+ * for tens of seconds — far longer than Meta will wait before treating this
+ * delivery as failed and redelivering it. The abort signal caps the whole retry
+ * loop instead of just one attempt.
+ */
+const RECEIPT_TIMEOUT_MS = Number(process.env.WHATSAPP_WEBHOOK_RECEIPT_TIMEOUT_MS ?? 2_500);
 
 /** The only success response Meta needs. Kept byte-small and allocation-cheap. */
 function ack(): Response {
@@ -29,43 +43,61 @@ function ack(): Response {
 }
 
 /**
- * Which queue this delivery belongs on, resolved without touching Postgres.
+ * Sends the "received, queued" confirmation before the route ACKs.
  *
- * The sender's role is NOT checked here. A `users` lookup is a database round
- * trip, and Meta redelivers anything it does not see ACKed within a few
- * seconds; the RBAC gate therefore lives in the ingestion worker
- * (`authorizeSender` in lib/whatsapp/documentIngestionProcessor.ts), which
- * answers an unauthorised sender with a permission error. This route always
- * ACKs 200.
+ * Best effort by construction: the document is already on the queue at this
+ * point, so a failed or slow confirmation must not turn into a non-2xx that
+ * makes Meta redeliver a document we are about to ingest.
+ *
+ * Note this fires before the sender's role is known — the RBAC gate needs a
+ * Postgres round trip and runs in the worker. An unauthorised sender therefore
+ * gets this confirmation and then the permission error.
  */
-function routeDelivery(body: WhatsAppWebhookPayload):
-  | { kind: "document"; messageId: string | null; senderId: string; enqueue: () => Promise<string> }
-  | { kind: "chat"; messageId: string | null; senderId: string; enqueue: () => Promise<string> }
-  | null {
-  // Documents are matched first. A document message carries no `text.body`, so
-  // parseInboundEvent declines it anyway — the ordering is for clarity, not
-  // correctness.
-  const documentEvent = parseInboundDocumentEvent(body);
-  if (documentEvent) {
-    return {
-      kind: "document",
-      messageId: documentEvent.messageId,
-      senderId: documentEvent.senderId,
-      enqueue: () => enqueueDocumentIngestion(documentEvent),
-    };
-  }
+async function sendQueuedReceipt(to: string, messageId: string | null): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RECEIPT_TIMEOUT_MS);
 
-  const chatEvent = parseInboundEvent(body);
-  if (chatEvent) {
-    return {
-      kind: "chat",
-      messageId: chatEvent.messageId,
-      senderId: chatEvent.senderId,
-      enqueue: () => enqueueWhatsAppIncomingMessage(chatEvent),
-    };
+  try {
+    await sendWhatsAppTextMessage({
+      to,
+      body: DOCUMENT_RECEIPT_MESSAGE,
+      signal: controller.signal,
+    });
+    logInfo("whatsapp_document_receipt_sent", "Queued-for-processing notice delivered.", {
+      to,
+      messageId,
+    });
+  } catch (err) {
+    logWarn(
+      "whatsapp_document_receipt_failed",
+      err instanceof Error ? err.message : String(err),
+      { to, messageId, timeoutMs: RECEIPT_TIMEOUT_MS }
+    );
+  } finally {
+    clearTimeout(timer);
   }
+}
 
-  return null;
+/**
+ * Pushes the delivery onto the queue that owns its message type.
+ *
+ * The type dispatch itself lives in `parseInboundDelivery`; this switch only
+ * maps the resulting kind to a producer. Exhaustive by construction — adding a
+ * third kind to `InboundDelivery` fails the build here rather than silently
+ * falling through to the chat queue.
+ *
+ * The sender's role is NOT checked in this file. A `users` lookup is a database
+ * round trip and Meta redelivers anything not ACKed within a few seconds, so
+ * the RBAC gate lives in the ingestion worker (`authorizeSender` in
+ * lib/whatsapp/documentIngestionProcessor.ts). This route always ACKs 200.
+ */
+function enqueueDelivery(delivery: InboundDelivery): Promise<string> {
+  switch (delivery.kind) {
+    case "document":
+      return enqueueDocumentIngestion(delivery.event);
+    case "chat":
+      return enqueueWhatsAppIncomingMessage(delivery.event);
+  }
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -106,61 +138,74 @@ export async function POST(request: NextRequest): Promise<Response> {
     return ack();
   }
 
-  const delivery = routeDelivery(body);
+  const delivery = parseInboundDelivery(body);
   if (!delivery) {
+    // Images, audio, stickers, locations, and malformed documents land here.
+    // Logged with the observed type so an unsupported kind is visible in the
+    // logs instead of being an unexplained silent 200.
+    logInfo("whatsapp_webhook_unroutable", "No queue owns this message type.", {
+      messageType: peekInboundMessageType(body),
+    });
     return ack();
   }
 
+  const { senderId, messageId } = delivery.event;
+
   // 2 — Idempotency: a single Redis SET NX, so Meta retries cannot double-process.
-  if (delivery.messageId) {
+  if (messageId) {
     try {
-      const claimed = await tryClaimWhatsAppMessage(delivery.messageId);
+      const claimed = await tryClaimWhatsAppMessage(messageId);
       if (!claimed) {
         logInfo(
           "whatsapp_webhook_duplicate_ignored",
           "Duplicate message skipped by idempotency guard.",
-          { messageId: delivery.messageId, kind: delivery.kind }
+          { messageId, kind: delivery.kind }
         );
         return ack();
       }
     } catch (err) {
       // Redis is down. Returning non-2xx makes Meta redeliver, which is the only
       // durability mechanism available here — do not swallow this as a 200.
-      logError("whatsapp_idempotency_claim_failed", err, {
-        messageId: delivery.messageId,
-        senderId: delivery.senderId,
-      });
+      logError("whatsapp_idempotency_claim_failed", err, { messageId, senderId });
       return new Response("Service Unavailable", { status: 503 });
     }
   }
 
   // 3 — Hand off to the worker that owns this kind of delivery.
   try {
-    const jobId = await delivery.enqueue();
+    const jobId = await enqueueDelivery(delivery);
     logInfo("whatsapp_webhook_enqueued", "Inbound message queued for processing.", {
       jobId,
       kind: delivery.kind,
-      messageId: delivery.messageId,
-      senderId: delivery.senderId,
+      messageId,
+      senderId,
     });
   } catch (err) {
-    if (delivery.messageId) {
+    if (messageId) {
       try {
-        await releaseWhatsAppMessageClaim(delivery.messageId);
+        await releaseWhatsAppMessageClaim(messageId);
       } catch (releaseErr) {
-        logError("whatsapp_idempotency_release_failed", releaseErr, {
-          messageId: delivery.messageId,
-        });
+        logError("whatsapp_idempotency_release_failed", releaseErr, { messageId });
       }
     }
     logError("whatsapp_webhook_enqueue_failed", err, {
       kind: delivery.kind,
-      messageId: delivery.messageId ?? null,
-      senderId: delivery.senderId,
+      messageId: messageId ?? null,
+      senderId,
     });
     return new Response("Service Unavailable", { status: 503 });
   }
 
-  // 4 — ACK immediately.
+  // 4 — Confirm receipt of a document before ACKing.
+  //
+  // Ingestion runs for anywhere between seconds and minutes, so without this the
+  // admin has no feedback at all until it finishes. Chat messages skip it: the
+  // worker's read receipt and typing indicator already cover that case, and a
+  // second message per turn would be noise.
+  if (delivery.kind === "document") {
+    await sendQueuedReceipt(senderId, messageId);
+  }
+
+  // 5 — ACK.
   return ack();
 }

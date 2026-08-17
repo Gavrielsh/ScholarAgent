@@ -25,4 +25,12 @@ COPY scripts ./scripts
 # Node as PID 1 has no default SIGTERM handler and would ignore the signal
 # outright — the handlers registered in whatsapp-worker.ts are what make this
 # work, so the two must stay in sync.
-CMD ["node", "--require", "ts-node/register", "--require", "tsconfig-paths/register", "scripts/whatsapp-worker.ts"]
+#
+# `--import tsx` rather than `--require ts-node/register`: the CJS `--require`
+# hook does not cover Node's ESM resolver, which is the path actually taken here,
+# so the container crash-looped on `Unknown file extension ".ts"`. tsx registers
+# both hooks and resolves the `@/*` tsconfig paths natively — which is also why
+# the old `tsconfig-paths/register` is gone; that package is not even a
+# dependency of this project. Keeps node as PID 1, so signal handling is
+# unaffected. This mirrors how the worker is run locally.
+CMD ["node", "--import", "tsx", "scripts/whatsapp-worker.ts"]

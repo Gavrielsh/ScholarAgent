@@ -1,10 +1,27 @@
 import type {
   ParsedInboundDocumentEvent,
   ParsedInboundEvent,
+  WhatsAppMessageEvent,
   WhatsAppWebhookPayload,
 } from "@/lib/whatsapp/types";
 
 const FALLBACK_DOCUMENT_FILENAME = "document";
+
+/** Meta nests the payload four levels deep; every parser here starts from this. */
+function firstInboundMessage(
+  payload: WhatsAppWebhookPayload
+): WhatsAppMessageEvent | undefined {
+  return payload?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+}
+
+/**
+ * The raw `type` discriminator, for logging a delivery that matched no parser.
+ * Without it an unhandled kind (image, audio, location, sticker…) is a silent
+ * 200 and there is nothing in the logs to say what actually arrived.
+ */
+export function peekInboundMessageType(payload: WhatsAppWebhookPayload): string | null {
+  return firstInboundMessage(payload)?.type ?? null;
+}
 
 export function isStatusOnlyWebhook(payload: WhatsAppWebhookPayload): boolean {
   const value = payload?.entry?.[0]?.changes?.[0]?.value;
@@ -13,7 +30,7 @@ export function isStatusOnlyWebhook(payload: WhatsAppWebhookPayload): boolean {
 }
 
 export function parseInboundEvent(payload: WhatsAppWebhookPayload): ParsedInboundEvent | null {
-  const firstMessage = payload?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+  const firstMessage = firstInboundMessage(payload);
   if (!firstMessage?.from) return null;
 
   const senderId = firstMessage.from;
@@ -78,7 +95,7 @@ function sanitizeFilename(raw: string | undefined, mimeType: string): string {
 export function parseInboundDocumentEvent(
   payload: WhatsAppWebhookPayload
 ): ParsedInboundDocumentEvent | null {
-  const firstMessage = payload?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+  const firstMessage = firstInboundMessage(payload);
   if (!firstMessage?.from) return null;
 
   const isDocument = firstMessage.type === "document" || !!firstMessage.document?.id;
@@ -104,4 +121,37 @@ export function parseInboundDocumentEvent(
     caption: caption || null,
     sha256: firstMessage.document?.sha256?.trim() || null,
   };
+}
+
+/**
+ * A delivery, tagged with the queue that owns it.
+ *
+ * Single source of truth for the routing decision: the webhook switches on
+ * `kind` and never re-inspects the payload, so "which queue does a document go
+ * to" is answered in exactly one place.
+ */
+export type InboundDelivery =
+  | { kind: "document"; event: ParsedInboundDocumentEvent }
+  | { kind: "chat"; event: ParsedInboundEvent };
+
+/**
+ * Dispatches on Meta's `type` discriminator.
+ *
+ * `type === "document"` is authoritative; the `message.document` fallback only
+ * covers a payload that carries the envelope with the field absent. Returning
+ * null for a well-formed document whose media id is missing is deliberate —
+ * that job could never do any work, so it must not silently become a chat turn
+ * and get answered by the LLM.
+ */
+export function parseInboundDelivery(payload: WhatsAppWebhookPayload): InboundDelivery | null {
+  const message = firstInboundMessage(payload);
+  if (!message?.from) return null;
+
+  if (message.type === "document" || message.document) {
+    const event = parseInboundDocumentEvent(payload);
+    return event ? { kind: "document", event } : null;
+  }
+
+  const event = parseInboundEvent(payload);
+  return event ? { kind: "chat", event } : null;
 }

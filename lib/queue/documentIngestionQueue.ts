@@ -35,12 +35,17 @@ function getDocumentIngestionQueue(): Queue<ParsedInboundDocumentEvent> {
 }
 
 /**
- * BullMQ rejects custom job ids containing a colon (it is the key separator in
- * Redis). Meta's `wamid.…` ids do not currently use one, but the id is vendor
- * data and normalising it is cheaper than debugging a silent enqueue failure.
+ * BullMQ rejects custom job ids containing a colon — it is the separator in the
+ * Redis key layout, and `Queue.add` throws `Custom Id cannot contain :`.
+ *
+ * That rule applies to the whole id, prefix included. This shipped broken
+ * because it sanitised the vendor id and then prefixed it with `doc:`, so every
+ * document enqueue threw, the webhook answered 503, and Meta retried the
+ * delivery until it gave up. The underscore separator is the entire fix; the
+ * regression test in documentIngestionQueue.test.ts pins it.
  */
-function toJobId(messageId: string): string {
-  return `doc:${messageId.replace(/:/g, "_")}`;
+export function documentIngestionJobId(messageId: string): string {
+  return `doc_${messageId.replace(/:/g, "_")}`;
 }
 
 /**
@@ -53,7 +58,7 @@ export async function enqueueDocumentIngestion(
   event: ParsedInboundDocumentEvent
 ): Promise<string> {
   const job = await getDocumentIngestionQueue().add("ingest-document", event, {
-    jobId: event.messageId ? toJobId(event.messageId) : undefined,
+    jobId: event.messageId ? documentIngestionJobId(event.messageId) : undefined,
   });
   return job.id ?? String(job.name);
 }
