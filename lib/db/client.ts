@@ -12,11 +12,23 @@ function resolveSsl(): false | { rejectUnauthorized: boolean } {
   return { rejectUnauthorized: process.env.PG_SSL_REJECT_UNAUTHORIZED !== "false" };
 }
 
+/**
+ * Removes sslmode or ssl query parameters from the connection string.
+ * This prevents the pg driver's connection string parser from overriding
+ * our explicit ssl configuration object.
+ */
+function cleanConnectionString(url: string): string {
+  return url.replace(/([?&])(sslmode|ssl)=[^&]+(&|$)/g, "$1").replace(/[?&]$/, "");
+}
+
 function createPool(): Pool {
-  const connectionString = process.env.DATABASE_URL;
-  if (!connectionString) {
+  const rawConnectionString = process.env.DATABASE_URL;
+  if (!rawConnectionString) {
     throw new Error("Missing DATABASE_URL environment variable.");
   }
+
+  // Clean the string before passing it to the Pool
+  const connectionString = cleanConnectionString(rawConnectionString);
 
   const instance = new Pool({
     connectionString,
@@ -39,10 +51,13 @@ function createPool(): Pool {
 }
 
 function createServicePool(): Pool {
-  const connectionString = process.env.DATABASE_SERVICE_URL?.trim() || process.env.DATABASE_URL;
-  if (!connectionString) {
+  const rawConnectionString = process.env.DATABASE_SERVICE_URL?.trim() || process.env.DATABASE_URL;
+  if (!rawConnectionString) {
     throw new Error("Missing DATABASE_SERVICE_URL or DATABASE_URL for service-role access.");
   }
+
+  // Clean the string before passing it to the Pool
+  const connectionString = cleanConnectionString(rawConnectionString);
 
   const instance = new Pool({
     connectionString,
