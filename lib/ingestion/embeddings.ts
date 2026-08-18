@@ -1,5 +1,13 @@
-import { fetchTextWithTimeout, isHttpTimeoutError, parseJsonBody } from "@/lib/http/fetchWithTimeout";
+import {
+  abortableSleep,
+  fetchTextWithTimeout,
+  isAbortError,
+  isHttpAbortedError,
+  isHttpTimeoutError,
+  parseJsonBody,
+} from "@/lib/http/fetchWithTimeout";
 import { logWarn } from "@/lib/logger";
+import { parsePositiveInt } from "@/lib/queue/jobRuntime";
 
 // Embeddings via Google AI Studio (Gemini embedding models).
 interface GeminiEmbeddingResponse {
@@ -17,14 +25,16 @@ const EMBEDDING_MODEL =
 const EMBEDDING_DIMENSION = 768;
 
 /** Never used in an error string — see `EMBEDDING_LABEL`. */
-const EMBEDDING_TIMEOUT_MS = Number(process.env.EMBEDDING_TIMEOUT_MS ?? 15_000);
+const EMBEDDING_TIMEOUT_MS = parsePositiveInt(process.env.EMBEDDING_TIMEOUT_MS, 15_000);
 /** Batch calls carry up to `MAX_BATCH_SIZE` documents, so they get a wider budget. */
-const EMBEDDING_BATCH_TIMEOUT_MS = Number(process.env.EMBEDDING_BATCH_TIMEOUT_MS ?? 45_000);
+const EMBEDDING_BATCH_TIMEOUT_MS = parsePositiveInt(
+  process.env.EMBEDDING_BATCH_TIMEOUT_MS,
+  45_000
+);
 const EMBEDDING_LABEL = `GeminiEmbeddings(${EMBEDDING_MODEL})`;
 
 // Aggressive exponential backoff delays to prevent 429 Rate Limit crashes
 const RETRY_DELAYS_MS = [2000, 4000, 8000, 16000, 32000] as const;
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Bounded LRU cache. Query embeddings are cached alongside document chunks, and
@@ -32,7 +42,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * 768-float vector for every distinct user question until the container OOMs.
  * Map preserves insertion order, which is all an approximate LRU needs.
  */
-const EMBEDDING_CACHE_MAX_ENTRIES = Number(process.env.EMBEDDING_CACHE_MAX ?? 5_000);
+const EMBEDDING_CACHE_MAX_ENTRIES = parsePositiveInt(process.env.EMBEDDING_CACHE_MAX, 5_000);
 const embeddingCache = new Map<string, number[]>();
 
 function cacheGet(key: string): number[] | undefined {
@@ -69,7 +79,8 @@ function errorMessage(err: unknown): string {
  * timeout. A 400 (bad dimension, malformed payload) is deterministic — retrying
  * it five times just burns 62s of backoff before failing identically.
  */
-function isRetryable(err: unknown): boolean {
+function isRetryable(err: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted || isAbortError(err) || isHttpAbortedError(err)) return false;
   if (isHttpTimeoutError(err)) return true;
   const message = errorMessage(err);
   return message.includes("Rate limit") || message.includes("429");
@@ -83,9 +94,12 @@ function endpoint(path: string): string {
   return `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:${path}?key=${apiKey}`;
 }
 
-export async function embedText(text: string): Promise<number[]> {
+export async function embedText(text: string, signal?: AbortSignal): Promise<number[]> {
   const trimmed = text.trim();
   if (!trimmed) return [];
+  if (signal?.aborted) {
+    throw new Error("Embedding cancelled before completion.");
+  }
 
   const cached = cacheGet(trimmed);
   if (cached) return cached;
@@ -101,6 +115,7 @@ export async function embedText(text: string): Promise<number[]> {
         }),
         timeoutMs: EMBEDDING_TIMEOUT_MS,
         label: EMBEDDING_LABEL,
+        signal,
       });
 
       if (!response.ok) {
@@ -121,13 +136,16 @@ export async function embedText(text: string): Promise<number[]> {
       cacheSet(trimmed, values);
       return values;
     } catch (err: unknown) {
-      if (attempt < RETRY_DELAYS_MS.length && isRetryable(err)) {
+      if (attempt < RETRY_DELAYS_MS.length && isRetryable(err, signal)) {
         logWarn("embed_text_retry", errorMessage(err), {
           attempt: attempt + 1,
           delayMs: RETRY_DELAYS_MS[attempt],
           timedOut: isHttpTimeoutError(err),
         });
-        await sleep(RETRY_DELAYS_MS[attempt]);
+        await abortableSleep(RETRY_DELAYS_MS[attempt], signal);
+        if (signal?.aborted) {
+          throw err;
+        }
         continue;
       }
       throw err;
@@ -146,8 +164,14 @@ export async function embedText(text: string): Promise<number[]> {
  * would not catch that. Blanks are now rejected up front so the alignment
  * contract is total.
  */
-export async function embedTextBatch(texts: string[]): Promise<number[][]> {
+export async function embedTextBatch(
+  texts: string[],
+  signal?: AbortSignal
+): Promise<number[][]> {
   if (texts.length === 0) return [];
+  if (signal?.aborted) {
+    throw new Error("Embedding cancelled before completion.");
+  }
 
   const normalized = texts.map((t) => t.trim());
   const blankIndex = normalized.findIndex((t) => t.length === 0);
@@ -179,6 +203,7 @@ export async function embedTextBatch(texts: string[]): Promise<number[][]> {
           }),
           timeoutMs: EMBEDDING_BATCH_TIMEOUT_MS,
           label: EMBEDDING_LABEL,
+          signal,
         });
 
         if (!response.ok) {
@@ -209,13 +234,16 @@ export async function embedTextBatch(texts: string[]): Promise<number[][]> {
         batchSuccess = true;
         break;
       } catch (err: unknown) {
-        if (attempt < RETRY_DELAYS_MS.length && isRetryable(err)) {
+        if (attempt < RETRY_DELAYS_MS.length && isRetryable(err, signal)) {
           logWarn("embed_text_batch_retry", errorMessage(err), {
             attempt: attempt + 1,
             delayMs: RETRY_DELAYS_MS[attempt],
             timedOut: isHttpTimeoutError(err),
           });
-          await sleep(RETRY_DELAYS_MS[attempt]);
+          await abortableSleep(RETRY_DELAYS_MS[attempt], signal);
+          if (signal?.aborted) {
+            throw err;
+          }
           continue;
         }
 
@@ -230,7 +258,7 @@ export async function embedTextBatch(texts: string[]): Promise<number[][]> {
     if (!batchSuccess) {
       for (const t of missingTexts) {
         // embedText caches internally, so the reconstruction below still hits.
-        await embedText(t);
+        await embedText(t, signal);
       }
     }
   }

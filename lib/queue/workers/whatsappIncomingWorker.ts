@@ -35,10 +35,6 @@ const DEFAULT_RATE_LIMIT_DURATION_MS = 1_000;
  */
 const DEFAULT_JOB_TIMEOUT_MS = 90_000;
 
-// JobTimeoutError is re-exported so existing importers of this module keep
-// working now that the implementation lives in lib/queue/jobRuntime.ts.
-export { JobTimeoutError };
-
 export function createWhatsAppIncomingWorker(): Worker<ParsedInboundEvent> {
   const concurrency = parsePositiveInt(process.env.WHATSAPP_QUEUE_CONCURRENCY, DEFAULT_CONCURRENCY);
   const rateLimitMax = parsePositiveInt(
@@ -67,7 +63,7 @@ export function createWhatsAppIncomingWorker(): Worker<ParsedInboundEvent> {
           await markMessageReadAndTyping(messageId, signal);
         }
 
-        const typing = startTypingKeepAlive(senderId, messageId);
+        const typing = startTypingKeepAlive(senderId, messageId, signal);
         try {
           await processIncomingMessage(job.data, {
             attempt: currentAttempt(job),
@@ -124,6 +120,14 @@ export function createWhatsAppIncomingWorker(): Worker<ParsedInboundEvent> {
     // the user has heard nothing, so a duplicate is strictly better than silence.
     const messageId = job.data.messageId;
     if (messageId && currentAttempt(job) >= maxAttempts(job)) {
+      try {
+        await job.remove();
+      } catch (removeErr) {
+        logError("whatsapp_failed_job_remove_failed", removeErr, {
+          messageId,
+          jobId: job.id,
+        });
+      }
       try {
         await releaseWhatsAppMessageClaim(messageId);
         logWarn(

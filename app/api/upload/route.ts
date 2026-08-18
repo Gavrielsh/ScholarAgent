@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { extractUserContext, UnauthenticatedError } from "@/lib/auth/extractUser";
 import { assertMinimumLevel } from "@/lib/auth/rbac";
 import type { PermissionLevel } from "@/lib/auth/types";
-import { extractTextFromUpload, ingestDocument } from "@/lib/ingestion/uploader";
+import { extractTextFromUpload, ingestDocument, assertMimeMatchesContent } from "@/lib/ingestion/uploader";
 
 // 10 MB hard cap per upload. TODO: tune via env once usage patterns are clear.
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
@@ -99,6 +99,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   let text: string;
   try {
     const bytes = await file.arrayBuffer();
+    assertMimeMatchesContent(new Uint8Array(bytes), file.type);
     text = await extractTextFromUpload(bytes, file.type);
   } catch (err) {
     return jsonError(
@@ -119,6 +120,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       text,
       classificationLevel: classificationLevel as PermissionLevel,
       uploadedByUserId: user.userId,
+      uploadedByPermissionLevel: user.permissionLevel,
       extraMetadata: {
         organization_id: user.organizationId ?? null,
         original_size_bytes: file.size,

@@ -6,7 +6,9 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
+import { timingSafeStringEqual } from "@/lib/auth/timingSafe";
 import { logError, logInfo, logWarn } from "@/lib/logger";
+import { parsePositiveInt } from "@/lib/queue/jobRuntime";
 import { enqueueDocumentIngestion } from "@/lib/queue/documentIngestionQueue";
 import { enqueueWhatsAppIncomingMessage } from "@/lib/queue/whatsappIncomingQueue";
 import {
@@ -20,7 +22,11 @@ import {
   type InboundDelivery,
 } from "@/lib/whatsapp/parseWebhook";
 import { sendWhatsAppTextMessage } from "@/lib/whatsapp/sendMessage";
-import { META_SIGNATURE_HEADER, verifyMetaSignature } from "@/lib/whatsapp/verifySignature";
+import {
+  isWebhookSignatureRequired,
+  META_SIGNATURE_HEADER,
+  verifyMetaSignature,
+} from "@/lib/whatsapp/verifySignature";
 import type { WhatsAppWebhookPayload } from "@/lib/whatsapp/types";
 
 export const runtime = "nodejs";
@@ -35,7 +41,10 @@ const DOCUMENT_RECEIPT_MESSAGE = "המסמך התקבל ונכנס לתור עי
  * delivery as failed and redelivering it. The abort signal caps the whole retry
  * loop instead of just one attempt.
  */
-const RECEIPT_TIMEOUT_MS = Number(process.env.WHATSAPP_WEBHOOK_RECEIPT_TIMEOUT_MS ?? 2_500);
+const RECEIPT_TIMEOUT_MS = parsePositiveInt(
+  process.env.WHATSAPP_WEBHOOK_RECEIPT_TIMEOUT_MS,
+  2_500
+);
 
 /** The only success response Meta needs. Kept byte-small and allocation-cheap. */
 function ack(): Response {
@@ -106,9 +115,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const token = searchParams.get("hub.verify_token");
   const challenge = searchParams.get("hub.challenge");
 
-  const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
+  const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN?.trim();
 
-  if (mode === "subscribe" && token && verifyToken && token === verifyToken) {
+  if (
+    mode === "subscribe" &&
+    token &&
+    verifyToken &&
+    timingSafeStringEqual(token, verifyToken)
+  ) {
     return new NextResponse(challenge ?? "", { status: 200 });
   }
 
@@ -119,9 +133,17 @@ export async function POST(request: NextRequest): Promise<Response> {
   // 1 — Authenticate the payload against the raw body bytes.
   const rawBody = await request.text();
 
-  if (verifyMetaSignature(rawBody, request.headers.get(META_SIGNATURE_HEADER)) === "invalid") {
+  const signatureVerdict = verifyMetaSignature(
+    rawBody,
+    request.headers.get(META_SIGNATURE_HEADER)
+  );
+  if (
+    signatureVerdict === "invalid" ||
+    (signatureVerdict === "unconfigured" && isWebhookSignatureRequired())
+  ) {
     logError("whatsapp_webhook_signature_rejected", new Error("Invalid X-Hub-Signature-256"), {
       bodyBytes: rawBody.length,
+      verdict: signatureVerdict,
     });
     return new Response("Forbidden", { status: 403 });
   }
@@ -151,24 +173,34 @@ export async function POST(request: NextRequest): Promise<Response> {
 
   const { senderId, messageId } = delivery.event;
 
+  // Deliveries without a Meta message id cannot be claimed or de-duplicated.
+  // ACK without enqueue so Meta does not retry a payload we will never process
+  // safely; an unidentified flood must not reach the worker.
+  if (!messageId) {
+    logWarn(
+      "whatsapp_webhook_missing_message_id",
+      "Inbound delivery dropped because it has no message id.",
+      { senderId, kind: delivery.kind }
+    );
+    return ack();
+  }
+
   // 2 — Idempotency: a single Redis SET NX, so Meta retries cannot double-process.
-  if (messageId) {
-    try {
-      const claimed = await tryClaimWhatsAppMessage(messageId);
-      if (!claimed) {
-        logInfo(
-          "whatsapp_webhook_duplicate_ignored",
-          "Duplicate message skipped by idempotency guard.",
-          { messageId, kind: delivery.kind }
-        );
-        return ack();
-      }
-    } catch (err) {
-      // Redis is down. Returning non-2xx makes Meta redeliver, which is the only
-      // durability mechanism available here — do not swallow this as a 200.
-      logError("whatsapp_idempotency_claim_failed", err, { messageId, senderId });
-      return new Response("Service Unavailable", { status: 503 });
+  try {
+    const claimed = await tryClaimWhatsAppMessage(messageId);
+    if (!claimed) {
+      logInfo(
+        "whatsapp_webhook_duplicate_ignored",
+        "Duplicate message skipped by idempotency guard.",
+        { messageId, kind: delivery.kind }
+      );
+      return ack();
     }
+  } catch (err) {
+    // Redis is down. Returning non-2xx makes Meta redeliver, which is the only
+    // durability mechanism available here — do not swallow this as a 200.
+    logError("whatsapp_idempotency_claim_failed", err, { messageId, senderId });
+    return new Response("Service Unavailable", { status: 503 });
   }
 
   // 3 — Hand off to the worker that owns this kind of delivery.
@@ -181,12 +213,10 @@ export async function POST(request: NextRequest): Promise<Response> {
       senderId,
     });
   } catch (err) {
-    if (messageId) {
-      try {
-        await releaseWhatsAppMessageClaim(messageId);
-      } catch (releaseErr) {
-        logError("whatsapp_idempotency_release_failed", releaseErr, { messageId });
-      }
+    try {
+      await releaseWhatsAppMessageClaim(messageId);
+    } catch (releaseErr) {
+      logError("whatsapp_idempotency_release_failed", releaseErr, { messageId });
     }
     logError("whatsapp_webhook_enqueue_failed", err, {
       kind: delivery.kind,

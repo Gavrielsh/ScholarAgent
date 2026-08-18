@@ -92,6 +92,16 @@ export async function fetchTodayStaffChatHistories(
   }
 }
 
+export async function loadTodayStaffContext(
+  requesterPermissionLevel: PermissionLevel
+): Promise<{ rows: StaffChatRow[]; formatted: string }> {
+  const rows = await fetchTodayStaffChatHistories(requesterPermissionLevel);
+  return {
+    rows,
+    formatted: formatStaffRowsForLlm(rows, requesterPermissionLevel),
+  };
+}
+
 /**
  * Directory search used by the L0 "Specific User" report flow. Admin-only: it can
  * surface any registered user (including L0/L1), so it must never be reachable by

@@ -13,6 +13,7 @@ import { isUniqueViolation } from "@/lib/db/client";
 import { isAbortError, isHttpTimeoutError } from "@/lib/http/fetchWithTimeout";
 import { redactPii } from "@/lib/ingestion/piiRedact";
 import { logError, logInfo, logWarn } from "@/lib/logger";
+import { TerminalNotifyError } from "@/lib/queue/jobRuntime";
 import { sendWhatsAppTextMessage } from "@/lib/whatsapp/sendMessage";
 import type { ParsedInboundEvent } from "@/lib/whatsapp/types";
 
@@ -295,6 +296,10 @@ async function handleProcessingFailure(
   event: ParsedInboundEvent,
   ctx: IncomingMessageContext
 ): Promise<void> {
+  if (err instanceof TerminalNotifyError) {
+    throw err;
+  }
+
   const { senderId, messageId } = event;
   const isFinalAttempt = ctx.attempt >= ctx.maxAttempts;
 
@@ -345,9 +350,8 @@ async function handleProcessingFailure(
       messageId,
     });
   } catch (sendErr) {
-    // Nothing left to try. Swallow so the job still resolves — rethrowing here
-    // would restart the very retry loop this branch exists to end.
     logError("whatsapp_fallback_notice_failed", sendErr, { senderId, messageId });
+    throw new TerminalNotifyError(sendErr);
   }
 }
 

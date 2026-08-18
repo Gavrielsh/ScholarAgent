@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
+import { lookupUserById } from "@/lib/auth/userRegistry";
 import type { PermissionLevel, UserContext } from "@/lib/auth/types";
 
 const VALID_LEVELS: ReadonlySet<number> = new Set([0, 1, 2, 3]);
@@ -24,8 +25,6 @@ type SupabaseJwtPayload = {
     role_name?: string;
   };
   user_metadata?: {
-    permission_level?: number | string;
-    role_name?: string;
     organization_id?: string;
   };
 };
@@ -43,11 +42,13 @@ function getBearerToken(request: NextRequest): string {
   return token;
 }
 
+/**
+ * Authorization claims come from service-role-writable `app_metadata` (or a
+ * top-level custom claim). `user_metadata` is end-user writable in Supabase and
+ * must never grant privilege.
+ */
 function parsePermissionLevel(payload: SupabaseJwtPayload): PermissionLevel {
-  const raw =
-    payload.permission_level ??
-    payload.app_metadata?.permission_level ??
-    payload.user_metadata?.permission_level;
+  const raw = payload.permission_level ?? payload.app_metadata?.permission_level;
   const parsed = Number.parseInt(String(raw), 10);
   if (!Number.isInteger(parsed) || !VALID_LEVELS.has(parsed)) {
     throw new UnauthenticatedError("permission_level לא נמצא או אינו תקין באסימון.");
@@ -56,33 +57,38 @@ function parsePermissionLevel(payload: SupabaseJwtPayload): PermissionLevel {
 }
 
 function parseRoleName(payload: SupabaseJwtPayload, permissionLevel: PermissionLevel): string {
-  const roleFromClaims =
-    payload.role_name ?? payload.app_metadata?.role_name ?? payload.user_metadata?.role_name;
+  const roleFromClaims = payload.role_name ?? payload.app_metadata?.role_name;
   return roleFromClaims?.trim() || payload.role || `L${permissionLevel}`;
+}
+
+function supabaseIssuerUrl(): string {
+  const url = (process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL)?.trim();
+  if (!url) {
+    throw new UnauthenticatedError("חסר SUPABASE_URL להגדרת אימות.");
+  }
+  return `${url.replace(/\/+$/, "")}/auth/v1`;
 }
 
 async function verifySupabaseToken(token: string) {
   const jwtSecret = process.env.SUPABASE_JWT_SECRET;
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL;
-  const issuer = url ? `${url}/auth/v1` : undefined;
+  const issuer = supabaseIssuerUrl();
+  const audience = "authenticated";
 
   if (jwtSecret) {
     return jwtVerify(token, new TextEncoder().encode(jwtSecret), {
       issuer,
+      audience,
       algorithms: ["HS256"],
     });
   }
 
-  if (!url) {
-    throw new UnauthenticatedError("חסר SUPABASE_JWT_SECRET וגם SUPABASE_URL להגדרת אימות.");
-  }
-  const jwksUrl = `${url}/auth/v1/.well-known/jwks.json`;
+  const jwksUrl = `${issuer}/.well-known/jwks.json`;
   if (!cachedJwks || cachedJwksUrl !== jwksUrl) {
     cachedJwks = createRemoteJWKSet(new URL(jwksUrl));
     cachedJwksUrl = jwksUrl;
   }
   const jwks = cachedJwks;
-  return jwtVerify(token, jwks, issuer ? { issuer } : undefined);
+  return jwtVerify(token, jwks, { issuer, audience });
 }
 
 export async function extractUserContext(request: NextRequest): Promise<UserContext> {
@@ -92,6 +98,11 @@ export async function extractUserContext(request: NextRequest): Promise<UserCont
   const userId = payload.sub;
   if (!userId) {
     throw new UnauthenticatedError("אסימון Supabase אינו כולל מזהה משתמש (sub).");
+  }
+
+  const fromDb = await lookupUserById(userId);
+  if (fromDb) {
+    return fromDb;
   }
 
   const permissionLevel = parsePermissionLevel(payload);

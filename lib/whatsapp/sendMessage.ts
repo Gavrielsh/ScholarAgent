@@ -6,6 +6,7 @@ import {
   isHttpTimeoutError,
 } from "@/lib/http/fetchWithTimeout";
 import { logError, logWarn } from "@/lib/logger";
+import { formatWhatsAppMarkdown } from "@/lib/whatsapp/formatting";
 
 export interface SendWhatsAppTextInput {
   to: string;
@@ -99,24 +100,35 @@ export function buildWhatsAppMessagesEndpoint(config: WhatsAppConfig): string {
   return `${config.apiBaseUrl}/${config.apiVersion}/${config.phoneNumberId}/messages`;
 }
 
-export async function sendWhatsAppTextMessage(input: SendWhatsAppTextInput): Promise<void> {
+export interface GraphSendResult {
+  ok: boolean;
+  status: number;
+  body: string;
+}
+
+export interface PostGraphMessagesOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal | null;
+  /** Default true for user-visible sends. Typing/read receipts pass false. */
+  retries?: boolean;
+}
+
+/**
+ * Single Graph `/messages` POST used by text, interactive, and typing helpers.
+ */
+export async function postGraphMessages(
+  payload: Record<string, unknown>,
+  options: PostGraphMessagesOptions = {}
+): Promise<GraphSendResult> {
   const config = getWhatsAppConfig();
   const endpoint = buildWhatsAppMessagesEndpoint(config);
-  const rtlBody = ensureRtl(input.body);
-  const payload = JSON.stringify({
-    messaging_product: "whatsapp",
-    to: input.to,
-    type: "text",
-    text: { body: rtlBody },
-  });
-
+  const body = JSON.stringify(payload);
+  const timeoutMs = options.timeoutMs ?? WHATSAPP_HTTP_TIMEOUT_MS;
+  const maxAttempts = options.retries === false ? 1 : MAX_ATTEMPTS;
   let lastError: Error | null = null;
 
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    // Re-checked every iteration: the signal can fire during a backoff sleep,
-    // and continuing would send a reply for a job that has already been
-    // abandoned (producing a duplicate once the job is retried).
-    if (input.signal?.aborted) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (options.signal?.aborted) {
       throw new Error("WhatsApp send cancelled before completion.");
     }
 
@@ -127,44 +139,39 @@ export async function sendWhatsAppTextMessage(input: SendWhatsAppTextInput): Pro
           Authorization: `Bearer ${config.accessToken}`,
           "Content-Type": "application/json",
         },
-        body: payload,
-        signal: input.signal,
-        timeoutMs: WHATSAPP_HTTP_TIMEOUT_MS,
+        body,
+        signal: options.signal,
+        timeoutMs,
         label: "GraphAPI/messages",
       });
 
       if (response.ok) {
-        return;
+        return { ok: true, status: response.status, body: response.body };
       }
 
       const retryable = RETRYABLE_STATUS.has(response.status);
-
-      if (!retryable || attempt === MAX_ATTEMPTS - 1) {
-        throw new Error(`WhatsApp send failed: HTTP ${response.status} ${response.body}`);
+      if (!retryable || attempt === maxAttempts - 1) {
+        return { ok: false, status: response.status, body: response.body };
       }
 
       const delay = backoffDelayMs(attempt, response.headers.get("retry-after"));
       logWarn("whatsapp_send_retry", `HTTP ${response.status}, retrying`, {
         attempt: attempt + 1,
         delayMs: delay,
-        to: input.to,
       });
-      await abortableSleep(delay, input.signal);
+      await abortableSleep(delay, options.signal);
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
 
-      // Caller-initiated cancellation is terminal — retrying would fight the
-      // shutdown and can still deliver a message the worker no longer owns.
-      if (isHttpAbortedError(lastError) || input.signal?.aborted) {
-        logWarn("whatsapp_send_cancelled", lastError.message, { to: input.to, attempt: attempt + 1 });
+      if (isHttpAbortedError(lastError) || options.signal?.aborted) {
+        logWarn("whatsapp_send_cancelled", lastError.message, { attempt: attempt + 1 });
         throw lastError;
       }
 
-      const isLast = attempt === MAX_ATTEMPTS - 1;
+      const isLast = attempt === maxAttempts - 1;
       if (isLast) {
         logError("whatsapp_send_exhausted", lastError, {
-          to: input.to,
-          attempts: MAX_ATTEMPTS,
+          attempts: maxAttempts,
           timedOut: isHttpTimeoutError(lastError),
         });
         throw lastError;
@@ -174,15 +181,29 @@ export async function sendWhatsAppTextMessage(input: SendWhatsAppTextInput): Pro
       logWarn("whatsapp_send_network_retry", lastError.message, {
         attempt: attempt + 1,
         delayMs: delay,
-        // A timeout means the message MAY have been delivered — Meta could have
-        // processed the POST after we stopped listening. Retrying can therefore
-        // duplicate a message; that is the accepted trade-off versus silence.
         timedOut: isHttpTimeoutError(lastError),
         aborted: isAbortError(lastError),
       });
-      await abortableSleep(delay, input.signal);
+      await abortableSleep(delay, options.signal);
     }
   }
 
   throw lastError ?? new Error("WhatsApp send failed after retries.");
+}
+
+export async function sendWhatsAppTextMessage(input: SendWhatsAppTextInput): Promise<void> {
+  const rtlBody = ensureRtl(formatWhatsAppMarkdown(input.body));
+  const result = await postGraphMessages(
+    {
+      messaging_product: "whatsapp",
+      to: input.to,
+      type: "text",
+      text: { body: rtlBody },
+    },
+    { signal: input.signal, retries: true }
+  );
+
+  if (!result.ok) {
+    throw new Error(`WhatsApp send failed: HTTP ${result.status} ${result.body}`);
+  }
 }

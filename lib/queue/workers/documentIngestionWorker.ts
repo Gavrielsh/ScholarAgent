@@ -121,6 +121,14 @@ export function createDocumentIngestionWorker(): Worker<ParsedInboundDocumentEve
     const messageId = job.data.messageId;
     if (messageId && currentAttempt(job) >= maxAttempts(job)) {
       try {
+        await job.remove();
+      } catch (removeErr) {
+        logError("document_failed_job_remove_failed", removeErr, {
+          messageId,
+          jobId: job.id,
+        });
+      }
+      try {
         await releaseWhatsAppMessageClaim(messageId);
         logWarn(
           "document_idempotency_claim_released",

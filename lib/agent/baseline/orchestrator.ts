@@ -4,7 +4,7 @@ import { isAdminRole, isElevatedRole, isManagerRole } from "@/lib/auth/roles";
 import { resolveAdminAnalyticsFollowUp } from "@/lib/agent/baseline/adminAnalyticsHandler";
 import {
   resolveL0AdminFlow,
-  resolveL1ChatHistoryFlow,
+  runL1DailyStaffSummary,
 } from "@/lib/agent/baseline/chatHistoryHandlers";
 import {
   matchesChatHistoryHeuristic,
@@ -101,7 +101,7 @@ export async function processBaselineQuery(
   // selection (l0AdminSession) is an explicit fresh action, so only free text
   // outside those flows is eligible to be treated as an analytics follow-up.
   // resolveAdminAnalyticsFollowUp re-validates the admin role internally.
-  if (isAdminRole(userContext.permissionLevel) && !buttonId && !getL0AdminSession(senderPhone)) {
+  if (isAdminRole(userContext.permissionLevel) && !buttonId && !(await getL0AdminSession(senderPhone))) {
     const analytics = await resolveAdminAnalyticsFollowUp({
       adminPhone: senderPhone,
       query,
@@ -142,7 +142,7 @@ export async function processBaselineQuery(
   }
 
   if (isManagerRole(userContext.permissionLevel) && intent === "CHAT_HISTORY") {
-    const answer = await resolveL1ChatHistoryFlow(userContext.permissionLevel);
+    const answer = await runL1DailyStaffSummary(userContext.permissionLevel);
     return { kind: "text", answer, ragMetrics: null, intent };
   }
 

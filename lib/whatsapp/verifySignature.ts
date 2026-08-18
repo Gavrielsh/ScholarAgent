@@ -22,11 +22,23 @@ export type SignatureVerdict =
 let unconfiguredWarningEmitted = false;
 
 /**
+ * Production, Vercel, or an explicit REQUIRE_WEBHOOK_SIGNATURE=1 must never
+ * accept an unsigned payload. Local/dev may skip when the secret is unset.
+ */
+export function isWebhookSignatureRequired(): boolean {
+  return (
+    process.env.REQUIRE_WEBHOOK_SIGNATURE === "1" ||
+    process.env.NODE_ENV === "production" ||
+    process.env.VERCEL === "1"
+  );
+}
+
+/**
  * Constant-time verification of Meta's webhook signature.
  *
  * Returns "unconfigured" (rather than throwing) when WHATSAPP_APP_SECRET is absent
  * so local development keeps working, but emits a one-shot warning so the gap is
- * visible in logs. Callers decide how strict to be about that state.
+ * visible in logs. Callers must reject that state in production.
  */
 export function verifyMetaSignature(
   rawBody: string,

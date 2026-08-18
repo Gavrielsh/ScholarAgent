@@ -162,25 +162,6 @@ function buildSafeRewrite(text: string): string | null {
   return null;
 }
 
-export interface SafetyCheckResult {
-  /** True when the message matches a life-threatening / severe distress pattern. */
-  isEmergency: boolean;
-  /** Hardcoded handoff response to return immediately; present only when isEmergency=true. */
-  response?: string;
-}
-
-/**
- * Hard-fail guard that must be evaluated BEFORE the intent router and RAG pipeline.
- * When isEmergency is true, callers MUST short-circuit the entire flow and return
- * the provided response verbatim — the LLM must never handle these situations.
- */
-export function checkSafetySignals(text: string): SafetyCheckResult {
-  if (containsMandatoryHandoffSignals(text)) {
-    return { isEmergency: true, response: MANDATORY_HANDOFF_RESPONSE_HE };
-  }
-  return { isEmergency: false };
-}
-
 export function classifySafetySignals(text: string): SafetySignals {
   const trimmed = text.trim();
 

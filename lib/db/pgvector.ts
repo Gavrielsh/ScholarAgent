@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { withClient, withRlsTransaction, withServiceClient } from "@/lib/db/client";
 import type { PoolClient } from "pg";
-import { ADMIN_PERMISSION_LEVEL } from "@/lib/auth/rls";
+import { ADMIN_PERMISSION_LEVEL, MANAGER_PERMISSION_LEVEL } from "@/lib/auth/rls";
 import type { PermissionLevel } from "@/lib/auth/types";
 import { buildChunkMetadata } from "@/lib/ingestion/chunkMetadata";
 import type { Chunk } from "@/lib/ingestion/chunker";
@@ -39,9 +39,17 @@ export interface QuerySimilarOptions {
   /** HNSW / BM25 leg cap each — fetch wide before RLS shrinks the effective set. */
   overfetch?: number;
   rrfK?: number;
+  /** Job deadline / shutdown cancellation, forwarded to the query embedding. */
+  signal?: AbortSignal;
 }
 
-function normalizeQueryOptions(arg?: number | QuerySimilarOptions): Required<QuerySimilarOptions> {
+type NormalizedQueryOptions = Required<Pick<QuerySimilarOptions, "limit" | "overfetch" | "rrfK">> & {
+  signal?: AbortSignal;
+};
+
+function normalizeQueryOptions(
+  arg?: number | QuerySimilarOptions
+): NormalizedQueryOptions {
   if (typeof arg === "number") {
     return { limit: arg, overfetch: DEFAULT_RETRIEVAL_OVERFETCH, rrfK: DEFAULT_RRF_K };
   }
@@ -49,6 +57,7 @@ function normalizeQueryOptions(arg?: number | QuerySimilarOptions): Required<Que
     limit: arg?.limit ?? 5,
     overfetch: arg?.overfetch ?? DEFAULT_RETRIEVAL_OVERFETCH,
     rrfK: arg?.rrfK ?? DEFAULT_RRF_K,
+    signal: arg?.signal,
   };
 }
 
@@ -62,52 +71,6 @@ function toVectorLiteral(vector: number[]): string {
     );
   }
   return `[${vector.join(",")}]`;
-}
-
-export async function upsertDocument(document: EmbeddingRecord): Promise<string> {
-  if (!document.text.trim()) {
-    throw new Error("Cannot insert document with empty text.");
-  }
-
-  const embedding =
-    document.embedding && document.embedding.length > 0
-      ? document.embedding
-      : await embedText(document.text);
-
-  if (embedding.length === 0) {
-    throw new Error("Embedding generation returned an empty vector.");
-  }
-
-  const vectorLiteral = toVectorLiteral(embedding);
-  const metadataJson = JSON.stringify(document.metadata ?? {});
-
-  const sql = document.id
-    ? `
-        INSERT INTO knowledge_base (id, content, metadata, classification_level, embedding)
-        VALUES ($1, $2, $3::jsonb, $4, $5::vector)
-        ON CONFLICT (id) DO UPDATE
-          SET content = EXCLUDED.content,
-              metadata = EXCLUDED.metadata,
-              classification_level = EXCLUDED.classification_level,
-              embedding = EXCLUDED.embedding
-        RETURNING id;
-      `
-    : `
-        INSERT INTO knowledge_base (content, metadata, classification_level, embedding)
-        VALUES ($1, $2::jsonb, $3, $4::vector)
-        RETURNING id;
-      `;
-
-  const params = document.id
-    ? [document.id, document.text, metadataJson, document.classificationLevel, vectorLiteral]
-    : [document.text, metadataJson, document.classificationLevel, vectorLiteral];
-
-  const result = await withClient((client) => client.query<{ id: string }>(sql, params));
-  const insertedId = result.rows[0]?.id;
-  if (!insertedId) {
-    throw new Error("Document insert did not return an id.");
-  }
-  return insertedId;
 }
 
 const BULK_UPSERT_SQL = `
@@ -226,9 +189,26 @@ export async function upsertDocumentsBatch(
   const embeddings = ready.map((row) => toVectorLiteral(row.embedding!));
 
   try {
-    const result = await withClient((client) =>
-      client.query<{ id: string }>(BULK_UPSERT_SQL, [ids, texts, metadata, levels, embeddings])
-    );
+    const result = await withClient(async (client) => {
+      await client.query("BEGIN");
+      try {
+        await client.query("SELECT set_config('app.user_permission_level', $1, true)", [
+          String(ADMIN_PERMISSION_LEVEL),
+        ]);
+        const inserted = await client.query<{ id: string }>(BULK_UPSERT_SQL, [
+          ids,
+          texts,
+          metadata,
+          levels,
+          embeddings,
+        ]);
+        await client.query("COMMIT");
+        return inserted;
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw err;
+      }
+    });
     for (const row of result.rows) {
       if (row.id) {
         insertedIds.push(row.id);
@@ -306,7 +286,7 @@ async function executeHybridRetrieval(
   client: PoolClient,
   queryText: string,
   vectorLiteral: string,
-  opts: Required<QuerySimilarOptions>
+  opts: NormalizedQueryOptions
 ): Promise<SimilarDocument[]> {
   const overfetch = opts.overfetch;
 
@@ -356,13 +336,13 @@ async function executeHybridRetrieval(
 async function prepareHybridRetrieval(
   queryText: string,
   options?: number | QuerySimilarOptions
-): Promise<{ vectorLiteral: string; opts: Required<QuerySimilarOptions> } | null> {
+): Promise<{ vectorLiteral: string; opts: NormalizedQueryOptions } | null> {
   const opts = normalizeQueryOptions(options);
   if (!queryText.trim()) {
     return null;
   }
 
-  const queryEmbedding = await embedText(queryText);
+  const queryEmbedding = await embedText(queryText, opts.signal);
   if (queryEmbedding.length === 0) {
     return null;
   }
@@ -427,6 +407,8 @@ export interface IngestedDocumentRecord {
   uploadedByUserId: string;
   uploadedByPhone: string | null;
   classificationLevel: PermissionLevel;
+  /** Must be L0 or L1 — set as `app.user_permission_level` so write RLS allows the insert. */
+  writePermissionLevel: PermissionLevel;
   documentMetadata?: Record<string, unknown>;
   /** Channel-specific extras merged into every chunk's metadata. */
   chunkMetadata?: Record<string, unknown>;
@@ -470,6 +452,9 @@ export async function insertDocumentWithChunks(
   if (input.chunks.length === 0) {
     throw new Error("Cannot ingest a document with zero chunks.");
   }
+  if (input.writePermissionLevel > MANAGER_PERMISSION_LEVEL) {
+    throw new Error("Corpus writes require L0 or L1.");
+  }
 
   const chunkIds = input.chunks.map(() => randomUUID());
   const texts = input.chunks.map((c) => c.text);
@@ -494,6 +479,9 @@ export async function insertDocumentWithChunks(
   return withClient(async (client) => {
     try {
       await client.query("BEGIN");
+      await client.query("SELECT set_config('app.user_permission_level', $1, true)", [
+        String(input.writePermissionLevel),
+      ]);
 
       const documentRes = await client.query<{ id: string }>(INSERT_INGESTED_DOCUMENT_SQL, [
         input.documentId,
@@ -575,7 +563,7 @@ export async function insertDocumentWithChunks(
  */
 export async function hardDeleteKnowledgeChunksByDocumentId(documentId: string): Promise<number> {
   if (!documentId.trim()) return 0;
-  const res = await withClient((client) =>
+  const res = await withRlsTransaction(ADMIN_PERMISSION_LEVEL, (client) =>
     client.query(`DELETE FROM knowledge_base WHERE metadata->>'document_id' = $1`, [documentId])
   );
   return res.rowCount ?? 0;

@@ -3,10 +3,9 @@ import { isAdminRole } from "@/lib/auth/roles";
 import type { PermissionLevel } from "@/lib/auth/types";
 import {
   fetchTodayChatHistoryForPhone,
-  fetchTodayStaffChatHistories,
   findUsersByDisplayName,
   formatStaffRowsAsDirectReport,
-  formatStaffRowsForLlm,
+  loadTodayStaffContext,
 } from "@/lib/chat/adminHistory";
 import { enterAdminAnalyticsMode } from "@/lib/chat/adminAnalyticsSession";
 import {
@@ -53,13 +52,12 @@ export async function runL1DailyStaffSummary(
   // Report scope (L0 → all tiers, everyone else → L2/L3) is resolved inside
   // fetchTodayStaffChatHistories from this trusted, DB-derived level - never from
   // an externally-supplied filter.
-  const rows = await fetchTodayStaffChatHistories(requesterPermissionLevel);
-  const raw = formatStaffRowsForLlm(rows, requesterPermissionLevel);
-  return summarizeStaffDay(raw, requesterPermissionLevel);
+  const { formatted } = await loadTodayStaffContext(requesterPermissionLevel);
+  return summarizeStaffDay(formatted, requesterPermissionLevel);
 }
 
 export async function sendL0HistoryMenu(to: string): Promise<void> {
-  setL0AdminSession(to, "awaiting_menu_choice");
+  await setL0AdminSession(to, "awaiting_menu_choice");
   await sendWhatsAppInteractiveButtons({
     to,
     bodyText: "בחר סוג דוח היסטוריית שיחות:",
@@ -76,7 +74,7 @@ export async function handleL0ButtonReply(
   requesterPermissionLevel: PermissionLevel
 ): Promise<{ answer: string; clearSession: boolean } | { sentPrompt: true }> {
   if (buttonId === L0_BUTTON_DAILY) {
-    clearL0AdminSession(adminPhone);
+    await clearL0AdminSession(adminPhone);
     const answer = await runL1DailyStaffSummary(requesterPermissionLevel);
     // Task 2: a report was just generated, so free-text follow-up questions from
     // this admin should now route to the DB-grounded analytics handler instead of
@@ -86,13 +84,13 @@ export async function handleL0ButtonReply(
   }
 
   if (buttonId === L0_BUTTON_SPECIFIC) {
-    setL0AdminSession(adminPhone, "awaiting_user_name");
+    await setL0AdminSession(adminPhone, "awaiting_user_name");
     return {
       sentPrompt: true,
     };
   }
 
-  clearL0AdminSession(adminPhone);
+  await clearL0AdminSession(adminPhone);
   return {
     answer: "בחירה לא מזוהה. שלח שוב בקשה להיסטוריית שיחות.",
     clearSession: true,
@@ -142,7 +140,7 @@ export async function resolveL0AdminFlow(input: {
     return { type: "text", answer: "" };
   }
 
-  const session = getL0AdminSession(input.adminPhone);
+  const session = await getL0AdminSession(input.adminPhone);
 
   if (input.buttonId) {
     const result = await handleL0ButtonReply(
@@ -157,7 +155,7 @@ export async function resolveL0AdminFlow(input: {
   }
 
   if (session?.mode === "awaiting_user_name") {
-    clearL0AdminSession(input.adminPhone);
+    await clearL0AdminSession(input.adminPhone);
     const answer = await handleL0SpecificUserName(input.query, input.requesterPermissionLevel);
     // Same rationale as the daily-summary branch above: a report was just
     // generated, so enable DB-grounded follow-up Q&A for this admin.
@@ -180,8 +178,4 @@ export async function resolveL0AdminFlow(input: {
   return { type: "text", answer: "" };
 }
 
-export async function resolveL1ChatHistoryFlow(
-  requesterPermissionLevel: PermissionLevel
-): Promise<string> {
-  return runL1DailyStaffSummary(requesterPermissionLevel);
-}
+

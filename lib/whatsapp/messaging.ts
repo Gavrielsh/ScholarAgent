@@ -1,9 +1,7 @@
-import { fetchTextWithTimeout } from "@/lib/http/fetchWithTimeout";
 import { logError, logWarn } from "@/lib/logger";
-
+import { formatWhatsAppMarkdown } from "@/lib/whatsapp/formatting";
 import {
-  buildWhatsAppMessagesEndpoint,
-  getWhatsAppConfig,
+  postGraphMessages,
   WHATSAPP_HTTP_TIMEOUT_MS,
 } from "@/lib/whatsapp/sendMessage";
 
@@ -18,34 +16,6 @@ const TYPING_MAX_DURATION_MS = 120_000;
  */
 const TYPING_HTTP_TIMEOUT_MS = Number(process.env.WHATSAPP_TYPING_TIMEOUT_MS ?? 5_000);
 
-interface GraphSendResult {
-  ok: boolean;
-  status: number;
-  body: string;
-}
-
-async function postToWhatsAppMessages(
-  payload: Record<string, unknown>,
-  options: { timeoutMs?: number; signal?: AbortSignal | null } = {}
-): Promise<GraphSendResult> {
-  const config = getWhatsAppConfig();
-  const endpoint = buildWhatsAppMessagesEndpoint(config);
-
-  const response = await fetchTextWithTimeout(endpoint, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-    timeoutMs: options.timeoutMs ?? WHATSAPP_HTTP_TIMEOUT_MS,
-    signal: options.signal,
-    label: "GraphAPI/messages",
-  });
-
-  return { ok: response.ok, status: response.status, body: response.body };
-}
-
 /**
  * Marks the inbound message as read and switches the typing indicator on
  * (Meta keeps it visible for ~25s per call).
@@ -59,14 +29,14 @@ export async function markMessageReadAndTyping(
   signal?: AbortSignal | null
 ): Promise<boolean> {
   try {
-    const result = await postToWhatsAppMessages(
+    const result = await postGraphMessages(
       {
         messaging_product: "whatsapp",
         status: "read",
         message_id: messageId,
         typing_indicator: { type: "text" },
       },
-      { timeoutMs: TYPING_HTTP_TIMEOUT_MS, signal }
+      { timeoutMs: TYPING_HTTP_TIMEOUT_MS, signal, retries: false }
     );
 
     if (!result.ok) {
@@ -79,7 +49,6 @@ export async function markMessageReadAndTyping(
 
     return true;
   } catch (err) {
-    // Covers fetch/DNS/TLS failures and a missing WhatsApp config.
     logError("whatsapp_mark_read_typing_error", err, { messageId });
     return false;
   }
@@ -99,32 +68,37 @@ export interface TypingSessionController {
  */
 export function startTypingKeepAlive(
   to: string,
-  messageId: string | null
+  messageId: string | null,
+  signal?: AbortSignal | null
 ): TypingSessionController {
-  if (!messageId) {
+  if (!messageId || signal?.aborted) {
     return { stop: () => undefined };
   }
 
   let stopped = false;
   const startedAt = Date.now();
 
+  const stop = () => {
+    stopped = true;
+    clearInterval(interval);
+    signal?.removeEventListener("abort", stop);
+  };
+
   const interval = setInterval(() => {
-    if (stopped) return;
+    if (stopped || signal?.aborted) {
+      stop();
+      return;
+    }
     if (Date.now() - startedAt > TYPING_MAX_DURATION_MS) return;
-    void markMessageReadAndTyping(messageId).then((ok) => {
+    void markMessageReadAndTyping(messageId, signal).then((ok) => {
       if (!ok) logWarn("whatsapp_typing_refresh_failed", "Typing refresh rejected.", { to, messageId });
     });
   }, TYPING_REFRESH_MS);
 
-  // Never let the indicator timer hold the Node process open on shutdown.
   interval.unref?.();
+  signal?.addEventListener("abort", stop, { once: true });
 
-  return {
-    stop: () => {
-      stopped = true;
-      clearInterval(interval);
-    },
-  };
+  return { stop };
 }
 
 export interface InteractiveButton {
@@ -138,14 +112,14 @@ export async function sendWhatsAppInteractiveButtons(input: {
   buttons: InteractiveButton[];
   signal?: AbortSignal | null;
 }): Promise<void> {
-  const result = await postToWhatsAppMessages(
+  const result = await postGraphMessages(
     {
       messaging_product: "whatsapp",
       to: input.to,
       type: "interactive",
       interactive: {
         type: "button",
-        body: { text: input.bodyText },
+        body: { text: formatWhatsAppMarkdown(input.bodyText) },
         action: {
           buttons: input.buttons.map((button) => ({
             type: "reply",
@@ -154,7 +128,7 @@ export async function sendWhatsAppInteractiveButtons(input: {
         },
       },
     },
-    { signal: input.signal }
+    { signal: input.signal, retries: true, timeoutMs: WHATSAPP_HTTP_TIMEOUT_MS }
   );
 
   if (!result.ok) {

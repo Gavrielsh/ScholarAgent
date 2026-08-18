@@ -8,8 +8,13 @@ let redisClient: Redis | null = null;
 
 function createRedisClient(): Redis {
   const url = process.env.REDIS_URL?.trim() || DEFAULT_REDIS_URL;
+  // Finite retries: this client is used by the webhook claim path and admin
+  // session flags. `maxRetriesPerRequest: null` is reserved for BullMQ
+  // (lib/queue/connection.ts) so a hung SET NX cannot block Meta's ACK window.
   const client = new Redis(url, {
-    maxRetriesPerRequest: null,
+    maxRetriesPerRequest: 3,
+    connectTimeout: 5_000,
+    commandTimeout: 5_000,
     enableReadyCheck: true,
     lazyConnect: false,
   });
@@ -21,7 +26,7 @@ function createRedisClient(): Redis {
   return client;
 }
 
-/** Shared Redis connection for idempotency keys and BullMQ. */
+/** Shared Redis connection for idempotency keys and admin session flags. */
 export function getRedisClient(): Redis {
   if (!redisClient) {
     redisClient = createRedisClient();

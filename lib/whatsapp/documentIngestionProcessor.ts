@@ -6,6 +6,7 @@ import type { PermissionLevel, UserContext } from "@/lib/auth/types";
 import { isUniqueViolation } from "@/lib/db/client";
 import { insertDocumentWithChunks, type DocumentChunkRecord } from "@/lib/db/pgvector";
 import { lookupUserByPhone } from "@/lib/auth/userRegistry";
+import { parsePositiveInt, TerminalNotifyError } from "@/lib/queue/jobRuntime";
 import { abortableSleep, isAbortError, isHttpTimeoutError } from "@/lib/http/fetchWithTimeout";
 import { chunkText, type Chunk } from "@/lib/ingestion/chunker";
 import { embedTextBatch } from "@/lib/ingestion/embeddings";
@@ -44,11 +45,11 @@ const TOO_LARGE_MESSAGE = "המסמך גדול מכדי להיקלט בבת אח
  * every retry of it re-sends all 300. Small slices keep each request under the
  * limit so throttling stays rare and cheap when it does happen.
  */
-const EMBED_BATCH_SIZE = Number(process.env.DOCUMENT_EMBED_BATCH_SIZE ?? 16);
+const EMBED_BATCH_SIZE = parsePositiveInt(process.env.DOCUMENT_EMBED_BATCH_SIZE, 16);
 /** Paced gap between slices; the free Gemini tier is requests-per-minute limited. */
 const EMBED_BATCH_PAUSE_MS = Number(process.env.DOCUMENT_EMBED_BATCH_PAUSE_MS ?? 250);
 /** Backstop against a 900-page PDF consuming an entire quota window. */
-const MAX_CHUNKS_PER_DOCUMENT = Number(process.env.DOCUMENT_MAX_CHUNKS ?? 400);
+const MAX_CHUNKS_PER_DOCUMENT = parsePositiveInt(process.env.DOCUMENT_MAX_CHUNKS, 400);
 
 /**
  * Default corpus tier for a document that arrives without a level directive.
@@ -127,7 +128,10 @@ async function embedChunksInBatches(chunks: Chunk[], signal: AbortSignal): Promi
     }
 
     const slice = chunks.slice(start, start + EMBED_BATCH_SIZE);
-    const batch = await embedTextBatch(slice.map((c) => c.text));
+    const batch = await embedTextBatch(
+      slice.map((c) => c.text),
+      signal
+    );
 
     if (batch.length !== slice.length) {
       throw new Error(
@@ -285,6 +289,7 @@ async function handleDocumentIngestion(
     uploadedByUserId: user.userId,
     uploadedByPhone: event.senderId,
     classificationLevel,
+    writePermissionLevel: user.permissionLevel,
     documentMetadata: {
       organization_id: user.organizationId ?? null,
       uploaded_via: "whatsapp",
@@ -330,6 +335,10 @@ async function handleIngestionFailure(
   event: ParsedInboundDocumentEvent,
   ctx: DocumentIngestionContext
 ): Promise<void> {
+  if (err instanceof TerminalNotifyError) {
+    throw err;
+  }
+
   const { senderId, messageId } = event;
 
   if (err instanceof DocumentIngestionUserError) {
@@ -400,6 +409,7 @@ async function notify(
       messageId: event.messageId,
       attempt: ctx.attempt,
     });
+    throw new TerminalNotifyError(sendErr);
   }
 }
 

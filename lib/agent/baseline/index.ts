@@ -12,6 +12,7 @@ import type { LlmMessage } from "@/lib/llm/types";
 import { logError } from "@/lib/logger";
 import { startBaselineRagTrace } from "@/lib/observability/tracing";
 import { formatWhatsAppMarkdown } from "@/lib/whatsapp/formatting";
+import { MAX_HISTORY_TURNS } from "@/lib/chat/context";
 
 /**
  * Per-leg (vector / BM25) DB fetch depth, expressed as a multiple of the final
@@ -21,9 +22,6 @@ import { formatWhatsAppMarkdown } from "@/lib/whatsapp/formatting";
  */
 const FUSION_DEPTH_MULTIPLIER = 4;
 const MIN_FUSION_DEPTH = 20;
-
-/** Sliding-window size for replayed conversation turns (user + assistant combined). */
-const CONVERSATION_WINDOW_TURNS = 6;
 
 const CHIT_CHAT_REPLY_HE =
   "שלום! אני הבוט המנטורי של מיזם 'אדם לאדם '. אשמח לסייע לך בשאלות פדגוגיות, התמודדות עם קונפליקטים, תכנון פעילויות ולוגיסטיקה של הצהרון.";
@@ -57,9 +55,6 @@ export interface BaselineRagCoreResult {
   latencyMs: number;
 }
 
-export type BaselineRagResult = BaselineRagCoreResult;
-
-/** Projects DB rows straight to the result shape — the DB already ranked them. */
 function toRetrievedChunks(docs: SimilarDocument[]): BaselineRagCoreResult["retrievedChunks"] {
   return docs.map((d) => ({
     id: d.id,
@@ -90,6 +85,7 @@ export async function runBaselineRagCore(input: BaselineRagInput): Promise<Basel
   const docs = await querySimilarDocuments(query, userContext.permissionLevel, {
     limit: retrievalLimit,
     overfetch: Math.max(retrievalLimit * FUSION_DEPTH_MULTIPLIER, MIN_FUSION_DEPTH),
+    signal: signal ?? undefined,
   });
   trace.retrievalSpan.end({
     chunkIds: docs.map((d) => d.id),
@@ -144,7 +140,7 @@ export async function runBaselineRagCore(input: BaselineRagInput): Promise<Basel
   // inflates the prompt on every message, which directly degrades TTFT and cost.
   const conversationContext: LlmMessage[] = priorMessages
     .filter(isConversationMessage)
-    .slice(-CONVERSATION_WINDOW_TURNS)
+    .slice(-MAX_HISTORY_TURNS)
     .map((message) => ({
       role: message.role,
       content: message.content,
@@ -216,23 +212,4 @@ export async function recordBaselineRagMetrics(input: {
   } catch (err) {
     logError("baseline_rag.audit_log_insert_failed", err, { userId: input.userContext.userId });
   }
-}
-
-export async function runBaselineRag(input: BaselineRagInput): Promise<BaselineRagCoreResult> {
-  const result = await runBaselineRagCore(input);
-
-  // Fire-and-forget: the audit-log INSERT is not on the user's critical path, so we
-  // never block the answer on a DB round-trip. recordBaselineRagMetrics swallows its
-  // own errors; the extra catch guards against a rejection before that try block.
-  void recordBaselineRagMetrics({
-    query: input.query,
-    userContext: input.userContext,
-    result,
-  }).catch((err: unknown) => {
-    logError("baseline_rag.audit_log_background_failed", err, {
-      userId: input.userContext.userId,
-    });
-  });
-
-  return result;
 }

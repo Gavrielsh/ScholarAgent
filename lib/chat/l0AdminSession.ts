@@ -1,3 +1,5 @@
+import { getRedisClient } from "@/lib/redis/client";
+
 export type L0AdminSessionMode =
   | "awaiting_menu_choice"
   | "awaiting_user_name";
@@ -7,27 +9,46 @@ export interface L0AdminSession {
   updatedAt: number;
 }
 
-const sessions = new Map<string, L0AdminSession>();
-const SESSION_TTL_MS = 60 * 60 * 1000;
+/**
+ * L0 menu / specific-user prompt state.
+ *
+ * Backed by Redis (same rationale as lib/chat/adminAnalyticsSession.ts): the
+ * BullMQ worker runs with concurrency > 1 and no per-sender lock, so a process-
+ * local Map desyncs when two messages from the same admin overlap or land on
+ * different instances.
+ */
+const KEY_PREFIX = "admin:l0session:";
+const TTL_SECONDS = 60 * 60;
 
-function pruneExpired(now = Date.now()): void {
-  for (const [phone, session] of sessions.entries()) {
-    if (now - session.updatedAt > SESSION_TTL_MS) {
-      sessions.delete(phone);
+function sessionKey(adminPhone: string): string {
+  return `${KEY_PREFIX}${adminPhone}`;
+}
+
+export async function getL0AdminSession(adminPhone: string): Promise<L0AdminSession | null> {
+  const raw = await getRedisClient().get(sessionKey(adminPhone));
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { mode?: unknown; updatedAt?: unknown };
+    if (parsed.mode !== "awaiting_menu_choice" && parsed.mode !== "awaiting_user_name") {
+      return null;
     }
+    return {
+      mode: parsed.mode,
+      updatedAt: typeof parsed.updatedAt === "number" ? parsed.updatedAt : Date.now(),
+    };
+  } catch {
+    return null;
   }
 }
 
-export function getL0AdminSession(adminPhone: string): L0AdminSession | null {
-  pruneExpired();
-  return sessions.get(adminPhone) ?? null;
+export async function setL0AdminSession(
+  adminPhone: string,
+  mode: L0AdminSessionMode
+): Promise<void> {
+  const session: L0AdminSession = { mode, updatedAt: Date.now() };
+  await getRedisClient().set(sessionKey(adminPhone), JSON.stringify(session), "EX", TTL_SECONDS);
 }
 
-export function setL0AdminSession(adminPhone: string, mode: L0AdminSessionMode): void {
-  pruneExpired();
-  sessions.set(adminPhone, { mode, updatedAt: Date.now() });
-}
-
-export function clearL0AdminSession(adminPhone: string): void {
-  sessions.delete(adminPhone);
+export async function clearL0AdminSession(adminPhone: string): Promise<void> {
+  await getRedisClient().del(sessionKey(adminPhone));
 }

@@ -2,9 +2,15 @@ import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg
 
 import type { PermissionLevel } from "@/lib/auth/types";
 import { logError } from "@/lib/logger";
+import { parseNonNegativeInt, parsePositiveInt } from "@/lib/queue/jobRuntime";
 
 let pool: Pool | null = null;
 let servicePool: Pool | null = null;
+
+function resolveSsl(): false | { rejectUnauthorized: boolean } {
+  if (process.env.PG_SSLMODE === "disable") return false;
+  return { rejectUnauthorized: process.env.PG_SSL_REJECT_UNAUTHORIZED !== "false" };
+}
 
 function createPool(): Pool {
   const connectionString = process.env.DATABASE_URL;
@@ -14,11 +20,11 @@ function createPool(): Pool {
 
   const instance = new Pool({
     connectionString,
-    max: Number(process.env.PG_POOL_MAX ?? 5),
-    min: Number(process.env.PG_POOL_MIN ?? 1),
+    max: parsePositiveInt(process.env.PG_POOL_MAX, 5),
+    min: parsePositiveInt(process.env.PG_POOL_MIN, 1),
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
-    ssl: process.env.PG_SSLMODE === "disable" ? false : { rejectUnauthorized: false },
+    ssl: resolveSsl(),
     keepAlive: true,
     allowExitOnIdle: true,
   });
@@ -40,11 +46,11 @@ function createServicePool(): Pool {
 
   const instance = new Pool({
     connectionString,
-    max: Number(process.env.PG_SERVICE_POOL_MAX ?? 3),
-    min: Number(process.env.PG_SERVICE_POOL_MIN ?? 0),
+    max: parsePositiveInt(process.env.PG_SERVICE_POOL_MAX, 3),
+    min: parseNonNegativeInt(process.env.PG_SERVICE_POOL_MIN, 0),
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
-    ssl: process.env.PG_SSLMODE === "disable" ? false : { rejectUnauthorized: false },
+    ssl: resolveSsl(),
     keepAlive: true,
     allowExitOnIdle: true,
   });
@@ -133,6 +139,32 @@ export async function withRlsTransaction<T>(
   });
 }
 
+/**
+ * Own-history reads/writes. Sets `app.sender_id` so chat_history RLS can allow
+ * a user's own rows without the previous "unset GUC = open SELECT" hole.
+ */
+export async function withSenderTransaction<T>(
+  senderId: string,
+  fn: (client: PoolClient) => Promise<T>
+): Promise<T> {
+  return withClient(async (client) => {
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('app.sender_id', $1, true)", [senderId]);
+      const result = await fn(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (err) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackErr) {
+        logError("postgres_sender_rollback_error", rollbackErr);
+      }
+      throw err;
+    }
+  });
+}
+
 export async function query<T extends QueryResultRow = QueryResultRow>(
   text: string,
   params?: unknown[]
@@ -174,24 +206,31 @@ export function uniqueViolationConstraint(err: unknown): string | null {
 }
 
 export async function closePool(): Promise<void> {
+  const errors: unknown[] = [];
+
   if (pool) {
+    const instance = pool;
+    pool = null;
     try {
-      await pool.end();
+      await instance.end();
     } catch (err) {
       logError("postgres_pool_close_error", err);
-      throw err;
-    } finally {
-      pool = null;
+      errors.push(err);
     }
   }
+
   if (servicePool) {
+    const instance = servicePool;
+    servicePool = null;
     try {
-      await servicePool.end();
+      await instance.end();
     } catch (err) {
       logError("postgres_service_pool_close_error", err);
-      throw err;
-    } finally {
-      servicePool = null;
+      errors.push(err);
     }
+  }
+
+  if (errors.length > 0) {
+    throw errors[0];
   }
 }

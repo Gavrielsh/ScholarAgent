@@ -32,7 +32,3 @@ export function isElevatedRole(level: PermissionLevel): boolean {
 export function shouldSkipPrivacyGuardrails(user: UserContext): boolean {
   return isElevatedRole(user.permissionLevel);
 }
-
-export function roleLevelLabel(level: PermissionLevel): string {
-  return `L${level}`;
-}

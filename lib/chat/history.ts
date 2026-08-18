@@ -26,7 +26,7 @@
  * ```
  */
 
-import { isUniqueViolation, withClient } from "@/lib/db/client";
+import { isUniqueViolation, withSenderTransaction } from "@/lib/db/client";
 import { logError, logInfo } from "@/lib/logger";
 
 export interface ChatHistoryEntry {
@@ -74,33 +74,26 @@ export async function appendChatEntries(
   }
 
   try {
-    return await withClient(async (client) => {
-      await client.query("BEGIN");
-      try {
-        let inserted = 0;
-        for (const entry of newEntries) {
-          // ON CONFLICT must repeat the index predicate verbatim for Postgres to
-          // infer the partial unique index `chat_history_message_id_key`.
-          const result = await client.query(
-            `INSERT INTO chat_history (sender_id, role, content, message_id, occurred_at)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (message_id) WHERE message_id IS NOT NULL DO NOTHING`,
-            [
-              senderId,
-              entry.role,
-              entry.content,
-              entry.messageId ?? null,
-              entry.timestamp ? new Date(entry.timestamp) : new Date(),
-            ]
-          );
-          inserted += result.rowCount ?? 0;
-        }
-        await client.query("COMMIT");
-        return inserted;
-      } catch (err) {
-        await client.query("ROLLBACK").catch(() => undefined);
-        throw err;
+    return await withSenderTransaction(senderId, async (client) => {
+      let inserted = 0;
+      for (const entry of newEntries) {
+        // ON CONFLICT must repeat the index predicate verbatim for Postgres to
+        // infer the partial unique index `chat_history_message_id_key`.
+        const result = await client.query(
+          `INSERT INTO chat_history (sender_id, role, content, message_id, occurred_at)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (message_id) WHERE message_id IS NOT NULL DO NOTHING`,
+          [
+            senderId,
+            entry.role,
+            entry.content,
+            entry.messageId ?? null,
+            entry.timestamp ? new Date(entry.timestamp) : new Date(),
+          ]
+        );
+        inserted += result.rowCount ?? 0;
       }
+      return inserted;
     });
   } catch (err) {
     // Belt and braces: ON CONFLICT above covers the inferable case, but a
@@ -120,7 +113,7 @@ export async function readChatHistory(senderId: string): Promise<ChatHistoryFile
   assertSenderId(senderId);
 
   try {
-    const rows = await withClient((client) =>
+    const rows = await withSenderTransaction(senderId, (client) =>
       client.query<{
         role: "user" | "assistant" | "system";
         content: string;

@@ -5,16 +5,45 @@
 // are subtle enough (see the comments below) that a second hand-rolled copy
 // would drift and reintroduce bugs that were already fixed once.
 
+import { logWarn } from "@/lib/logger";
+
 export function parsePositiveInt(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+export function parseNonNegativeInt(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 export class JobTimeoutError extends Error {
   constructor(jobId: string, timeoutMs: number) {
     super(`Job ${jobId} exceeded its ${timeoutMs}ms deadline.`);
     this.name = "JobTimeoutError";
+  }
+}
+
+/**
+ * Thrown when the terminal user-facing notice (apology / ingestion failure)
+ * could not be delivered. Processors throw this only on the final attempt so
+ * BullMQ marks the job `failed` and the worker can release the Redis claim —
+ * swallowing the send error would complete the job and leave the user silent
+ * for the claim TTL.
+ */
+export class TerminalNotifyError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super(
+      cause instanceof Error
+        ? `Terminal WhatsApp notice failed: ${cause.message}`
+        : "Terminal WhatsApp notice failed."
+    );
+    this.name = "TerminalNotifyError";
+    this.cause = cause;
   }
 }
 
@@ -46,6 +75,9 @@ export function maxAttempts(job: { opts: { attempts?: number } }): number {
  * be enforced inside the processor. The AbortController is the important half:
  * without it the losing promise keeps running in the background, still holding
  * sockets and still able to send a WhatsApp reply long after the job "failed".
+ *
+ * The work promise is retained and sunk after abort so a late rejection cannot
+ * become an `unhandledRejection` that tears down the worker process.
  */
 export async function runWithDeadline(
   jobId: string,
@@ -63,14 +95,23 @@ export async function runWithDeadline(
     timer.unref?.();
   });
 
+  const work = run(controller.signal);
+
   try {
-    await Promise.race([run(controller.signal), deadline]);
+    await Promise.race([work, deadline]);
   } finally {
     // Always clear the timer and abort: on the success path this releases the
     // handle immediately instead of leaving it pending for the full timeout,
     // and on the failure path it cancels any still-in-flight fetch.
     clearTimeout(timer);
     controller.abort();
+    await work.catch((err) => {
+      logWarn(
+        "job_orphaned_after_deadline",
+        err instanceof Error ? err.message : String(err),
+        { jobId }
+      );
+    });
   }
 }
 

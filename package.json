@@ -14,8 +14,6 @@
     "reconcile": "node --require ts-node/register --require tsconfig-paths/register scripts/reconcile_documents.ts"
   },
   "dependencies": {
-    "@langchain/anthropic": "^1.4.0",
-    "@vercel/functions": "^1.5.0",
     "bullmq": "^5.78.0",
     "dotenv": "^17.4.2",
     "ioredis": "^5.11.0",

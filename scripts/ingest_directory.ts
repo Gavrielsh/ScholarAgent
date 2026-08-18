@@ -131,6 +131,8 @@ async function processDirectory(currentPath: string): Promise<void> {
         text,
         classificationLevel,
         uploadedByUserId: "system-batch-script",
+        uploadedByPermissionLevel: 0,
+        source: "directory",
         extraMetadata: {
           source_path: relativePath,
           required_role: classificationLevel,

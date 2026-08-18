@@ -16,6 +16,7 @@ export const MAX_CONTEXT_TOKENS = Number(
 );
 
 const DEFAULT_MAX_TURNS = Number(process.env.CHAT_MAX_HISTORY_TURNS ?? 10);
+export const MAX_HISTORY_TURNS = DEFAULT_MAX_TURNS;
 
 export function estimateTokens(text: string): number {
   if (!text) return 0;

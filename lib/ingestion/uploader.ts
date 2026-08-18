@@ -5,9 +5,9 @@ import mammoth from "mammoth";
 // TextResult.text holds the concatenated text from all pages.
 import { PDFParse } from "pdf-parse";
 
+import { MANAGER_PERMISSION_LEVEL } from "@/lib/auth/rls";
 import type { PermissionLevel } from "@/lib/auth/types";
-import { upsertDocumentsBatch, type EmbeddingRecord } from "@/lib/db/pgvector";
-import { buildChunkMetadata } from "@/lib/ingestion/chunkMetadata";
+import { insertDocumentWithChunks } from "@/lib/db/pgvector";
 import { chunkText, type ChunkOptions } from "@/lib/ingestion/chunker";
 import { embedTextBatch } from "@/lib/ingestion/embeddings";
 import { redactPii } from "@/lib/ingestion/piiRedact";
@@ -23,9 +23,12 @@ export interface UploadDocumentInput {
   text: string;
   classificationLevel: PermissionLevel;
   uploadedByUserId: string;
+  /** Must be L0 or L1 — used for write-path RLS. */
+  uploadedByPermissionLevel: PermissionLevel;
   extraMetadata?: Record<string, unknown>;
   /** Override chunking parameters per document type (optional). */
   chunkOptions?: ChunkOptions;
+  source?: string;
 }
 
 export interface UploadDocumentResult {
@@ -33,6 +36,26 @@ export interface UploadDocumentResult {
   chunkCount: number;
   insertedChunkIds: string[];
   failures: Array<{ index: number; error: string }>;
+}
+
+/**
+ * Rejects a claimed MIME type that does not match the file's magic bytes.
+ * Text types are not sniffed (UTF-8 has no reliable header).
+ */
+export function assertMimeMatchesContent(bytes: Uint8Array, mimeType: string): void {
+  const mime = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (mime === "application/pdf") {
+    const header = String.fromCharCode(bytes[0] ?? 0, bytes[1] ?? 0, bytes[2] ?? 0, bytes[3] ?? 0);
+    if (header !== "%PDF") {
+      throw new Error("סוג הקובץ המוצהר הוא PDF אך תוכן הקובץ אינו PDF.");
+    }
+    return;
+  }
+  if (mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+    if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
+      throw new Error("סוג הקובץ המוצהר הוא DOCX אך תוכן הקובץ אינו ארכיון ZIP.");
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -43,10 +66,13 @@ export async function ingestDocument(input: UploadDocumentInput): Promise<Upload
   if (!input.text.trim()) {
     throw new Error("Cannot ingest a document with no extractable text.");
   }
+  if (input.uploadedByPermissionLevel > MANAGER_PERMISSION_LEVEL) {
+    throw new Error("Corpus writes require L0 or L1.");
+  }
 
   const documentId = randomUUID();
   const sanitized = redactPii(input.text);
-  const chunks = chunkText(sanitized, input.chunkOptions);
+  const chunks = chunkText(sanitized, input.chunkOptions).filter((chunk) => chunk.text.trim());
 
   if (chunks.length === 0) {
     return { documentId, chunkCount: 0, insertedChunkIds: [], failures: [] };
@@ -60,28 +86,41 @@ export async function ingestDocument(input: UploadDocumentInput): Promise<Upload
     );
   }
 
-  const records: EmbeddingRecord[] = chunks.map((chunk, i) => ({
-    text: chunk.text,
-    classificationLevel: input.classificationLevel,
-    embedding: vectors[i],
-    metadata: buildChunkMetadata({
-      documentId,
-      filename: input.filename,
-      mimeType: input.mimeType,
-      uploadedByUserId: input.uploadedByUserId,
-      classificationLevel: input.classificationLevel,
-      chunk,
-      extra: input.extraMetadata,
-    }),
-  }));
+  const sizeBytes =
+    typeof input.extraMetadata?.original_size_bytes === "number"
+      ? input.extraMetadata.original_size_bytes
+      : null;
 
-  const { insertedIds, failures } = await upsertDocumentsBatch(records);
+  const result = await insertDocumentWithChunks({
+    documentId,
+    source: input.source ?? "upload_api",
+    filename: input.filename,
+    mimeType: input.mimeType,
+    sizeBytes,
+    sha256: null,
+    externalMediaId: null,
+    externalMessageId: null,
+    uploadedByUserId: input.uploadedByUserId,
+    uploadedByPhone: null,
+    classificationLevel: input.classificationLevel,
+    writePermissionLevel: input.uploadedByPermissionLevel,
+    documentMetadata: input.extraMetadata ?? {},
+    chunkMetadata: {
+      source: input.source ?? "upload_api",
+      ...(input.extraMetadata ?? {}),
+    },
+    chunks: chunks.map((chunk, i) => ({
+      text: chunk.text,
+      chunk,
+      embedding: vectors[i],
+    })),
+  });
 
   return {
-    documentId,
+    documentId: result.documentId,
     chunkCount: chunks.length,
-    insertedChunkIds: insertedIds,
-    failures,
+    insertedChunkIds: result.insertedChunkIds,
+    failures: [],
   };
 }
 

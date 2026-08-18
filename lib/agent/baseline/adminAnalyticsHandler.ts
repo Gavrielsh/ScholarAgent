@@ -1,7 +1,7 @@
 import { getLlmAdapter } from "@/lib/llm/adapter";
 import { isAdminRole } from "@/lib/auth/roles";
 import type { PermissionLevel } from "@/lib/auth/types";
-import { fetchTodayStaffChatHistories, formatStaffRowsForLlm } from "@/lib/chat/adminHistory";
+import { loadTodayStaffContext } from "@/lib/chat/adminHistory";
 import {
   exitAdminAnalyticsMode,
   isInAdminAnalyticsMode,
@@ -66,15 +66,14 @@ async function answerFromChatHistory(
   query: string,
   requesterPermissionLevel: PermissionLevel
 ): Promise<string> {
-  const rows = await fetchTodayStaffChatHistories(requesterPermissionLevel);
-  const raw = formatStaffRowsForLlm(rows, requesterPermissionLevel);
+  const { formatted } = await loadTodayStaffContext(requesterPermissionLevel);
 
   const answer = await getLlmAdapter().generateText({
     model: resolveFastModel(),
     temperature: 0.2,
     messages: [
       { role: "system", content: ANALYTICS_QA_PROMPT },
-      { role: "user", content: `נתוני היום:\n${raw}\n\nשאלת המנהל: ${query}` },
+      { role: "user", content: `נתוני היום:\n${formatted}\n\nשאלת המנהל: ${query}` },
     ],
   });
   return answer.trim();
