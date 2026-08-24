@@ -1,4 +1,8 @@
-import { getRedisClient } from "@/lib/redis/client";
+import {
+  deleteSessionValue,
+  getSessionValue,
+  setSessionValue,
+} from "@/lib/redis/jsonSession";
 
 export type L0AdminSessionMode =
   | "awaiting_menu_choice"
@@ -25,7 +29,7 @@ function sessionKey(adminPhone: string): string {
 }
 
 export async function getL0AdminSession(adminPhone: string): Promise<L0AdminSession | null> {
-  const raw = await getRedisClient().get(sessionKey(adminPhone));
+  const raw = await getSessionValue(sessionKey(adminPhone));
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as { mode?: unknown; updatedAt?: unknown };
@@ -46,9 +50,9 @@ export async function setL0AdminSession(
   mode: L0AdminSessionMode
 ): Promise<void> {
   const session: L0AdminSession = { mode, updatedAt: Date.now() };
-  await getRedisClient().set(sessionKey(adminPhone), JSON.stringify(session), "EX", TTL_SECONDS);
+  await setSessionValue(sessionKey(adminPhone), JSON.stringify(session), TTL_SECONDS);
 }
 
 export async function clearL0AdminSession(adminPhone: string): Promise<void> {
-  await getRedisClient().del(sessionKey(adminPhone));
+  await deleteSessionValue(sessionKey(adminPhone));
 }

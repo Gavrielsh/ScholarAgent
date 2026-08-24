@@ -8,11 +8,10 @@
 import { shouldSkipPrivacyGuardrails } from "@/lib/auth/roles";
 import type { UserContext } from "@/lib/auth/types";
 
+export type IntentCategory = "VALID_EDUCATIONAL" | "BORDERLINE" | "PROBLEMATIC";
+
 const DISTRESS_PATTERNS: RegExp[] = [
-  /\bkill\s+myself\b/i,
-  /\bsuicid\w*\b/i,
-  /\bself[-\s]?harm\b/i,
-  /\bcut\s+myself\b/i,
+  // אובדנות ופגיעה עצמית
   /אובדן\s*עצמי/,
   /לסיים\s*את\s*החיים/,
   /לא\s*רוצה\s*לחיות/,
@@ -21,11 +20,53 @@ const DISTRESS_PATTERNS: RegExp[] = [
   /התאבדות/,
   /לפגוע\s*בעצמי/,
   /פגיעה\s*עצמית/,
+  /לחתוך\s*את\s*עצמי/,
+
+  // פגיעות מיניות
+  /אונס/,
+  /נאנס(?:ה|ו|תי)?/,
+  /אנסו\s*אות(?:י|ו|ה)/,
   /התעללות\s*מינית/,
+  /תקיפה\s*מינית/,
+  /הטרדה\s*מינית/,
+  /מעשה\s*מגונה/,
   /ניצול\s*מיני/,
-  /אנסו\s*אותי/,
-  /פוגעים\s*בי\s*בבית/,
+
+  // אלימות פיזית, נשק וסכנת חיים
+  /רצח/,
+  /לרצוח/,
+  /ירצחו/,
+  /מכות/,
+  /הולכים\s*מכות/,
+  /הרביצו/,
+  /מרביצים/,
   /מכים\s*אותי/,
+  /דם/,
+  /שותת\s*דם/,
+  /פציעה\s*קשה/,
+  /סכין/,
+  /דקירה/,
+  /דקרו/,
+  /לדקור/,
+  /אקדח/,
+  /נשק/,
+  /הצתה/,
+  /שריפה/,
+  /הורעל/,
+  /הרעלה/,
+
+  // פגיעה רגשית חמורה, חרם והשפלה
+  /חרם/,
+  /עושים\s*חרם/,
+  /השפלה/,
+  /משפילים/,
+  /התעללות/,
+  /מתעללים/,
+  /סחיטה/,
+  /סוחטים/,
+  /איומים/,
+  /מאיימים\s*על/,
+  /פוגעים\s*בי\s*בבית/
 ];
 
 const IDENTITY_REQUEST_PATTERNS: RegExp[] = [
@@ -36,11 +77,7 @@ const IDENTITY_REQUEST_PATTERNS: RegExp[] = [
   /שמות\s+של/i,
   /תן\s+לי\s+שם/i,
   /לזהות\s+(?:ילד|תלמיד|ילדה|תלמידה)/i,
-  /מי\s+הילד/i,
-  /\bwho\b/i,
-  /\bwhich\s+(?:kid|child|student)\b/i,
-  /\bname\s+of\b/i,
-  /\bidentify\s+(?:a|the)?\s*(?:kid|child|student)\b/i,
+  /מי\s+הילד/i
 ];
 
 const PERSONAL_DATA_PATTERNS: RegExp[] = [
@@ -50,10 +87,7 @@ const PERSONAL_DATA_PATTERNS: RegExp[] = [
   /רשימת\s+(?:תלמידים|ילדים|שמות)/i,
   /מעקב\s+אחרי/i,
   /דירוג\s+(?:תלמידים|ילדים)/i,
-  /מעמד\s+חברתי/i,
-  /\b(?:history|data|profile|records?)\s+(?:of|about)\b/i,
-  /\brank\s+(?:kids|children|students)\b/i,
-  /\bsocial\s+status\b/i,
+  /מעמד\s+חברתי/i
 ];
 
 const NEGATIVE_TARGETING_PATTERNS: RegExp[] = [
@@ -68,26 +102,17 @@ const NEGATIVE_TARGETING_PATTERNS: RegExp[] = [
   /מציקים\s+לה/i,
   /חרם/i,
   /בריונות/i,
-  /נידוי/i,
-  /\bweak\b/i,
-  /\bweird\b/i,
-  /\bproblematic\b/i,
-  /\bbull(?:y|ied|ying)\b/i,
-  /\boutcast\b/i,
+  /נידוי/i
 ];
 
 const LOCALIZED_INCIDENT_PATTERNS: RegExp[] = [
-  /בכיתה\s+[א-תa-z0-9'"״׳-]+/i,
-  /בשכבה\s+[א-תa-z0-9'"״׳-]+/i,
+  /בכיתה\s+[א-ת0-9'"״׳-]+/i,
+  /בשכבה\s+[א-ת0-9'"״׳-]+/i,
   /בבית\s+הספר/i,
   /בהפסקה/i,
   /אתמול/i,
   /היום/i,
-  /השבוע/i,
-  /\b(class|grade)\s+[a-z0-9-]+\b/i,
-  /\byesterday\b/i,
-  /\btoday\b/i,
-  /\brecess\b/i,
+  /השבוע/i
 ];
 
 const EDUCATIONAL_SCOPE_PATTERNS: RegExp[] = [
@@ -99,31 +124,21 @@ const EDUCATIONAL_SCOPE_PATTERNS: RegExp[] = [
   /אמפתיה/i,
   /מניעת/i,
   /שיח\s+חברתי/i,
-  /סביבה\s+בטוחה/i,
-  /\bactivity\b/i,
-  /\bworkshop\b/i,
-  /\blesson\b/i,
-  /\bexplain\b/i,
-  /\bempathy\b/i,
-  /\bprevention\b/i,
+  /סביבה\s+בטוחה/i
 ];
-
-export type IntentCategory = "VALID_EDUCATIONAL" | "BORDERLINE" | "PROBLEMATIC";
 
 const AMBIGUOUS_REFERENCE_PATTERNS: RegExp[] = [
   /המקרה\s+הזה/i,
   /הילד\s+הזה/i,
   /התלמיד\s+הזה/i,
   /מה\s+לעשות\s+איתו/i,
-  /מה\s+לעשות\s+איתה/i,
-  /\bthis\s+(?:case|kid|child|student)\b/i,
-  /\bwhat\s+should\s+i\s+do\s+with\s+(?:him|her|them)\b/i,
+  /מה\s+לעשות\s+איתה/i
 ];
 
 export const PRIVACY_BLOCK_RESPONSE_HE =
   "אני לא יכול לזהות תלמידים או לדבר עליהם באופן אישי. אפשר ללמוד באופן כללי איך לזהות בדידות חברתית, למנוע חרמות, ולבנות פעילות אמפתית ובטוחה בכיתה.";
 
-export const PRIVACY_CLARIFICATION_RESPONSE_HE =
+const PRIVACY_CLARIFICATION_RESPONSE_HE =
   "האם אתה מתכוון למקרה כללי או למצב מסוים בכיתה? כדי לשמור על פרטיות, אל תכתוב שמות או פרטים מזהים.";
 
 export interface SafetySignals {

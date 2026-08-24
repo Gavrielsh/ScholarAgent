@@ -7,7 +7,7 @@ import {
   parseJsonBody,
 } from "@/lib/http/fetchWithTimeout";
 import { logWarn } from "@/lib/logger";
-import { parsePositiveInt } from "@/lib/queue/jobRuntime";
+import { parsePositiveInt } from "@/lib/env/parseEnv";
 
 // Embeddings via Google AI Studio (Gemini embedding models).
 interface GeminiEmbeddingResponse {
@@ -160,7 +160,7 @@ export async function embedText(text: string, signal?: AbortSignal): Promise<num
  * The previous implementation filtered blanks and then mapped over the filtered
  * array, so a single empty string shifted every subsequent vector by one and
  * silently attached the wrong embedding to the wrong chunk. Callers
- * (`uploader.ts`, `upsertDocumentsBatch`) only length-check the result, which
+ * (`uploader.ts`, `insertDocumentWithChunks`) only length-check the result, which
  * would not catch that. Blanks are now rejected up front so the alignment
  * contract is total.
  */

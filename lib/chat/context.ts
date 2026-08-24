@@ -5,25 +5,25 @@ import type { ChatHistoryEntry } from "@/lib/chat/history";
 const CHARS_PER_TOKEN = Number(process.env.CHAT_CHARS_PER_TOKEN ?? 4);
 
 /** Hard cap on a single inbound user turn (anti abuse / injection payloads). */
-export const MAX_INBOUND_MESSAGE_CHARS = Number(process.env.CHAT_MAX_INBOUND_CHARS ?? 8_000);
+const MAX_INBOUND_MESSAGE_CHARS = Number(process.env.CHAT_MAX_INBOUND_CHARS ?? 8_000);
 
 /** Total character budget for prior conversation passed to the LLM. */
-export const MAX_CONTEXT_CHARS = Number(process.env.CHAT_MAX_CONTEXT_CHARS ?? 24_000);
+const MAX_CONTEXT_CHARS = Number(process.env.CHAT_MAX_CONTEXT_CHARS ?? 24_000);
 
 /** Approximate token ceiling derived from char budget (default ~6k tokens). */
-export const MAX_CONTEXT_TOKENS = Number(
+const MAX_CONTEXT_TOKENS = Number(
   process.env.CHAT_MAX_CONTEXT_TOKENS ?? Math.floor(MAX_CONTEXT_CHARS / CHARS_PER_TOKEN)
 );
 
 const DEFAULT_MAX_TURNS = Number(process.env.CHAT_MAX_HISTORY_TURNS ?? 10);
 export const MAX_HISTORY_TURNS = DEFAULT_MAX_TURNS;
 
-export function estimateTokens(text: string): number {
+function estimateTokens(text: string): number {
   if (!text) return 0;
   return Math.ceil(text.length / CHARS_PER_TOKEN);
 }
 
-export function truncateText(text: string, maxChars: number): string {
+function truncateText(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   if (maxChars <= 3) return text.slice(0, maxChars);
   return `${text.slice(0, maxChars - 1)}…`;

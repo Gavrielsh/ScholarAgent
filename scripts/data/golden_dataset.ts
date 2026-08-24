@@ -260,14 +260,3 @@ export const GOLDEN_DATASET: EvalRecord[] = [
     expectedContextSegments: [], 
   }
 ];
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-export const STANDARD_RECORDS = GOLDEN_DATASET.filter((r) => r.category === "standard");
-export const ADVERSARIAL_RECORDS = GOLDEN_DATASET.filter((r) => r.category === "adversarial");
-
-export function getRecordsByRole(role: PermissionLevel): EvalRecord[] {
-  return GOLDEN_DATASET.filter((r) => r.userRole === role);
-}

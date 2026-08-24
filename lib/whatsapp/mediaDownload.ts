@@ -18,7 +18,7 @@ import { logInfo } from "@/lib/logger";
 import { getWhatsAppConfig } from "@/lib/whatsapp/sendMessage";
 
 /** 20 MB — comfortably above Meta's own 100 MB document cap for what we accept. */
-export const WHATSAPP_MEDIA_MAX_BYTES = Number(
+const WHATSAPP_MEDIA_MAX_BYTES = Number(
   process.env.WHATSAPP_MEDIA_MAX_BYTES ?? 20 * 1024 * 1024
 );
 
@@ -126,7 +126,7 @@ function assertAllowedMediaUrl(rawUrl: string, apiBaseUrl: string): URL {
 }
 
 /** Step 1 — resolve the opaque media id into a signed, short-lived download URL. */
-export async function resolveWhatsAppMediaUrl(
+async function resolveWhatsAppMediaUrl(
   mediaId: string,
   signal?: AbortSignal | null
 ): Promise<WhatsAppMediaMetadata> {

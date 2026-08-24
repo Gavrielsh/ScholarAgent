@@ -52,7 +52,7 @@ function resolveReportLevels(requesterPermissionLevel: PermissionLevel): Permiss
  * the `rls_chat_history_select` RLS policy (set via withRlsTransaction below), so
  * unauthorized rows are excluded even if one of the two layers is misconfigured.
  */
-export async function fetchTodayStaffChatHistories(
+async function fetchTodayStaffChatHistories(
   requesterPermissionLevel: PermissionLevel
 ): Promise<StaffChatRow[]> {
   const levels = resolveReportLevels(requesterPermissionLevel);
@@ -195,7 +195,7 @@ export async function fetchTodayChatHistoryForPhone(
   }
 }
 
-export function formatStaffRowsForLlm(
+function formatStaffRowsForLlm(
   rows: StaffChatRow[],
   requesterPermissionLevel: PermissionLevel
 ): string {

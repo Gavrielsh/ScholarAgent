@@ -2,7 +2,7 @@ import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg
 
 import type { PermissionLevel } from "@/lib/auth/types";
 import { logError } from "@/lib/logger";
-import { parseNonNegativeInt, parsePositiveInt } from "@/lib/queue/jobRuntime";
+import { parseNonNegativeInt, parsePositiveInt } from "@/lib/env/parseEnv";
 
 let pool: Pool | null = null;
 let servicePool: Pool | null = null;
@@ -80,7 +80,7 @@ function createServicePool(): Pool {
 }
 
 /** Lazily initialized singleton pool — safe for serverless warm instances. */
-export function getPool(): Pool {
+function getPool(): Pool {
   if (!pool) {
     pool = createPool();
   }
@@ -91,7 +91,7 @@ export function getPool(): Pool {
  * Pool for DLS evaluation and other admin paths. Uses DATABASE_SERVICE_URL when set
  * (role should bypass RLS or own the table); otherwise falls back to DATABASE_URL.
  */
-export function getServicePool(): Pool {
+function getServicePool(): Pool {
   if (!servicePool) {
     servicePool = createServicePool();
   }
@@ -212,12 +212,6 @@ function asPostgresError(err: unknown): PostgresErrorShape | null {
  */
 export function isUniqueViolation(err: unknown): boolean {
   return asPostgresError(err)?.code === "23505";
-}
-
-/** Constraint name behind a 23505, when the driver reported one. */
-export function uniqueViolationConstraint(err: unknown): string | null {
-  const constraint = asPostgresError(err)?.constraint;
-  return typeof constraint === "string" ? constraint : null;
 }
 
 export async function closePool(): Promise<void> {

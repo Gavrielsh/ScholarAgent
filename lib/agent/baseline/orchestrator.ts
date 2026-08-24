@@ -13,7 +13,7 @@ import {
 import {
   runBaselineRagCore,
   type BaselineRagCoreResult,
-} from "@/lib/agent/baseline/index";
+} from "@/lib/agent/baseline/ragCore";
 import {
   containsMandatoryHandoffSignals,
   MANDATORY_HANDOFF_RESPONSE_HE,

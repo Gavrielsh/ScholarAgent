@@ -56,7 +56,7 @@ export async function runL1DailyStaffSummary(
   return summarizeStaffDay(formatted, requesterPermissionLevel);
 }
 
-export async function sendL0HistoryMenu(to: string): Promise<void> {
+async function sendL0HistoryMenu(to: string): Promise<void> {
   await setL0AdminSession(to, "awaiting_menu_choice");
   await sendWhatsAppInteractiveButtons({
     to,
@@ -68,7 +68,7 @@ export async function sendL0HistoryMenu(to: string): Promise<void> {
   });
 }
 
-export async function handleL0ButtonReply(
+async function handleL0ButtonReply(
   adminPhone: string,
   buttonId: string,
   requesterPermissionLevel: PermissionLevel
@@ -97,10 +97,10 @@ export async function handleL0ButtonReply(
   };
 }
 
-export const L0_SPECIFIC_USER_PROMPT =
+const L0_SPECIFIC_USER_PROMPT =
   "הקלד/י את שם המשתמש (כפי שמופיע במערכת) כדי לקבל את היסטוריית השיחה שלו להיום.";
 
-export async function handleL0SpecificUserName(
+async function handleL0SpecificUserName(
   nameInput: string,
   requesterPermissionLevel: PermissionLevel
 ): Promise<string> {

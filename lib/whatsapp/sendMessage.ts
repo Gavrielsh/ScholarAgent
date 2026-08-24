@@ -96,7 +96,7 @@ export function getWhatsAppConfig(): WhatsAppConfig {
   return { accessToken, phoneNumberId, apiBaseUrl, apiVersion };
 }
 
-export function buildWhatsAppMessagesEndpoint(config: WhatsAppConfig): string {
+function buildWhatsAppMessagesEndpoint(config: WhatsAppConfig): string {
   return `${config.apiBaseUrl}/${config.apiVersion}/${config.phoneNumberId}/messages`;
 }
 

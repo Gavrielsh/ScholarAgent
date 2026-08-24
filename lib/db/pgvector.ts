@@ -6,21 +6,13 @@ import { ADMIN_PERMISSION_LEVEL, MANAGER_PERMISSION_LEVEL } from "@/lib/auth/rls
 import type { PermissionLevel } from "@/lib/auth/types";
 import { buildChunkMetadata } from "@/lib/ingestion/chunkMetadata";
 import type { Chunk } from "@/lib/ingestion/chunker";
-import { embedText, embedTextBatch } from "@/lib/ingestion/embeddings";
+import { embedText } from "@/lib/ingestion/embeddings";
 import { logWarn } from "@/lib/logger";
 
 const EMBEDDING_DIMENSION = 768;
 /** Per-modality DB fetch cap before RRF / application slicing (RLS recall trap). */
-export const DEFAULT_RETRIEVAL_OVERFETCH = 200;
+const DEFAULT_RETRIEVAL_OVERFETCH = 200;
 const DEFAULT_RRF_K = 60;
-
-export interface EmbeddingRecord {
-  id?: string;
-  text: string;
-  classificationLevel: PermissionLevel;
-  metadata?: Record<string, unknown>;
-  embedding?: number[];
-}
 
 export interface SimilarDocument {
   id: string;
@@ -86,154 +78,6 @@ const BULK_UPSERT_SQL = `
         embedding = EXCLUDED.embedding
   RETURNING id;
 `;
-
-type PreparedBatchRow = {
-  sourceIndex: number;
-  id: string;
-  text: string;
-  metadataJson: string;
-  classificationLevel: PermissionLevel;
-  embedding?: number[];
-};
-
-export async function upsertDocumentsBatch(
-  documents: EmbeddingRecord[]
-): Promise<{ insertedIds: string[]; failures: Array<{ index: number; error: string }> }> {
-  const insertedIds: string[] = [];
-  const failures: Array<{ index: number; error: string }> = [];
-
-  if (documents.length === 0) {
-    return { insertedIds, failures };
-  }
-
-  const prepared: PreparedBatchRow[] = [];
-
-  for (let i = 0; i < documents.length; i++) {
-    const document = documents[i];
-    try {
-      if (!document.text.trim()) {
-        throw new Error("Cannot insert document with empty text.");
-      }
-      prepared.push({
-        sourceIndex: i,
-        id: document.id ?? randomUUID(),
-        text: document.text,
-        metadataJson: JSON.stringify(document.metadata ?? {}),
-        classificationLevel: document.classificationLevel,
-        embedding:
-          document.embedding && document.embedding.length > 0
-            ? document.embedding
-            : undefined,
-      });
-    } catch (err) {
-      failures.push({
-        index: i,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  if (prepared.length === 0) {
-    return { insertedIds, failures };
-  }
-
-  const needsEmbedding = prepared.filter((row) => !row.embedding);
-  if (needsEmbedding.length > 0) {
-    try {
-      const vectors = await embedTextBatch(needsEmbedding.map((row) => row.text));
-      if (vectors.length !== needsEmbedding.length) {
-        throw new Error(
-          `Embedding count mismatch: got ${vectors.length}, expected ${needsEmbedding.length}.`
-        );
-      }
-      needsEmbedding.forEach((row, idx) => {
-        row.embedding = vectors[idx];
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      for (const row of needsEmbedding) {
-        failures.push({ index: row.sourceIndex, error: message });
-      }
-      const surviving = prepared.filter(
-        (row) => row.embedding && row.embedding.length > 0
-      );
-      prepared.length = 0;
-      prepared.push(...surviving);
-    }
-  }
-
-  const ready: PreparedBatchRow[] = [];
-  for (const row of prepared) {
-    try {
-      if (!row.embedding || row.embedding.length === 0) {
-        throw new Error("Embedding generation returned an empty vector.");
-      }
-      toVectorLiteral(row.embedding);
-      ready.push(row);
-    } catch (err) {
-      failures.push({
-        index: row.sourceIndex,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  if (ready.length === 0) {
-    return { insertedIds, failures };
-  }
-
-  const ids = ready.map((row) => row.id);
-  const texts = ready.map((row) => row.text);
-  const metadata = ready.map((row) => row.metadataJson);
-  const levels = ready.map((row) => row.classificationLevel);
-  const embeddings = ready.map((row) => toVectorLiteral(row.embedding!));
-
-  try {
-    const result = await withClient(async (client) => {
-      await client.query("BEGIN");
-      try {
-        await client.query("SELECT set_config('app.user_permission_level', $1, true)", [
-          String(ADMIN_PERMISSION_LEVEL),
-        ]);
-        const inserted = await client.query<{ id: string }>(BULK_UPSERT_SQL, [
-          ids,
-          texts,
-          metadata,
-          levels,
-          embeddings,
-        ]);
-        await client.query("COMMIT");
-        return inserted;
-      } catch (err) {
-        await client.query("ROLLBACK").catch(() => undefined);
-        throw err;
-      }
-    });
-    for (const row of result.rows) {
-      if (row.id) {
-        insertedIds.push(row.id);
-      }
-    }
-    if (insertedIds.length !== ready.length) {
-      throw new Error(
-        `Bulk upsert returned ${insertedIds.length} ids, expected ${ready.length}.`
-      );
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    const stack = err instanceof Error ? err.stack : undefined;
-    logWarn("knowledge_base_bulk_upsert_failed", message, {
-      batchSize: ready.length,
-      sqlPreview: BULK_UPSERT_SQL.slice(0, 120),
-      stack,
-    });
-    for (const row of ready) {
-      failures.push({ index: row.sourceIndex, error: message });
-    }
-  }
-
-  return { insertedIds, failures };
-}
 
 type RetrievedRow = {
   id: string;
@@ -437,9 +281,9 @@ const INSERT_INGESTED_DOCUMENT_SQL = `
 /**
  * Writes the document row and all of its chunks in ONE transaction.
  *
- * The alternative — `upsertDocumentsBatch` followed by a separate document
- * insert — can leave orphaned chunks in the corpus if the process dies between
- * the two statements, and orphaned chunks are unreachable by
+ * A two-step write (chunks first, then the document row) can leave orphaned
+ * chunks in the corpus if the process dies between the two statements, and
+ * orphaned chunks are unreachable by
  * `hardDeleteKnowledgeChunksByDocumentId` bookkeeping while still being fully
  * retrievable by RAG. Either everything lands or nothing does.
  *

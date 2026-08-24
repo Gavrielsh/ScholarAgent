@@ -7,7 +7,7 @@
 // is gone until the process restarts. Every fetch in this codebase must go
 // through one of the helpers below.
 
-export const DEFAULT_HTTP_TIMEOUT_MS = Number(process.env.HTTP_DEFAULT_TIMEOUT_MS ?? 15_000);
+const DEFAULT_HTTP_TIMEOUT_MS = Number(process.env.HTTP_DEFAULT_TIMEOUT_MS ?? 15_000);
 
 /** Thrown when *our* deadline fired. Retryable: the peer was just too slow. */
 export class HttpTimeoutError extends Error {
@@ -61,7 +61,7 @@ export function isAbortError(err: unknown): boolean {
  * so echoing a raw request URL into an exception would leak a live credential
  * into logs, Langfuse traces, and any error reporter downstream.
  */
-export function redactUrl(url: string): string {
+function redactUrl(url: string): string {
   const cut = url.indexOf("?");
   return cut === -1 ? url : `${url.slice(0, cut)}?<redacted>`;
 }
@@ -149,7 +149,7 @@ function classifyAbort(
  * variant's timer only covers the response *headers*, so the caller becomes
  * responsible for reading the body before the socket can stall again.
  */
-export async function fetchWithTimeout(
+async function fetchWithTimeout(
   url: string,
   options: FetchWithTimeoutOptions = {}
 ): Promise<Response> {

@@ -20,14 +20,13 @@ import {
 } from "@/lib/whatsapp/mediaDownload";
 import { sendWhatsAppTextMessage } from "@/lib/whatsapp/sendMessage";
 import type { ParsedInboundDocumentEvent } from "@/lib/whatsapp/types";
+import { UNAUTHORIZED_NUMBER_MESSAGE } from "@/lib/whatsapp/userMessages";
 
 // ── Replies ────────────────────────────────────────────────────────────────
 const SUCCESS_MESSAGE = "המסמך עובד בהצלחה וזמין במערכת.";
 const FAILURE_MESSAGE = "עיבוד המסמך נכשל. אפשר לנסות לשלוח אותו שוב בעוד מספר דקות.";
 // Identical wording to lib/whatsapp/incomingMessageProcessor.ts: an unregistered
 // number must not be able to tell the two paths apart.
-const UNAUTHORIZED_MESSAGE =
-  "המספר אינו מזוהה במערכת. יש לפנות לאחד האחראים כדי להסדיר את הגישה.";
 const PERMISSION_DENIED_MESSAGE =
   "אין לך הרשאה להוסיף מסמכים למאגר הידע. הפעולה שמורה לצוות מטה (L0) ולמנהלות הכשרה (L1).";
 const UNSUPPORTED_TYPE_MESSAGE =
@@ -170,7 +169,7 @@ async function authorizeSender(
   const user = await lookupUserByPhone(event.senderId);
 
   if (!user) {
-    await reply(event.senderId, UNAUTHORIZED_MESSAGE, ctx.signal);
+    await reply(event.senderId, UNAUTHORIZED_NUMBER_MESSAGE, ctx.signal);
     return null;
   }
 

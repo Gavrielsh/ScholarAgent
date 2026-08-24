@@ -17,8 +17,7 @@ import { TerminalNotifyError } from "@/lib/queue/jobRuntime";
 import { sendWhatsAppTextMessage } from "@/lib/whatsapp/sendMessage";
 import type { ParsedInboundEvent } from "@/lib/whatsapp/types";
 
-const UNAUTHORIZED_MESSAGE =
-  "המספר אינו מזוהה במערכת. יש לפנות לאחד האחראים כדי להסדיר את הגישה.";
+import { UNAUTHORIZED_NUMBER_MESSAGE } from "@/lib/whatsapp/userMessages";
 const FALLBACK_ERROR_MESSAGE =
   "מצטערים, אירעה תקלה בעיבוד ההודעה. אפשר לנסות שוב בעוד רגע.";
 
@@ -129,7 +128,7 @@ function sanitizeInbound(event: ParsedInboundEvent): SanitizedInbound {
  *
  * Sequenced after the user lookup because the privacy tier is needed to decide
  * whether privacy rules apply. The consequence is deliberate: an *unregistered*
- * number gets UNAUTHORIZED_MESSAGE rather than a crisis handoff. Extending the
+ * number gets UNAUTHORIZED_NUMBER_MESSAGE rather than a crisis handoff. Extending the
  * handoff to unknown senders is a product decision (it means replying to
  * arbitrary numbers), not a technical one — distress coverage here is total
  * across every registered tier, L0 through L3.
@@ -181,7 +180,7 @@ async function handleInboundMessage(
   if (!userContext) {
     await sendWhatsAppTextMessage({
       to: senderId,
-      body: UNAUTHORIZED_MESSAGE,
+      body: UNAUTHORIZED_NUMBER_MESSAGE,
       signal: ctx.signal,
     });
     return;

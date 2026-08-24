@@ -21,10 +21,25 @@ function noopTrace(): BaselineTraceHandles {
   };
 }
 
-// Langfuse types are optional — keep this module loosely typed so builds succeed
-// when the SDK surface shifts between major versions.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type LangfuseClient = any;
+interface LangfuseObservation {
+  end?: (data?: { output?: unknown }) => void;
+}
+
+interface LangfuseTrace {
+  span: (args: { name: string; input?: unknown }) => LangfuseObservation;
+  generation: (args: { name: string; model?: string; input?: unknown }) => LangfuseObservation;
+  update?: (data: { output?: unknown }) => void;
+}
+
+interface LangfuseClient {
+  trace: (args: {
+    name: string;
+    userId?: string;
+    input?: unknown;
+    metadata?: unknown;
+  }) => LangfuseTrace;
+  flushAsync?: () => Promise<unknown>;
+}
 
 /**
  * Optional Langfuse tracing. Set LANGFUSE_SECRET_KEY (+ LANGFUSE_PUBLIC_KEY for cloud).
@@ -45,7 +60,7 @@ export async function startBaselineRagTrace(args: {
       secretKey: process.env.LANGFUSE_SECRET_KEY,
       publicKey: process.env.LANGFUSE_PUBLIC_KEY,
       baseUrl: process.env.LANGFUSE_HOST,
-    }) as LangfuseClient;
+    }) as unknown as LangfuseClient;
 
     const root = client.trace({
       name: "baseline-rag",

@@ -1,4 +1,9 @@
-import { getRedisClient } from "@/lib/redis/client";
+import {
+  deleteSessionValue,
+  expireSessionValue,
+  getSessionValue,
+  setSessionValue,
+} from "@/lib/redis/jsonSession";
 
 /**
  * ADMIN_ANALYTICS_MODE session flag for L0 admins who just received a chat-history
@@ -23,7 +28,7 @@ function sessionKey(adminPhone: string): string {
 
 /** Atomically enters ADMIN_ANALYTICS_MODE via a single SET...EX. */
 export async function enterAdminAnalyticsMode(adminPhone: string): Promise<void> {
-  await getRedisClient().set(sessionKey(adminPhone), "1", "EX", TTL_SECONDS);
+  await setSessionValue(sessionKey(adminPhone), "1", TTL_SECONDS);
 }
 
 /**
@@ -34,16 +39,15 @@ export async function enterAdminAnalyticsMode(adminPhone: string): Promise<void>
  * a torn or corrupted read.
  */
 export async function isInAdminAnalyticsMode(adminPhone: string): Promise<boolean> {
-  const client = getRedisClient();
   const key = sessionKey(adminPhone);
-  const value = await client.get(key);
+  const value = await getSessionValue(key);
   if (value === null) return false;
 
-  await client.expire(key, TTL_SECONDS);
+  await expireSessionValue(key, TTL_SECONDS);
   return true;
 }
 
 /** Explicit exit (cancel/exit command, or an off-topic query per the LLM classifier). */
 export async function exitAdminAnalyticsMode(adminPhone: string): Promise<void> {
-  await getRedisClient().del(sessionKey(adminPhone));
+  await deleteSessionValue(sessionKey(adminPhone));
 }

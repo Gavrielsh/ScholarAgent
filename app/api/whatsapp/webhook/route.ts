@@ -8,7 +8,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { timingSafeStringEqual } from "@/lib/auth/timingSafe";
 import { logError, logInfo, logWarn } from "@/lib/logger";
-import { parsePositiveInt } from "@/lib/queue/jobRuntime";
+import { parsePositiveInt } from "@/lib/env/parseEnv";
 import { enqueueDocumentIngestion } from "@/lib/queue/documentIngestionQueue";
 import { enqueueWhatsAppIncomingMessage } from "@/lib/queue/whatsappIncomingQueue";
 import {

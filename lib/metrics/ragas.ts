@@ -19,50 +19,6 @@ export interface RagasScores {
   executionCostUsd?: number;
 }
 
-export interface RagasThresholds {
-  contextPrecision: number;
-  contextRecall: number;
-  faithfulness: number;
-  answerRelevancy: number;
-  latencyMs: number;
-}
-
-export const RAGAS_TARGETS: RagasThresholds = {
-  contextPrecision: 0.8,
-  contextRecall: 0.75,
-  faithfulness: 0.9,
-  answerRelevancy: 0.85,
-  latencyMs: 3000,
-};
-
-export function meetsTargets(scores: RagasScores): boolean {
-  return (
-    scores.contextPrecision >= RAGAS_TARGETS.contextPrecision &&
-    scores.contextRecall >= RAGAS_TARGETS.contextRecall &&
-    scores.faithfulness >= RAGAS_TARGETS.faithfulness &&
-    scores.answerRelevancy >= RAGAS_TARGETS.answerRelevancy &&
-    (scores.latencyMs === undefined || scores.latencyMs <= RAGAS_TARGETS.latencyMs)
-  );
-}
-
-export function scoreReport(scores: RagasScores): Record<string, string> {
-  const fmt = (v: number, t: number) =>
-    `${(v * 100).toFixed(1)}% (target: ${(t * 100).toFixed(0)}%, ${v >= t ? "✓" : "✗"})`;
-
-  return {
-    contextPrecision: fmt(scores.contextPrecision, RAGAS_TARGETS.contextPrecision),
-    contextRecall: fmt(scores.contextRecall, RAGAS_TARGETS.contextRecall),
-    faithfulness: fmt(scores.faithfulness, RAGAS_TARGETS.faithfulness),
-    answerRelevancy: fmt(scores.answerRelevancy, RAGAS_TARGETS.answerRelevancy),
-    latency:
-      scores.latencyMs !== undefined
-        ? `${scores.latencyMs} ms (target: <${RAGAS_TARGETS.latencyMs} ms, ${scores.latencyMs <= RAGAS_TARGETS.latencyMs ? "✓" : "✗"})`
-        : "not measured",
-    executionCost:
-      scores.executionCostUsd !== undefined ? `$${scores.executionCostUsd.toFixed(6)}` : "not measured",
-  };
-}
-
 /** Single labelled example in a golden dataset (offline eval). */
 export interface GoldenDatasetRecord {
   id: string;
@@ -71,11 +27,6 @@ export interface GoldenDatasetRecord {
   groundTruthAnswer: string;
   /** Optional: substring hints expected to appear in retrieved contexts. */
   expectedContextHints?: string[];
-}
-
-export interface GoldenRunResult {
-  recordId: string;
-  ragas: RagasScores;
 }
 
 function parseJudgeJson(raw: string): Partial<RagasScores> | null {
@@ -191,26 +142,4 @@ Ground truth (may be empty): ${input.groundTruth ?? ""}`;
   } catch {
     return { ...heuristicScores(input), latencyMs: Date.now() - started };
   }
-}
-
-/**
- * Runs `evaluateRagas` across a golden dataset after you supply an answer+contexts builder.
- * Intended for offline scripts / CI (not hot-path WhatsApp traffic).
- */
-export async function evaluateGoldenDataset(
-  records: GoldenDatasetRecord[],
-  runner: (row: GoldenDatasetRecord) => Promise<{ answer: string; contexts: string[] }>
-): Promise<GoldenRunResult[]> {
-  const out: GoldenRunResult[] = [];
-  for (const row of records) {
-    const { answer, contexts } = await runner(row);
-    const ragas = await evaluateRagas({
-      question: row.question,
-      answer,
-      contexts,
-      groundTruth: row.groundTruthAnswer,
-    });
-    out.push({ recordId: row.id, ragas });
-  }
-  return out;
 }

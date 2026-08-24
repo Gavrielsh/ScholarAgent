@@ -11,6 +11,7 @@
     "migrate": "node --require ts-node/register migrations/run.ts",
     "worker:whatsapp": "node --require ts-node/register --require tsconfig-paths/register scripts/whatsapp-worker.ts",
     "evaluate": "node --require ts-node/register --require tsconfig-paths/register scripts/evaluate_runner.ts",
+    "ingest": "node --require ts-node/register --require tsconfig-paths/register scripts/ingest_directory.ts",
     "reconcile": "node --require ts-node/register --require tsconfig-paths/register scripts/reconcile_documents.ts"
   },
   "dependencies": {
@@ -25,10 +26,10 @@
     "pg": "^8.20.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "ts-node": "^10.9.2"
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0"
   },
   "devDependencies": {
-    "@testing-library/jest-dom": "^6.6.3",
     "@types/jest": "^29.5.14",
     "@types/node": "^20.11.0",
     "@types/pg": "^8.11.0",
