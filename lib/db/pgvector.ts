@@ -246,7 +246,7 @@ export interface IngestedDocumentRecord {
   sizeBytes: number | null;
   sha256: string | null;
   externalMediaId: string | null;
-  /** Meta message id. Doubles as the idempotency key (migration 007). */
+  /** Meta message id. Doubles as the idempotency key (partial unique index). */
   externalMessageId: string | null;
   uploadedByUserId: string;
   uploadedByPhone: string | null;

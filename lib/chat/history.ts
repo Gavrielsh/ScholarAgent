@@ -1,29 +1,8 @@
 /**
  * PostgreSQL-backed chat history (WhatsApp `sender_id` = E.164 phone number).
  *
- * ## DDL (also applied via `migrations/004_chat_history.sql`)
- *
- * ```sql
- * CREATE TABLE chat_history (
- *   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
- *   sender_id   TEXT NOT NULL,              -- WhatsApp phone (E.164), session key
- *   role        TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
- *   content     TEXT NOT NULL,
- *   message_id  TEXT,                       -- Meta message id (dedup / audit)
- *   occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- *   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
- * );
- *
- * CREATE INDEX chat_history_sender_occurred_idx
- *   ON chat_history (sender_id, occurred_at ASC, created_at ASC);
- *
- * CREATE INDEX chat_history_sender_created_idx
- *   ON chat_history (sender_id, created_at DESC);
- *
- * -- migrations/006: makes retries idempotent.
- * CREATE UNIQUE INDEX chat_history_message_id_key
- *   ON chat_history (message_id) WHERE message_id IS NOT NULL;
- * ```
+ * DDL lives in `migrations/001_initial_schema.sql` (chat_history table,
+ * sender indexes, and the partial unique index on message_id).
  */
 
 import { isUniqueViolation, withSenderTransaction } from "@/lib/db/client";
