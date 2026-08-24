@@ -9,7 +9,7 @@ import {
  * ADMIN_ANALYTICS_MODE session flag for L0 admins who just received a chat-history
  * report and may now ask free-text follow-up questions about it.
  *
- * Backed by Redis (not the in-memory Map used by lib/chat/l0AdminSession.ts) because:
+ * Backed by Redis (same store as lib/chat/adminSession.ts) because:
  *  - it must survive across serverless/worker instances and restarts, and
  *  - the BullMQ worker runs with concurrency > 1 and no per-sender lock
  *    (lib/queue/workers/whatsappIncomingWorker.ts), so two rapid messages from the

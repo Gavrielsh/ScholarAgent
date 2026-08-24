@@ -8,8 +8,13 @@ import {
 } from "@/lib/agent/baseline/chatHistoryHandlers";
 import {
   matchesChatHistoryHeuristic,
+  matchesUserManagementHeuristic,
   type BaselineIntent,
 } from "@/lib/agent/baseline/intentRouter";
+import {
+  isUserManagementButtonId,
+  resolveUserManagementFlow,
+} from "@/lib/agent/baseline/userManagementHandlers";
 import {
   runBaselineRagCore,
   type BaselineRagCoreResult,
@@ -18,7 +23,7 @@ import {
   containsMandatoryHandoffSignals,
   MANDATORY_HANDOFF_RESPONSE_HE,
 } from "@/lib/agent/baseline/safetySignals";
-import { getL0AdminSession } from "@/lib/chat/l0AdminSession";
+import { getAdminSession, isUserManagementSessionMode } from "@/lib/chat/adminSession";
 import { logError } from "@/lib/logger";
 
 export type BaselineDeliveryKind = "text" | "interactive_sent" | "already_sent_prompt";
@@ -95,13 +100,47 @@ export async function processBaselineQuery(
     };
   }
 
+  const adminSession = isElevatedRole(userContext.permissionLevel)
+    ? await getAdminSession(senderPhone)
+    : null;
+  const userManagementActive =
+    !!adminSession && isUserManagementSessionMode(adminSession.mode);
+  const userManagementRequested =
+    isElevatedRole(userContext.permissionLevel) &&
+    (isUserManagementButtonId(buttonId) ||
+      userManagementActive ||
+      matchesUserManagementHeuristic(query));
+
+  if (userManagementRequested) {
+    const managed = await resolveUserManagementFlow({
+      adminPhone: senderPhone,
+      query,
+      buttonId,
+      requesterPermissionLevel: userContext.permissionLevel,
+    });
+    if (managed.type === "interactive_sent") {
+      return { kind: "interactive_sent", answer: "", ragMetrics: null, intent: "CHAT_HISTORY" };
+    }
+    if (managed.type === "prompt_sent") {
+      return {
+        kind: "already_sent_prompt",
+        answer: managed.promptText,
+        ragMetrics: null,
+        intent: "CHAT_HISTORY",
+      };
+    }
+    // Always deliver user-management text, including ADD_FORMAT_RETRY. Falling
+    // through to L0/RAG is what made format-retry prompts look like a silent drop.
+    return { kind: "text", answer: managed.answer, ragMetrics: null, intent: "CHAT_HISTORY" };
+  }
+
   // Task 2 (context-aware routing): checked before the lexical sweep / RAG
   // fallback so a follow-up question about a just-generated report never gets
-  // treated as a generic RAG_INQUIRY. A button click or an in-progress L0 menu
-  // selection (l0AdminSession) is an explicit fresh action, so only free text
-  // outside those flows is eligible to be treated as an analytics follow-up.
+  // treated as a generic RAG_INQUIRY. A button click or an in-progress admin
+  // session is an explicit fresh action, so only free text outside those flows
+  // is eligible to be treated as an analytics follow-up.
   // resolveAdminAnalyticsFollowUp re-validates the admin role internally.
-  if (isAdminRole(userContext.permissionLevel) && !buttonId && !(await getL0AdminSession(senderPhone))) {
+  if (isAdminRole(userContext.permissionLevel) && !buttonId && !adminSession) {
     const analytics = await resolveAdminAnalyticsFollowUp({
       adminPhone: senderPhone,
       query,

@@ -24,6 +24,22 @@ export function matchesChatHistoryHeuristic(query: string): boolean {
   return CHAT_HISTORY_HEURISTICS.some((pattern) => pattern.test(query));
 }
 
+const USER_MANAGEMENT_HEURISTICS: RegExp[] = [
+  /להוסיף\s+(תלמיד|תלמידה|מנהל|מנהלת|מישהו|מישהי)/i,
+  /הוספת\s+(תלמיד|תלמידה|מנהל|מנהלת)/i,
+  /למחוק\s+(תלמיד|תלמידה|מנהל|מנהלת|מישהו|מישהי)/i,
+  /מחיקת\s+(תלמיד|תלמידה|מנהל|מנהלת)/i,
+  /ניהול\s+משתמשים/i,
+];
+
+/**
+ * Synchronous lexical probe for L0/L1 user-management requests.
+ * Consumed by the orchestrator before chat-history / RAG routing.
+ */
+export function matchesUserManagementHeuristic(query: string): boolean {
+  return USER_MANAGEMENT_HEURISTICS.some((pattern) => pattern.test(query));
+}
+
 // Deliberately whole-message matches (anchored ^...$): an admin's analytics
 // follow-up question might legitimately contain the word "exit"/"יציאה" mid-sentence
 // (e.g. "מי יצא מהיסטוריית השיחה?"), so only a bare exit command should short-circuit.

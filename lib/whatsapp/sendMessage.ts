@@ -6,7 +6,11 @@ import {
   isHttpTimeoutError,
 } from "@/lib/http/fetchWithTimeout";
 import { logError, logWarn } from "@/lib/logger";
-import { formatWhatsAppMarkdown } from "@/lib/whatsapp/formatting";
+import {
+  chunkWhatsAppText,
+  formatWhatsAppMarkdown,
+  WHATSAPP_TEXT_CHAR_LIMIT,
+} from "@/lib/whatsapp/formatting";
 
 export interface SendWhatsAppTextInput {
   to: string;
@@ -192,18 +196,24 @@ export async function postGraphMessages(
 }
 
 export async function sendWhatsAppTextMessage(input: SendWhatsAppTextInput): Promise<void> {
-  const rtlBody = ensureRtl(formatWhatsAppMarkdown(input.body));
-  const result = await postGraphMessages(
-    {
-      messaging_product: "whatsapp",
-      to: input.to,
-      type: "text",
-      text: { body: rtlBody },
-    },
-    { signal: input.signal, retries: true }
-  );
+  const formatted = formatWhatsAppMarkdown(input.body);
+  const maxContent = WHATSAPP_TEXT_CHAR_LIMIT - RTL_MARK.length;
+  const parts = chunkWhatsAppText(formatted, maxContent);
 
-  if (!result.ok) {
-    throw new Error(`WhatsApp send failed: HTTP ${result.status} ${result.body}`);
+  for (const part of parts) {
+    const rtlBody = ensureRtl(part);
+    const result = await postGraphMessages(
+      {
+        messaging_product: "whatsapp",
+        to: input.to,
+        type: "text",
+        text: { body: rtlBody },
+      },
+      { signal: input.signal, retries: true }
+    );
+
+    if (!result.ok) {
+      throw new Error(`WhatsApp send failed: HTTP ${result.status} ${result.body}`);
+    }
   }
 }

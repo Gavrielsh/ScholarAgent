@@ -1,9 +1,5 @@
 import { logError, logWarn } from "@/lib/logger";
-import { formatWhatsAppMarkdown } from "@/lib/whatsapp/formatting";
-import {
-  postGraphMessages,
-  WHATSAPP_HTTP_TIMEOUT_MS,
-} from "@/lib/whatsapp/sendMessage";
+import { postGraphMessages } from "@/lib/whatsapp/sendMessage";
 
 const TYPING_REFRESH_MS = 20_000;
 const TYPING_MAX_DURATION_MS = 120_000;
@@ -106,32 +102,71 @@ export interface InteractiveButton {
   title: string;
 }
 
-export async function sendWhatsAppInteractiveButtons(input: {
+/**
+ * Sends a reply-button interactive message via a raw Graph POST.
+ *
+ * Intentionally does NOT go through postGraphMessages or formatWhatsAppMarkdown:
+ * Meta can accept a mutated payload with HTTP 200 and still drop the UI. This
+ * body matches the Cloud API button schema exactly, including recipient_type.
+ */
+export async function sendWhatsAppInteractiveButtons(params: {
   to: string;
   bodyText: string;
   buttons: InteractiveButton[];
-  signal?: AbortSignal | null;
 }): Promise<void> {
-  const result = await postGraphMessages(
-    {
-      messaging_product: "whatsapp",
-      to: input.to,
-      type: "interactive",
-      interactive: {
-        type: "button",
-        body: { text: formatWhatsAppMarkdown(input.bodyText) },
-        action: {
-          buttons: input.buttons.map((button) => ({
-            type: "reply",
-            reply: { id: button.id, title: button.title },
-          })),
-        },
+  const token = process.env.WHATSAPP_ACCESS_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+
+  if (!token || !phoneNumberId) {
+    throw new Error("Missing WhatsApp credentials for interactive message");
+  }
+
+  if (params.buttons.length > 3) {
+    throw new Error("WhatsApp interactive messages support a maximum of 3 buttons.");
+  }
+
+  const payload = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: params.to,
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: {
+        text: params.bodyText,
+      },
+      action: {
+        buttons: params.buttons.map((btn) => ({
+          type: "reply",
+          reply: {
+            id: btn.id,
+            title: btn.title,
+          },
+        })),
       },
     },
-    { signal: input.signal, retries: true, timeoutMs: WHATSAPP_HTTP_TIMEOUT_MS }
+  };
+
+  console.log("Sending Interactive Payload to Meta:", JSON.stringify(payload, null, 2));
+
+  const response = await fetch(
+    `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }
   );
 
-  if (!result.ok) {
-    throw new Error(`WhatsApp interactive send failed: HTTP ${result.status} ${result.body}`);
+  const responseText = await response.text();
+  console.log("Meta Interactive Response:", response.status, responseText);
+
+  if (!response.ok) {
+    throw new Error(
+      `WhatsApp Interactive Message Failed: HTTP ${response.status} - ${responseText}`
+    );
   }
 }

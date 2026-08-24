@@ -1,4 +1,4 @@
-import { query } from "@/lib/db/client";
+import { isUniqueViolation, query } from "@/lib/db/client";
 import { PERMISSION_ROLE } from "@/lib/auth/types";
 import type { PermissionLevel, UserContext } from "@/lib/auth/types";
 import { logError, logInfo } from "@/lib/logger";
@@ -101,3 +101,125 @@ export async function lookupUserById(userId: string): Promise<UserContext | null
   if (!row) return null;
   return toUserContext(row);
 }
+
+export function normalizePhoneNumber(raw: string): string | null {
+  const digits = raw.replace(/\D/g, "");
+  if (!digits) return null;
+
+  let normalized = digits;
+  if (normalized.startsWith("00")) {
+    normalized = normalized.slice(2);
+  }
+  if (normalized.startsWith("0") && normalized.length >= 9 && normalized.length <= 11) {
+    normalized = `972${normalized.slice(1)}`;
+  }
+
+  if (normalized.length < 8 || normalized.length > 15) return null;
+  return normalized;
+}
+
+function asPermissionLevel(value: number): PermissionLevel | null {
+  if (value === 0 || value === 1 || value === 2 || value === 3) return value;
+  return null;
+}
+
+export interface ManagedUserRecord {
+  phone_number: string;
+  display_name: string;
+  permission_level: PermissionLevel;
+}
+
+export async function insertAdminManagedUser(
+  phone: string,
+  name: string,
+  level: number
+): Promise<boolean> {
+  const normalized = normalizePhoneNumber(phone);
+  const permissionLevel = asPermissionLevel(level);
+  const displayName = name.trim();
+  if (!normalized || permissionLevel === null || !displayName) return false;
+
+  try {
+    const result = await query(
+      `INSERT INTO users (phone_number, display_name, permission_level, organization_id)
+       VALUES ($1, $2, $3, NULL)`,
+      [normalized, displayName, permissionLevel]
+    );
+    return (result.rowCount ?? 0) > 0;
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      logInfo("user_registry_insert_duplicate", "Phone already registered.", {
+        phone: redactPhone(normalized),
+      });
+      return false;
+    }
+    logError("user_registry_insert_failed", err, { phone: redactPhone(normalized) });
+    throw new UserRegistryDbError(err);
+  }
+}
+
+export async function deleteAdminManagedUser(phone: string): Promise<boolean> {
+  const normalized = normalizePhoneNumber(phone);
+  if (!normalized) return false;
+
+  try {
+    const result = await query(`DELETE FROM users WHERE phone_number = $1`, [normalized]);
+    return (result.rowCount ?? 0) > 0;
+  } catch (err) {
+    logError("user_registry_delete_failed", err, { phone: redactPhone(normalized) });
+    throw new UserRegistryDbError(err);
+  }
+}
+
+export async function getAllManagedUsers(): Promise<ManagedUserRecord[]> {
+  try {
+    const result = await query<{
+      phone_number: string;
+      display_name: string | null;
+      permission_level: number;
+    }>(
+      `SELECT phone_number, display_name, permission_level
+         FROM users
+        ORDER BY permission_level ASC, display_name ASC NULLS LAST, phone_number ASC`
+    );
+    return result.rows.flatMap((row) => {
+      const permissionLevel = asPermissionLevel(row.permission_level);
+      if (permissionLevel === null) return [];
+      return [
+        {
+          phone_number: row.phone_number,
+          display_name: row.display_name ?? "",
+          permission_level: permissionLevel,
+        },
+      ];
+    });
+  } catch (err) {
+    logError("user_registry_list_failed", err);
+    throw new UserRegistryDbError(err);
+  }
+}
+
+export async function getUserByPhone(
+  phone: string
+): Promise<{ permission_level: PermissionLevel } | null> {
+  const normalized = normalizePhoneNumber(phone);
+  if (!normalized) return null;
+
+  try {
+    const result = await query<{ permission_level: number }>(
+      `SELECT permission_level FROM users WHERE phone_number = $1 LIMIT 1`,
+      [normalized]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    const permissionLevel = asPermissionLevel(row.permission_level);
+    if (permissionLevel === null) return null;
+    return { permission_level: permissionLevel };
+  } catch (err) {
+    logError("user_registry_get_by_phone_failed", err, { phone: redactPhone(normalized) });
+    throw new UserRegistryDbError(err);
+  }
+}
+
+export const adminAddUser = insertAdminManagedUser;
+export const adminDeleteUser = deleteAdminManagedUser;
