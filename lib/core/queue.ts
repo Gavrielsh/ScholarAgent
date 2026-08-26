@@ -1,11 +1,32 @@
 // Runtime primitives shared by every BullMQ worker in this repo.
 //
 // Extracted from whatsappIncomingWorker.ts when the document ingestion worker
-// was added: the deadline race, the attempt normalisation, and the env parsing
-// are subtle enough (see the comments below) that a second hand-rolled copy
-// would drift and reintroduce bugs that were already fixed once.
+// was added: the deadline race and the attempt normalisation are subtle enough
+// (see the comments below) that a second hand-rolled copy would drift and
+// reintroduce bugs that were already fixed once.
+
+import type { ConnectionOptions } from "bullmq";
 
 import { logWarn } from "@/lib/core/logger";
+
+// ---------------------------------------------------------------------------
+// Connection
+// ---------------------------------------------------------------------------
+
+const DEFAULT_REDIS_URL = "redis://127.0.0.1:6379";
+
+/** BullMQ connection options (separate pool from the idempotency ioredis client). */
+export function getQueueConnection(): ConnectionOptions {
+  const url = process.env.REDIS_URL?.trim() || DEFAULT_REDIS_URL;
+  return {
+    url,
+    maxRetriesPerRequest: null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Job errors
+// ---------------------------------------------------------------------------
 
 export class JobTimeoutError extends Error {
   constructor(jobId: string, timeoutMs: number) {
@@ -35,6 +56,10 @@ export class TerminalNotifyError extends Error {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Attempt accounting
+// ---------------------------------------------------------------------------
+
 /**
  * Normalises BullMQ's attempt counter to a 1-based "current attempt".
  *
@@ -55,6 +80,10 @@ export function currentAttempt(job: { attemptsMade: number }): number {
 export function maxAttempts(job: { opts: { attempts?: number } }): number {
   return Math.max(1, job.opts.attempts ?? 1);
 }
+
+// ---------------------------------------------------------------------------
+// Deadlines
+// ---------------------------------------------------------------------------
 
 /**
  * Races a handler against a wall-clock deadline.

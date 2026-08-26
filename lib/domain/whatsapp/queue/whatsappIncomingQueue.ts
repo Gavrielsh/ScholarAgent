@@ -1,6 +1,6 @@
 import { Queue } from "bullmq";
 
-import { getQueueConnection } from "@/lib/core/queue/connection";
+import { getQueueConnection } from "@/lib/core/queue";
 import { parsePositiveInt } from "@/lib/core/env";
 import type { ParsedInboundEvent } from "@/lib/domain/whatsapp/core/types";
 import { WHATSAPP_INCOMING_QUEUE_NAME } from "@/lib/domain/whatsapp/core/types";

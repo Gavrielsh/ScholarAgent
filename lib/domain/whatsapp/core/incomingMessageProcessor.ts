@@ -13,7 +13,7 @@ import { isUniqueViolation } from "@/lib/core/db";
 import { isAbortError, isHttpTimeoutError } from "@/lib/core/http/fetchWithTimeout";
 import { redactPii } from "@/lib/security/privacy/piiRedact";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
-import { TerminalNotifyError } from "@/lib/core/queue/jobRuntime";
+import { TerminalNotifyError } from "@/lib/core/queue";
 import { sendWhatsAppTextMessage } from "@/lib/domain/whatsapp/core/sendMessage";
 import type { ParsedInboundEvent } from "@/lib/domain/whatsapp/core/types";
 

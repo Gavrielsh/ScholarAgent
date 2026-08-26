@@ -14,7 +14,7 @@ function createRedisClient(): Redis {
   const url = process.env.REDIS_URL?.trim() || DEFAULT_REDIS_URL;
   // Finite retries: this client is used by the webhook claim path and admin
   // session flags. `maxRetriesPerRequest: null` is reserved for BullMQ
-  // (lib/core/queue/connection.ts) so a hung SET NX cannot block Meta's ACK window.
+  // (lib/core/queue.ts) so a hung SET NX cannot block Meta's ACK window.
   const client = new Redis(url, {
     maxRetriesPerRequest: 3,
     connectTimeout: 5_000,

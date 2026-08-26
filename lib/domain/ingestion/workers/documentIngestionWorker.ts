@@ -1,14 +1,14 @@
 import { Worker } from "bullmq";
 
-import { getQueueConnection } from "@/lib/core/queue/connection";
 import { parsePositiveInt } from "@/lib/core/env";
 import {
   currentAttempt,
+  getQueueConnection,
   JobTimeoutError,
   LOCK_GRACE_MS,
   maxAttempts,
   runWithDeadline,
-} from "@/lib/core/queue/jobRuntime";
+} from "@/lib/core/queue";
 import { isAbortError } from "@/lib/core/http/fetchWithTimeout";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
 import { releaseWhatsAppMessageClaim } from "@/lib/core/redis";
