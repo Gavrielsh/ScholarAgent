@@ -22,3 +22,17 @@ export function assertMinimumLevel(user: UserContext, requiredLevel: PermissionL
     );
   }
 }
+
+/**
+ * Whether a user may publish content classified at `classificationLevel`.
+ *
+ * Lower numeric level = higher privilege, so classifying *below* one's own
+ * level would publish content the author is not cleared to read — an L1
+ * Manager marking a document L0 (admin-only), for instance.
+ */
+export function canClassifyAtLevel(
+  user: UserContext,
+  classificationLevel: PermissionLevel
+): boolean {
+  return classificationLevel >= user.permissionLevel;
+}

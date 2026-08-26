@@ -1,6 +1,6 @@
 import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
 
-import type { PermissionLevel } from "@/lib/security/auth/types";
+import type { AccessLevel } from "@/lib/core/db/accessLevel";
 import { logError } from "@/lib/core/logger";
 import { parseNonNegativeInt, parsePositiveInt } from "@/lib/core/env/parseEnv";
 
@@ -131,7 +131,7 @@ export async function withServiceClient<T>(fn: (client: PoolClient) => Promise<T
 }
 
 export async function withRlsTransaction<T>(
-  permissionLevel: PermissionLevel,
+  permissionLevel: AccessLevel,
   fn: (client: PoolClient) => Promise<T>
 ): Promise<T> {
   return withClient(async (client) => {

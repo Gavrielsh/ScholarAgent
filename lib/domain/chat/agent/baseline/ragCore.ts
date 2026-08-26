@@ -5,7 +5,10 @@ import type { KnowledgeChunk, PermissionLevel, UserContext } from "@/lib/securit
 import { ROLE_DESCRIPTIONS } from "@/lib/security/auth/types";
 import type { ChatMessage } from "@/lib/domain/chat/agent/state";
 import { insertRagAuditLog } from "@/lib/domain/admin/auditLogs";
-import { querySimilarDocuments, type SimilarDocument } from "@/lib/core/db/pgvector";
+import {
+  retrieveSimilarDocuments,
+  type SimilarDocument,
+} from "@/lib/domain/ingestion/processor/retrieval";
 import { getLlmAdapter } from "@/lib/domain/chat/llm/adapter";
 import { computeDls, type DlsResult } from "@/lib/core/metrics/dls";
 import type { LlmMessage } from "@/lib/domain/chat/llm/types";
@@ -82,7 +85,7 @@ export async function runBaselineRagCore(input: BaselineRagInput): Promise<Basel
   //
   // `limit` is pushed down to the DB so RRF ordering and truncation both happen at the
   // query layer. Nothing is re-sorted or sliced in application memory afterwards.
-  const docs = await querySimilarDocuments(query, userContext.permissionLevel, {
+  const docs = await retrieveSimilarDocuments(query, userContext.permissionLevel, {
     limit: retrievalLimit,
     overfetch: Math.max(retrievalLimit * FUSION_DEPTH_MULTIPLIER, MIN_FUSION_DEPTH),
     signal: signal ?? undefined,

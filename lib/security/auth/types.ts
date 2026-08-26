@@ -1,5 +1,9 @@
+import type { AccessLevel } from "@/lib/core/db/accessLevel";
+
 // Four-tier authorization model (L0=Admin, L3=Volunteer).
-export type PermissionLevel = 0 | 1 | 2 | 3;
+// Alias of the persistence layer's access-level contract: the two are the same
+// numbers, so core can scope a transaction without importing from security.
+export type PermissionLevel = AccessLevel;
 
 export const PERMISSION_ROLE: Record<PermissionLevel, string> = {
   0: "Admin",

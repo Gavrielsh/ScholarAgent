@@ -60,6 +60,7 @@ import {
 } from "@/lib/core/db/pgvector";
 import { closePool } from "@/lib/core/db/client";
 import { chunkText, type Chunk } from "@/lib/domain/ingestion/processor/chunker";
+import { buildChunkMetadata } from "@/lib/domain/ingestion/processor/chunkMetadata";
 import { embedTextBatch } from "@/lib/domain/ingestion/processor/embeddings";
 import { redactPii } from "@/lib/security/privacy/piiRedact";
 import { extractTextFromUpload } from "@/lib/domain/ingestion/processor/uploader";
@@ -538,27 +539,34 @@ async function reconcileDocument(
   }
 
   const vectors = await embedChunksInSlices(chunks, options);
+  const chunkMetadata = {
+    source: document.source,
+    organization_id: document.metadata?.organization_id ?? null,
+    ...(document.externalMediaId ? { wa_media_id: document.externalMediaId } : {}),
+    ...(document.externalMessageId ? { wa_message_id: document.externalMessageId } : {}),
+    original_size_bytes: document.sizeBytes,
+    reconciled: true,
+    reconciled_from: source.origin,
+  };
+
   const records: DocumentChunkRecord[] = chunks.map((chunk, i) => ({
     text: chunk.text,
-    chunk,
+    chunkIndex: chunk.index,
+    metadata: buildChunkMetadata({
+      documentId: document.documentId,
+      filename: document.filename,
+      mimeType: document.mimeType,
+      uploadedByUserId: document.uploadedByUserId,
+      classificationLevel: document.classificationLevel,
+      chunk,
+      extra: chunkMetadata,
+    }),
     embedding: vectors[i],
   }));
 
   const result = await backfillDocumentChunks({
     documentId: document.documentId,
-    filename: document.filename,
-    mimeType: document.mimeType,
-    uploadedByUserId: document.uploadedByUserId,
     classificationLevel: document.classificationLevel,
-    chunkMetadata: {
-      source: document.source,
-      organization_id: document.metadata?.organization_id ?? null,
-      ...(document.externalMediaId ? { wa_media_id: document.externalMediaId } : {}),
-      ...(document.externalMessageId ? { wa_message_id: document.externalMessageId } : {}),
-      original_size_bytes: document.sizeBytes,
-      reconciled: true,
-      reconciled_from: source.origin,
-    },
     chunks: records,
   });
 

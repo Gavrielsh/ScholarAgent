@@ -4,11 +4,16 @@ import type { Chunk } from "@/lib/domain/ingestion/processor/chunker";
 /**
  * The metadata contract for a knowledge_base row.
  *
- * Every ingestion path (HTTP upload, WhatsApp document) writes through here so
- * the JSONB shape stays identical. Downstream code depends on specific keys —
- * `hardDeleteKnowledgeChunksByDocumentId` filters on `document_id`, and the
- * admin reports read `uploaded_by` — so a path that spelled one of them
- * differently would silently opt its own rows out of those operations.
+ * Every ingestion path (HTTP upload, WhatsApp document, reconciliation) builds
+ * its chunk metadata here so the JSONB shape stays identical. Downstream code
+ * depends on specific keys — `hardDeleteKnowledgeChunksByDocumentId` filters on
+ * `document_id`, and the admin reports read `uploaded_by` — so a path that
+ * spelled one of them differently would silently opt its own rows out of those
+ * operations.
+ *
+ * This function is the only place those key names are written. The persistence
+ * layer takes the finished payload and serialises it verbatim, so call this
+ * rather than assembling the object at a call site.
  */
 export interface ChunkMetadataInput {
   documentId: string;

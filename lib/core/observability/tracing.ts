@@ -1,4 +1,14 @@
-import type { LlmMessage } from "@/lib/domain/chat/llm/types";
+/**
+ * A chat message as tracing needs to see it: a role and its content.
+ *
+ * Deliberately looser than the chat domain's message model (whose role is a
+ * string union) so that tracing records what it is given without core
+ * depending on the domain. The domain's message arrays satisfy this shape.
+ */
+export interface TraceMessage {
+  role: string;
+  content: string;
+}
 
 export interface BaselineTraceHandles {
   endRoot: (output: { answer: string; chunkIds: string[]; latencyMs: number }) => void;
@@ -6,7 +16,7 @@ export interface BaselineTraceHandles {
     end: (output: { chunkIds: string[]; fusedCount: number }) => void;
   };
   /** Call after the final `messages` array for the baseline LLM is assembled. */
-  attachLlmGeneration: (messages: LlmMessage[]) => {
+  attachLlmGeneration: (messages: readonly TraceMessage[]) => {
     end: (output: { answer: string }) => void;
   };
 }
@@ -83,7 +93,7 @@ export async function startBaselineRagTrace(args: {
           if (typeof retrieval.end === "function") retrieval.end({ output });
         },
       },
-      attachLlmGeneration: (messages: LlmMessage[]) => {
+      attachLlmGeneration: (messages: readonly TraceMessage[]) => {
         const generation = root.generation({
           name: "baseline-llm",
           model: process.env.LLM_PROVIDER ?? "mock",

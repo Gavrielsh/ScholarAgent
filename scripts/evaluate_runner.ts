@@ -40,10 +40,10 @@ import type { LlmMessage } from "@/lib/domain/chat/llm/types";
 import { computeDls, type DlsResult } from "@/lib/core/metrics/dls";
 import { evaluateRagas, type RagasScores } from "@/lib/core/metrics/ragas";
 import {
-  querySimilarDocuments,
-  querySimilarDocumentsBypassRls,
+  retrieveSimilarDocuments,
+  retrieveSimilarDocumentsBypassRls,
   type SimilarDocument,
-} from "@/lib/core/db/pgvector";
+} from "@/lib/domain/ingestion/processor/retrieval";
 import { GOLDEN_DATASET, type EvalRecord, type QueryCategory } from "./data/golden_dataset";
 import dotenv from 'dotenv';
 dotenv.config({ path: '.env.local' });
@@ -235,7 +235,7 @@ async function runConfigA(record: EvalRecord): Promise<SingleConfigResult> {
   const userContext = buildUserContext(record);
 
   try {
-    const docs = await querySimilarDocumentsBypassRls(record.question, {
+    const docs = await retrieveSimilarDocumentsBypassRls(record.question, {
       limit: RETRIEVAL_LIMIT,
       overfetch: RETRIEVAL_OVERFETCH,
     });
@@ -255,7 +255,7 @@ async function runConfigA(record: EvalRecord): Promise<SingleConfigResult> {
       answer,
       contexts: contextTexts,
       groundTruth: record.groundTruthAnswer,
-    });
+    }, getLlmAdapter);
 
     return { dls, ragas, answer, latencyMs: Date.now() - started };
   } catch (err) {
@@ -272,7 +272,7 @@ async function runConfigB(record: EvalRecord): Promise<SingleConfigResult> {
   const userContext = buildUserContext(record);
 
   try {
-    const docs = await querySimilarDocuments(record.question, record.userRole, {
+    const docs = await retrieveSimilarDocuments(record.question, record.userRole, {
       limit: RETRIEVAL_LIMIT,
       overfetch: RETRIEVAL_OVERFETCH,
     });
@@ -292,7 +292,7 @@ async function runConfigB(record: EvalRecord): Promise<SingleConfigResult> {
       answer,
       contexts: contextTexts,
       groundTruth: record.groundTruthAnswer,
-    });
+    }, getLlmAdapter);
 
     return { dls, ragas, answer, latencyMs: Date.now() - started };
   } catch (err) {
@@ -333,7 +333,7 @@ async function runAgenticConfig(record: EvalRecord): Promise<SingleConfigResult>
       answer: result.answer,
       contexts: contextTexts,
       groundTruth: record.groundTruthAnswer,
-    });
+    }, getLlmAdapter);
 
     return {
       dls: result.dls,

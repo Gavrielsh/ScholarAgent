@@ -1,4 +1,19 @@
-import type { KnowledgeChunk, UserContext } from "@/lib/security/auth/types";
+import type { AccessLevel } from "@/lib/core/db/accessLevel";
+
+/**
+ * The minimum shape DLS needs from a caller's user context.
+ *
+ * Structural on purpose: the security layer's `UserContext` satisfies it
+ * without core having to import — or know about — the role model around it.
+ */
+export interface DlsSubject {
+  permissionLevel: AccessLevel;
+}
+
+/** The minimum shape DLS needs from a retrieved chunk. */
+export interface DlsClassifiedChunk {
+  classificationLevel: AccessLevel;
+}
 
 export interface DlsResult {
   score: number;            // percentage 0–100
@@ -14,7 +29,10 @@ export interface DlsResult {
 // A chunk is unauthorized when the user's permission level is greater than
 // the chunk's classification level (i.e., the user lacks the required privilege).
 // A DLS of 0% means the RLS layer is working correctly.
-export function computeDls(user: UserContext, retrievedChunks: KnowledgeChunk[]): DlsResult {
+export function computeDls(
+  user: DlsSubject,
+  retrievedChunks: readonly DlsClassifiedChunk[]
+): DlsResult {
   if (retrievedChunks.length === 0) {
     return { score: 0, totalChunks: 0, unauthorizedChunks: 0, passed: true };
   }

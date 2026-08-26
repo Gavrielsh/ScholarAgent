@@ -8,6 +8,7 @@ import { PDFParse } from "pdf-parse";
 import { MANAGER_PERMISSION_LEVEL } from "@/lib/security/auth/rls";
 import type { PermissionLevel } from "@/lib/security/auth/types";
 import { insertDocumentWithChunks } from "@/lib/core/db/pgvector";
+import { buildChunkMetadata } from "@/lib/domain/ingestion/processor/chunkMetadata";
 import { chunkText, type ChunkOptions } from "@/lib/domain/ingestion/processor/chunker";
 import { embedTextBatch } from "@/lib/domain/ingestion/processor/embeddings";
 import { redactPii } from "@/lib/security/privacy/piiRedact";
@@ -105,13 +106,21 @@ export async function ingestDocument(input: UploadDocumentInput): Promise<Upload
     classificationLevel: input.classificationLevel,
     writePermissionLevel: input.uploadedByPermissionLevel,
     documentMetadata: input.extraMetadata ?? {},
-    chunkMetadata: {
-      source: input.source ?? "upload_api",
-      ...(input.extraMetadata ?? {}),
-    },
     chunks: chunks.map((chunk, i) => ({
       text: chunk.text,
-      chunk,
+      chunkIndex: chunk.index,
+      metadata: buildChunkMetadata({
+        documentId,
+        filename: input.filename,
+        mimeType: input.mimeType,
+        uploadedByUserId: input.uploadedByUserId,
+        classificationLevel: input.classificationLevel,
+        chunk,
+        extra: {
+          source: input.source ?? "upload_api",
+          ...(input.extraMetadata ?? {}),
+        },
+      }),
       embedding: vectors[i],
     })),
   });

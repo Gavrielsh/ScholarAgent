@@ -1,7 +1,29 @@
 // RAGAS-style evaluation — baseline metrics for comparative testing (thesis §8).
 // Uses an LLM-as-judge when LLM_PROVIDER is configured; otherwise heuristic fallbacks.
 
-import { getLlmAdapter } from "@/lib/domain/chat/llm/adapter";
+/** The one message shape the judge prompt is built from. */
+export interface RagasJudgeMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+/** The single LLM capability RAGAS needs. The chat domain's adapter satisfies it. */
+export interface RagasJudge {
+  generateText(input: {
+    messages: RagasJudgeMessage[];
+    temperature?: number;
+    responseSchema?: Record<string, unknown>;
+  }): Promise<string>;
+}
+
+/**
+ * Resolves the judge only when one is actually needed.
+ *
+ * Injected rather than imported so this module stays free of provider wiring;
+ * a factory rather than an instance so the heuristic path never constructs an
+ * adapter it will not call.
+ */
+export type RagasJudgeFactory = () => RagasJudge;
 
 export interface RagasInput {
   question: string;
@@ -84,7 +106,10 @@ function heuristicScores(input: RagasInput): RagasScores {
  * Scores a single RAG tuple. Prefer wiring a Python RAGAS worker in CI for publication-grade numbers;
  * this path provides repeatable baseline instrumentation inside the TypeScript repo.
  */
-export async function evaluateRagas(input: RagasInput): Promise<RagasScores> {
+export async function evaluateRagas(
+  input: RagasInput,
+  judgeFactory: RagasJudgeFactory
+): Promise<RagasScores> {
   const started = Date.now();
   const provider = (process.env.LLM_PROVIDER ?? "mock").toLowerCase();
 
@@ -92,7 +117,7 @@ export async function evaluateRagas(input: RagasInput): Promise<RagasScores> {
     return { ...heuristicScores(input), latencyMs: Date.now() - started };
   }
 
-  const adapter = getLlmAdapter();
+  const adapter = judgeFactory();
   const contextBlock = input.contexts.map((c, i) => `[${i + 1}] ${c}`).join("\n\n");
 
   const judgePrompt = `You are an evaluation judge for a Hebrew educational RAG system.

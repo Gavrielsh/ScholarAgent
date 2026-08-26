@@ -9,6 +9,7 @@ import { lookupUserByPhone } from "@/lib/security/auth/userRegistry";
 import { parsePositiveInt, TerminalNotifyError } from "@/lib/core/queue/jobRuntime";
 import { abortableSleep, isAbortError, isHttpTimeoutError } from "@/lib/core/http/fetchWithTimeout";
 import { chunkText, type Chunk } from "@/lib/domain/ingestion/processor/chunker";
+import { buildChunkMetadata } from "@/lib/domain/ingestion/processor/chunkMetadata";
 import { embedTextBatch } from "@/lib/domain/ingestion/processor/embeddings";
 import { redactPii } from "@/lib/security/privacy/piiRedact";
 import { extractTextFromUpload } from "@/lib/domain/ingestion/processor/uploader";
@@ -269,15 +270,36 @@ async function handleDocumentIngestion(
   // ── STEP 3: embed in rate-limit-friendly batches ──────────────────────────
   const vectors = await embedChunksInBatches(chunks, ctx.signal);
 
+  // Generated up front: every chunk's metadata embeds it, and the document row
+  // and its chunks must agree on the same id.
+  const documentId = randomUUID();
+
+  const chunkMetadata = {
+    source: "whatsapp",
+    organization_id: user.organizationId ?? null,
+    wa_media_id: event.mediaId,
+    wa_message_id: event.messageId,
+    original_size_bytes: sizeBytes,
+  };
+
   const records: DocumentChunkRecord[] = chunks.map((chunk, i) => ({
     text: chunk.text,
-    chunk,
+    chunkIndex: chunk.index,
+    metadata: buildChunkMetadata({
+      documentId,
+      filename: event.filename,
+      mimeType: event.mimeType,
+      uploadedByUserId: user.userId,
+      classificationLevel,
+      chunk,
+      extra: chunkMetadata,
+    }),
     embedding: vectors[i],
   }));
 
   // ── STEP 4: single transaction — document row + every chunk ───────────────
   const result = await insertDocumentWithChunks({
-    documentId: randomUUID(),
+    documentId,
     source: "whatsapp",
     filename: event.filename,
     mimeType: event.mimeType,
@@ -293,13 +315,6 @@ async function handleDocumentIngestion(
       organization_id: user.organizationId ?? null,
       uploaded_via: "whatsapp",
       caption: event.caption,
-    },
-    chunkMetadata: {
-      source: "whatsapp",
-      organization_id: user.organizationId ?? null,
-      wa_media_id: event.mediaId,
-      wa_message_id: event.messageId,
-      original_size_bytes: sizeBytes,
     },
     chunks: records,
   });

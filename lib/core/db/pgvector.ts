@@ -2,11 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { withClient, withRlsTransaction, withServiceClient } from "@/lib/core/db/client";
 import type { PoolClient } from "pg";
-import { ADMIN_PERMISSION_LEVEL, MANAGER_PERMISSION_LEVEL } from "@/lib/security/auth/rls";
-import type { PermissionLevel } from "@/lib/security/auth/types";
-import { buildChunkMetadata } from "@/lib/domain/ingestion/processor/chunkMetadata";
-import type { Chunk } from "@/lib/domain/ingestion/processor/chunker";
-import { embedText } from "@/lib/domain/ingestion/processor/embeddings";
+import {
+  MAX_PRIVILEGE_LEVEL,
+  MIN_CORPUS_WRITE_LEVEL,
+  type AccessLevel,
+} from "@/lib/core/db/accessLevel";
 import { logWarn } from "@/lib/core/logger";
 
 const EMBEDDING_DIMENSION = 768;
@@ -18,7 +18,7 @@ export interface SimilarDocument {
   id: string;
   text: string;
   metadata: Record<string, unknown> | null;
-  classificationLevel: PermissionLevel;
+  classificationLevel: AccessLevel;
   /** Dense-vector cosine similarity when available. */
   similarity: number;
   /** Fused RRF score when hybrid retrieval runs. */
@@ -31,13 +31,9 @@ export interface QuerySimilarOptions {
   /** HNSW / BM25 leg cap each — fetch wide before RLS shrinks the effective set. */
   overfetch?: number;
   rrfK?: number;
-  /** Job deadline / shutdown cancellation, forwarded to the query embedding. */
-  signal?: AbortSignal;
 }
 
-type NormalizedQueryOptions = Required<Pick<QuerySimilarOptions, "limit" | "overfetch" | "rrfK">> & {
-  signal?: AbortSignal;
-};
+type NormalizedQueryOptions = Required<QuerySimilarOptions>;
 
 function normalizeQueryOptions(
   arg?: number | QuerySimilarOptions
@@ -49,7 +45,6 @@ function normalizeQueryOptions(
     limit: arg?.limit ?? 5,
     overfetch: arg?.overfetch ?? DEFAULT_RETRIEVAL_OVERFETCH,
     rrfK: arg?.rrfK ?? DEFAULT_RRF_K,
-    signal: arg?.signal,
   };
 }
 
@@ -83,7 +78,7 @@ type RetrievedRow = {
   id: string;
   content: string;
   metadata: Record<string, unknown> | null;
-  classification_level: PermissionLevel;
+  classification_level: AccessLevel;
   similarity: number;
 };
 
@@ -177,33 +172,22 @@ async function executeHybridRetrieval(
   return merged.slice(0, opts.limit);
 }
 
-async function prepareHybridRetrieval(
-  queryText: string,
-  options?: number | QuerySimilarOptions
-): Promise<{ vectorLiteral: string; opts: NormalizedQueryOptions } | null> {
-  const opts = normalizeQueryOptions(options);
-  if (!queryText.trim()) {
-    return null;
-  }
-
-  const queryEmbedding = await embedText(queryText, opts.signal);
-  if (queryEmbedding.length === 0) {
-    return null;
-  }
-
-  return { vectorLiteral: toVectorLiteral(queryEmbedding), opts };
-}
-
-/** RLS-scoped hybrid retrieval for user-facing access paths. */
+/**
+ * RLS-scoped hybrid retrieval for user-facing access paths.
+ *
+ * `queryEmbedding` must already be computed — producing it is an ingestion
+ * concern, and doing it here would put an HTTP round trip inside the storage
+ * layer. Callers go through the ingestion processor's retrieval orchestrator,
+ * which owns the embed step and the empty-query short circuit.
+ */
 export async function querySimilarDocuments(
   queryText: string,
-  permissionLevel: PermissionLevel,
+  queryEmbedding: number[],
+  permissionLevel: AccessLevel,
   options?: number | QuerySimilarOptions
 ): Promise<SimilarDocument[]> {
-  const prepared = await prepareHybridRetrieval(queryText, options);
-  if (!prepared) return [];
-
-  const { vectorLiteral, opts } = prepared;
+  const opts = normalizeQueryOptions(options);
+  const vectorLiteral = toVectorLiteral(queryEmbedding);
   return withRlsTransaction(permissionLevel, (client) =>
     executeHybridRetrieval(client, queryText, vectorLiteral, opts)
   );
@@ -215,12 +199,11 @@ export async function querySimilarDocuments(
  */
 export async function querySimilarDocumentsBypassRls(
   queryText: string,
+  queryEmbedding: number[],
   options?: number | QuerySimilarOptions
 ): Promise<SimilarDocument[]> {
-  const prepared = await prepareHybridRetrieval(queryText, options);
-  if (!prepared) return [];
-
-  const { vectorLiteral, opts } = prepared;
+  const opts = normalizeQueryOptions(options);
+  const vectorLiteral = toVectorLiteral(queryEmbedding);
   return withServiceClient((client) =>
     executeHybridRetrieval(client, queryText, vectorLiteral, opts)
   );
@@ -232,7 +215,16 @@ export async function querySimilarDocumentsBypassRls(
 
 export interface DocumentChunkRecord {
   text: string;
-  chunk: Pick<Chunk, "index" | "charStart" | "charEnd">;
+  /** Ordinal within the document. Backfill derives a deterministic id from it. */
+  chunkIndex: number;
+  /**
+   * Fully-built metadata payload, serialised verbatim into the jsonb column.
+   *
+   * Composing it is the ingestion processor's job (`buildChunkMetadata`), not
+   * this layer's — the key names are a corpus-wide contract that delete and
+   * reporting paths filter on, so exactly one module gets to spell them.
+   */
+  metadata: Record<string, unknown>;
   /** Pre-computed. Embedding inside the transaction would hold it open for minutes. */
   embedding: number[];
 }
@@ -250,12 +242,10 @@ export interface IngestedDocumentRecord {
   externalMessageId: string | null;
   uploadedByUserId: string;
   uploadedByPhone: string | null;
-  classificationLevel: PermissionLevel;
+  classificationLevel: AccessLevel;
   /** Must be L0 or L1 — set as `app.user_permission_level` so write RLS allows the insert. */
-  writePermissionLevel: PermissionLevel;
+  writePermissionLevel: AccessLevel;
   documentMetadata?: Record<string, unknown>;
-  /** Channel-specific extras merged into every chunk's metadata. */
-  chunkMetadata?: Record<string, unknown>;
   chunks: DocumentChunkRecord[];
 }
 
@@ -296,7 +286,7 @@ export async function insertDocumentWithChunks(
   if (input.chunks.length === 0) {
     throw new Error("Cannot ingest a document with zero chunks.");
   }
-  if (input.writePermissionLevel > MANAGER_PERMISSION_LEVEL) {
+  if (input.writePermissionLevel > MIN_CORPUS_WRITE_LEVEL) {
     throw new Error("Corpus writes require L0 or L1.");
   }
 
@@ -306,19 +296,7 @@ export async function insertDocumentWithChunks(
   // Serialised before BEGIN so a dimension mismatch aborts before a connection
   // is ever put into a transaction.
   const embeddings = input.chunks.map((c) => toVectorLiteral(c.embedding));
-  const metadata = input.chunks.map((c) =>
-    JSON.stringify(
-      buildChunkMetadata({
-        documentId: input.documentId,
-        filename: input.filename,
-        mimeType: input.mimeType,
-        uploadedByUserId: input.uploadedByUserId,
-        classificationLevel: input.classificationLevel,
-        chunk: c.chunk,
-        extra: input.chunkMetadata,
-      })
-    )
-  );
+  const metadata = input.chunks.map((c) => JSON.stringify(c.metadata));
 
   return withClient(async (client) => {
     try {
@@ -407,7 +385,7 @@ export async function insertDocumentWithChunks(
  */
 export async function hardDeleteKnowledgeChunksByDocumentId(documentId: string): Promise<number> {
   if (!documentId.trim()) return 0;
-  const res = await withRlsTransaction(ADMIN_PERMISSION_LEVEL, (client) =>
+  const res = await withRlsTransaction(MAX_PRIVILEGE_LEVEL, (client) =>
     client.query(`DELETE FROM knowledge_base WHERE metadata->>'document_id' = $1`, [documentId])
   );
   return res.rowCount ?? 0;
@@ -429,7 +407,7 @@ export interface DocumentRegistryRow {
   externalMessageId: string | null;
   uploadedByUserId: string;
   uploadedByPhone: string | null;
-  classificationLevel: PermissionLevel;
+  classificationLevel: AccessLevel;
   chunkCount: number;
   status: string;
   metadata: Record<string, unknown> | null;
@@ -463,7 +441,7 @@ type DocumentRegistrySqlRow = {
   external_message_id: string | null;
   uploaded_by_user_id: string;
   uploaded_by_phone: string | null;
-  classification_level: PermissionLevel;
+  classification_level: AccessLevel;
   chunk_count: number;
   status: string;
   metadata: Record<string, unknown> | null;
@@ -511,7 +489,7 @@ export async function findDocumentsMissingChunks(
   const limit = Math.max(1, options.limit ?? 100);
   const documentId = options.documentId?.trim() || null;
 
-  return withRlsTransaction(ADMIN_PERMISSION_LEVEL, async (client) => {
+  return withRlsTransaction(MAX_PRIVILEGE_LEVEL, async (client) => {
     const res = await client.query<DocumentRegistrySqlRow>(DOCUMENTS_MISSING_CHUNKS_SQL, [
       documentId,
       limit,
@@ -559,12 +537,8 @@ function deterministicChunkId(documentId: string, chunkIndex: number): string {
 export interface BackfillDocumentChunksInput {
   /** Must already exist in ingested_documents. */
   documentId: string;
-  filename: string;
-  mimeType: string;
-  uploadedByUserId: string;
-  classificationLevel: PermissionLevel;
-  /** Extras merged into every chunk's metadata (source channel, provenance…). */
-  chunkMetadata?: Record<string, unknown>;
+  /** Written to every chunk's classification_level column. */
+  classificationLevel: AccessLevel;
   chunks: DocumentChunkRecord[];
 }
 
@@ -598,25 +572,13 @@ export async function backfillDocumentChunks(
     throw new Error("Cannot backfill a document with zero chunks.");
   }
 
-  const chunkIds = input.chunks.map((c) => deterministicChunkId(input.documentId, c.chunk.index));
+  const chunkIds = input.chunks.map((c) => deterministicChunkId(input.documentId, c.chunkIndex));
   const texts = input.chunks.map((c) => c.text);
   const levels = input.chunks.map(() => input.classificationLevel);
   // Serialised before BEGIN so a dimension mismatch fails before a connection is
   // ever put into a transaction.
   const embeddings = input.chunks.map((c) => toVectorLiteral(c.embedding));
-  const metadata = input.chunks.map((c) =>
-    JSON.stringify(
-      buildChunkMetadata({
-        documentId: input.documentId,
-        filename: input.filename,
-        mimeType: input.mimeType,
-        uploadedByUserId: input.uploadedByUserId,
-        classificationLevel: input.classificationLevel,
-        chunk: c.chunk,
-        extra: input.chunkMetadata,
-      })
-    )
-  );
+  const metadata = input.chunks.map((c) => JSON.stringify(c.metadata));
 
   return withClient(async (client) => {
     try {
@@ -624,7 +586,7 @@ export async function backfillDocumentChunks(
       // Admin level for the same reason as findDocumentsMissingChunks: without it
       // the emptiness re-check below cannot see a single existing chunk.
       await client.query("SELECT set_config('app.user_permission_level', $1, true)", [
-        String(ADMIN_PERMISSION_LEVEL),
+        String(MAX_PRIVILEGE_LEVEL),
       ]);
 
       const locked = await client.query<{ id: string }>(
@@ -704,7 +666,7 @@ export async function markDocumentReconcileFailure(
   documentId: string,
   reason: string
 ): Promise<void> {
-  await withRlsTransaction(ADMIN_PERMISSION_LEVEL, async (client) => {
+  await withRlsTransaction(MAX_PRIVILEGE_LEVEL, async (client) => {
     await client.query(
       `UPDATE ingested_documents
           SET status = 'reconcile_failed',
