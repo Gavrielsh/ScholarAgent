@@ -13,7 +13,7 @@
 
 import type { Worker } from "bullmq";
 
-import { closePool } from "@/lib/core/db/client";
+import { closePool } from "@/lib/core/db";
 import { closeRedisClient } from "@/lib/core/redis/client";
 import { closeDocumentIngestionQueue } from "@/lib/domain/ingestion/queue/documentIngestionQueue";
 import {

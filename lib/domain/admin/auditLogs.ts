@@ -1,4 +1,4 @@
-import { query } from "@/lib/core/db/client";
+import { query } from "@/lib/core/db";
 
 export async function insertRagAuditLog(row: {
   query: string;

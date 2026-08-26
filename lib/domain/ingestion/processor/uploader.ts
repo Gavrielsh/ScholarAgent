@@ -7,7 +7,7 @@ import { PDFParse } from "pdf-parse";
 
 import { MANAGER_PERMISSION_LEVEL } from "@/lib/security/auth/rls";
 import type { PermissionLevel } from "@/lib/security/auth/types";
-import { insertDocumentWithChunks } from "@/lib/core/db/pgvector";
+import { insertDocumentWithChunks } from "@/lib/core/db";
 import { buildChunkMetadata } from "@/lib/domain/ingestion/processor/chunkMetadata";
 import { chunkText, type ChunkOptions } from "@/lib/domain/ingestion/processor/chunker";
 import { embedTextBatch } from "@/lib/domain/ingestion/processor/embeddings";

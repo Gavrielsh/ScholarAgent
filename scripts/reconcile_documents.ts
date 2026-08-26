@@ -53,12 +53,12 @@ import { readFile, readdir } from "node:fs/promises";
 
 import {
   backfillDocumentChunks,
+  closePool,
   findDocumentsMissingChunks,
   markDocumentReconcileFailure,
   type DocumentChunkRecord,
   type DocumentRegistryRow,
-} from "@/lib/core/db/pgvector";
-import { closePool } from "@/lib/core/db/client";
+} from "@/lib/core/db";
 import { chunkText, type Chunk } from "@/lib/domain/ingestion/processor/chunker";
 import { buildChunkMetadata } from "@/lib/domain/ingestion/processor/chunkMetadata";
 import { embedTextBatch } from "@/lib/domain/ingestion/processor/embeddings";

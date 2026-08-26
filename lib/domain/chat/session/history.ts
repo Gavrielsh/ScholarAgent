@@ -5,7 +5,7 @@
  * sender indexes, and the partial unique index on message_id).
  */
 
-import { isUniqueViolation, withSenderTransaction } from "@/lib/core/db/client";
+import { isUniqueViolation, withSenderTransaction } from "@/lib/core/db";
 import { logError, logInfo } from "@/lib/core/logger";
 
 export interface ChatHistoryEntry {

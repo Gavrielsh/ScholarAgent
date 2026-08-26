@@ -1,4 +1,4 @@
-import { isUniqueViolation, query } from "@/lib/core/db/client";
+import { isUniqueViolation, query } from "@/lib/core/db";
 import { PERMISSION_ROLE } from "@/lib/security/auth/types";
 import type { PermissionLevel, UserContext } from "@/lib/security/auth/types";
 import { logError, logInfo } from "@/lib/core/logger";

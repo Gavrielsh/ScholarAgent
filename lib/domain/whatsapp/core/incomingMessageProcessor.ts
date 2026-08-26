@@ -9,7 +9,7 @@ import type { UserContext } from "@/lib/security/auth/types";
 import { appendChatEntries, readChatHistory } from "@/lib/domain/chat/session/history";
 import { buildBoundedConversationContext, truncateInboundMessage } from "@/lib/domain/chat/session/context";
 import { lookupUserByPhone } from "@/lib/security/auth/userRegistry";
-import { isUniqueViolation } from "@/lib/core/db/client";
+import { isUniqueViolation } from "@/lib/core/db";
 import { isAbortError, isHttpTimeoutError } from "@/lib/core/http/fetchWithTimeout";
 import { redactPii } from "@/lib/security/privacy/piiRedact";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";

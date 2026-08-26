@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeStringEqual } from "@/lib/security/auth/timingSafe";
-import { hardDeleteKnowledgeChunksByDocumentId } from "@/lib/core/db/pgvector";
+import { hardDeleteKnowledgeChunksByDocumentId } from "@/lib/core/db";
 import { logError } from "@/lib/core/logger";
 
 const UUID_RE =

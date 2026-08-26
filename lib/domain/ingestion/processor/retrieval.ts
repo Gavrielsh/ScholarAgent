@@ -3,7 +3,7 @@ import {
   querySimilarDocumentsBypassRls,
   type QuerySimilarOptions,
   type SimilarDocument,
-} from "@/lib/core/db/pgvector";
+} from "@/lib/core/db";
 import { embedText } from "@/lib/domain/ingestion/processor/embeddings";
 import type { PermissionLevel } from "@/lib/security/auth/types";
 
@@ -35,7 +35,7 @@ async function embedQuery(
 /**
  * RLS-scoped hybrid retrieval.
  *
- * Owns the embed step so that `lib/core/db/pgvector.ts` stays a pure
+ * Owns the embed step so that `lib/core/db.ts` stays a pure
  * persistence layer: it receives the finished vector and runs SQL.
  */
 export async function retrieveSimilarDocuments(

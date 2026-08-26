@@ -3,8 +3,11 @@ import { randomUUID } from "node:crypto";
 import { isElevatedRole } from "@/lib/security/auth/roles";
 import { MANAGER_PERMISSION_LEVEL } from "@/lib/security/auth/rls";
 import type { PermissionLevel, UserContext } from "@/lib/security/auth/types";
-import { isUniqueViolation } from "@/lib/core/db/client";
-import { insertDocumentWithChunks, type DocumentChunkRecord } from "@/lib/core/db/pgvector";
+import {
+  insertDocumentWithChunks,
+  isUniqueViolation,
+  type DocumentChunkRecord,
+} from "@/lib/core/db";
 import { lookupUserByPhone } from "@/lib/security/auth/userRegistry";
 import { parsePositiveInt, TerminalNotifyError } from "@/lib/core/queue/jobRuntime";
 import { abortableSleep, isAbortError, isHttpTimeoutError } from "@/lib/core/http/fetchWithTimeout";
