@@ -95,6 +95,7 @@ export function createWhatsAppIncomingWorker(): Worker<ParsedInboundEvent> {
       messageId: job.data.messageId,
       senderId: job.data.senderId,
       attempt: currentAttempt(job),
+      pid: process.pid,
     });
   });
 
@@ -106,6 +107,7 @@ export function createWhatsAppIncomingWorker(): Worker<ParsedInboundEvent> {
       messageId: job?.data.messageId ?? null,
       senderId: job?.data.senderId ?? null,
       attemptsMade: job?.attemptsMade ?? null,
+      pid: process.pid,
       // Separated so a hung upstream is greppable independently of ordinary
       // application errors.
       timedOut,

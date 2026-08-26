@@ -5,6 +5,13 @@ export interface WhatsAppTextBody {
 export interface WhatsAppInteractiveReply {
   type?: string;
   button_reply?: { id?: string; title?: string };
+  list_reply?: { id?: string; title?: string };
+}
+
+/** Legacy `type: "button"` quick-reply envelope still sent by some clients. */
+export interface WhatsAppQuickReplyButton {
+  payload?: string;
+  text?: string;
 }
 
 /** Media envelope Meta sends for `type: "document"` (also image/audio/video). */
@@ -23,6 +30,7 @@ export interface WhatsAppMessageEvent {
   type?: string;
   text?: WhatsAppTextBody;
   interactive?: WhatsAppInteractiveReply;
+  button?: WhatsAppQuickReplyButton;
   document?: WhatsAppMediaBody;
 }
 

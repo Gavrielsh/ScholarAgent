@@ -31,6 +31,7 @@ services:
       retries: 5
 
   app:
+    profiles: ["full"]
     build:
       context: .
       dockerfile: docker/Dockerfile
@@ -57,7 +58,10 @@ services:
 
   # The ONLY consumer of the whatsapp-incoming queue. The `app` service is a
   # producer (webhook -> enqueue -> ACK); it must never run a worker.
+  # Behind the `full` profile so `docker compose up -d` brings up infra only
+  # (redis + postgres) and cannot race a local `npx tsx scripts/whatsapp-worker.ts`.
   whatsapp-worker:
+    profiles: ["full"]
     build:
       context: .
       dockerfile: docker/Dockerfile.worker

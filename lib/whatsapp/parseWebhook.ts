@@ -36,9 +36,19 @@ export function parseInboundEvent(payload: WhatsAppWebhookPayload): ParsedInboun
   const senderId = firstMessage.from;
   const messageId = firstMessage.id ?? null;
 
-  if (firstMessage.type === "interactive" || firstMessage.interactive?.button_reply) {
-    const buttonId = firstMessage.interactive?.button_reply?.id;
-    const title = firstMessage.interactive?.button_reply?.title ?? "";
+  const buttonReply = firstMessage.interactive?.button_reply;
+  const listReply = firstMessage.interactive?.list_reply;
+  const quickReply = firstMessage.button;
+
+  if (
+    firstMessage.type === "interactive" ||
+    firstMessage.type === "button" ||
+    buttonReply ||
+    listReply ||
+    quickReply
+  ) {
+    const buttonId = buttonReply?.id ?? listReply?.id ?? quickReply?.payload;
+    const title = buttonReply?.title ?? listReply?.title ?? quickReply?.text ?? "";
     if (!buttonId) return null;
     return {
       senderId,

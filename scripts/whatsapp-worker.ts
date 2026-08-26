@@ -16,10 +16,21 @@ import type { Worker } from "bullmq";
 import { closePool } from "@/lib/db/client";
 import { closeRedisClient } from "@/lib/redis/client";
 import { closeDocumentIngestionQueue } from "@/lib/queue/documentIngestionQueue";
-import { closeWhatsAppIncomingQueue } from "@/lib/queue/whatsappIncomingQueue";
+import {
+  closeWhatsAppIncomingQueue,
+  getWhatsAppIncomingQueue,
+} from "@/lib/queue/whatsappIncomingQueue";
 import { createDocumentIngestionWorker } from "@/lib/queue/workers/documentIngestionWorker";
 import { createWhatsAppIncomingWorker } from "@/lib/queue/workers/whatsappIncomingWorker";
 import { logError, logInfo, logWarn } from "@/lib/logger";
+
+if (!process.env.WHATSAPP_ACCESS_TOKEN?.trim() || !process.env.WHATSAPP_PHONE_NUMBER_ID?.trim()) {
+  logError(
+    "whatsapp_worker_missing_credentials",
+    new Error("WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID must be set")
+  );
+  process.exit(1);
+}
 
 /**
  * How long in-flight jobs get to finish after a signal arrives.
@@ -42,6 +53,24 @@ logInfo("whatsapp_worker_started", "WhatsApp queue consumers are running.", {
   pid: process.pid,
   shutdownTimeoutMs: SHUTDOWN_TIMEOUT_MS,
 });
+
+void (async () => {
+  try {
+    const peers = await getWhatsAppIncomingQueue().getWorkers();
+    if (peers.length > 1) {
+      logWarn(
+        "whatsapp_worker_duplicate_consumer",
+        "More than one process is consuming whatsapp-incoming; jobs will be split between them.",
+        { consumerCount: peers.length, addresses: peers.map((peer) => peer.addr ?? "") }
+      );
+    }
+  } catch (err) {
+    logWarn(
+      "whatsapp_worker_consumer_check_failed",
+      err instanceof Error ? err.message : String(err)
+    );
+  }
+})();
 
 /**
  * Guards against re-entry. Orchestrators routinely send SIGTERM and then SIGINT

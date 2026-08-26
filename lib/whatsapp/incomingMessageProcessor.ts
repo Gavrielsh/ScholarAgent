@@ -252,6 +252,14 @@ async function handleInboundMessage(
     return;
   }
 
+  logInfo("whatsapp_outbound_ready", "Sending baseline reply.", {
+    senderId,
+    messageId,
+    kind: processResult.kind,
+    intent: processResult.intent,
+    answerLen: outbound.length,
+  });
+
   await sendWhatsAppTextMessage({ to: senderId, body: outbound, signal: ctx.signal });
 
   if (processResult.ragMetrics) {

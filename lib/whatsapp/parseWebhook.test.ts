@@ -115,6 +115,44 @@ describe("parseInboundDelivery", () => {
         })
       )?.kind
     ).toBe("chat");
+
+    expect(
+      parseInboundDelivery(
+        payload({
+          from: "972500000000",
+          id: "wamid.LIST",
+          type: "interactive",
+          interactive: { type: "list_reply", list_reply: { id: "l0_daily_summary", title: "סיכום יומי" } },
+        })
+      )
+    ).toEqual({
+      kind: "chat",
+      event: {
+        senderId: "972500000000",
+        messageId: "wamid.LIST",
+        messageBody: "סיכום יומי",
+        buttonId: "l0_daily_summary",
+      },
+    });
+
+    expect(
+      parseInboundDelivery(
+        payload({
+          from: "972500000000",
+          id: "wamid.QUICK",
+          type: "button",
+          button: { payload: "l0_specific_user", text: "משתמש ספציפי" },
+        })
+      )
+    ).toEqual({
+      kind: "chat",
+      event: {
+        senderId: "972500000000",
+        messageId: "wamid.QUICK",
+        messageBody: "משתמש ספציפי",
+        buttonId: "l0_specific_user",
+      },
+    });
   });
 
   it("refuses to downgrade an unusable document into a chat turn", () => {

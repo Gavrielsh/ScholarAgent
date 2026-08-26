@@ -37,6 +37,10 @@ function getIncomingQueue(): Queue<ParsedInboundEvent> {
   return incomingQueue;
 }
 
+export function getWhatsAppIncomingQueue(): Queue<ParsedInboundEvent> {
+  return getIncomingQueue();
+}
+
 export async function enqueueWhatsAppIncomingMessage(
   event: ParsedInboundEvent
 ): Promise<string> {
