@@ -5,8 +5,7 @@
 // of this file. It is called from lib/domain/whatsapp/core/incomingMessageProcessor.ts
 // BEFORE any database write, LLM call, or trace — nothing else may run first.
 
-import { shouldSkipPrivacyGuardrails } from "@/lib/security/auth/roles";
-import type { UserContext } from "@/lib/security/auth/types";
+import { shouldSkipPrivacyGuardrails, type UserContext } from "@/lib/security/auth";
 
 export type IntentCategory = "VALID_EDUCATIONAL" | "BORDERLINE" | "PROBLEMATIC";
 

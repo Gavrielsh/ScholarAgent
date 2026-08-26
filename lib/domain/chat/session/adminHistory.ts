@@ -1,6 +1,5 @@
 import { withRlsTransaction } from "@/lib/core/db";
-import { isAdminRole } from "@/lib/security/auth/roles";
-import type { PermissionLevel } from "@/lib/security/auth/types";
+import { isAdminRole, type PermissionLevel } from "@/lib/security/auth";
 import { logError } from "@/lib/core/logger";
 
 export interface StaffChatRow {

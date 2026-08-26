@@ -31,9 +31,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import chalk from "chalk";
 
-import { filterAuthorizedChunks } from "@/lib/security/auth/rbac";
-import { PERMISSION_ROLE, ROLE_DESCRIPTIONS } from "@/lib/security/auth/types";
-import type { KnowledgeChunk, PermissionLevel, UserContext } from "@/lib/security/auth/types";
+import {
+  filterAuthorizedChunks,
+  PERMISSION_ROLE,
+  ROLE_DESCRIPTIONS,
+  type KnowledgeChunk,
+  type PermissionLevel,
+  type UserContext,
+} from "@/lib/security/auth";
 import { runBaselineRagCore } from "@/lib/domain/chat/agent/baseline/index";
 import { getLlmAdapter } from "@/lib/domain/chat/llm/adapter";
 import type { LlmMessage } from "@/lib/domain/chat/llm/types";

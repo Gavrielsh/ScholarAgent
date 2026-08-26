@@ -1,8 +1,18 @@
+/**
+ * HTTP request authentication (Supabase JWT).
+ *
+ * Deliberately NOT part of lib/security/auth.ts. `jose` is an ESM-only package,
+ * and folding this file into auth.ts put it in the module graph of everything
+ * that imports a role predicate or the user registry — including plain-Node
+ * workers and Jest, which cannot transform ESM inside node_modules and failed
+ * to load four suites outright. Only the upload route authenticates a request,
+ * so only the upload route pays for the JWT machinery.
+ */
+
 import type { NextRequest } from "next/server";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
-import { lookupUserById } from "@/lib/security/auth/userRegistry";
-import type { PermissionLevel, UserContext } from "@/lib/security/auth/types";
+import { lookupUserById, type PermissionLevel, type UserContext } from "@/lib/security/auth";
 
 const VALID_LEVELS: ReadonlySet<number> = new Set([0, 1, 2, 3]);
 let cachedJwks: ReturnType<typeof createRemoteJWKSet> | null = null;

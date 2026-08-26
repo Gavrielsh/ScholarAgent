@@ -5,7 +5,7 @@
  */
 
 import type { GoldenDatasetRecord } from "@/lib/core/telemetry";
-import type { PermissionLevel } from "@/lib/security/auth/types";
+import type { PermissionLevel } from "@/lib/security/auth";
 
 export type QueryCategory = "standard" | "adversarial";
 

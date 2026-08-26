@@ -1,4 +1,4 @@
-import type { PermissionLevel } from "@/lib/security/auth/types";
+import type { PermissionLevel } from "@/lib/security/auth";
 import type { Chunk } from "@/lib/domain/ingestion/processor/chunker";
 
 /**

@@ -1,12 +1,13 @@
-import { isAdminRole, isElevatedRole } from "@/lib/security/auth/roles";
-import type { PermissionLevel } from "@/lib/security/auth/types";
 import {
   deleteAdminManagedUser,
   getAllManagedUsers,
   getUserByPhone,
   insertAdminManagedUser,
+  isAdminRole,
+  isElevatedRole,
   normalizePhoneNumber,
-} from "@/lib/security/auth/userRegistry";
+  type PermissionLevel,
+} from "@/lib/security/auth";
 import {
   clearAdminSession,
   getAdminSession,

@@ -5,10 +5,9 @@ import {
   type InboundSafetyDecision,
 } from "@/lib/security/guardrails/safetySignals";
 import type { ChatMessage } from "@/lib/domain/chat/agent/state";
-import type { UserContext } from "@/lib/security/auth/types";
+import { lookupUserByPhone, type UserContext } from "@/lib/security/auth";
 import { appendChatEntries, readChatHistory } from "@/lib/domain/chat/session/history";
 import { buildBoundedConversationContext, truncateInboundMessage } from "@/lib/domain/chat/session/context";
-import { lookupUserByPhone } from "@/lib/security/auth/userRegistry";
 import { isUniqueViolation } from "@/lib/core/db";
 import { isAbortError, isHttpTimeoutError } from "@/lib/core/http/fetchWithTimeout";
 import { redactPii } from "@/lib/security/privacy/piiRedact";

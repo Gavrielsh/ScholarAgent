@@ -1,14 +1,17 @@
 import { randomUUID } from "node:crypto";
 
-import { isElevatedRole } from "@/lib/security/auth/roles";
-import { MANAGER_PERMISSION_LEVEL } from "@/lib/security/auth/rls";
-import type { PermissionLevel, UserContext } from "@/lib/security/auth/types";
+import {
+  isElevatedRole,
+  lookupUserByPhone,
+  MANAGER_PERMISSION_LEVEL,
+  type PermissionLevel,
+  type UserContext,
+} from "@/lib/security/auth";
 import {
   insertDocumentWithChunks,
   isUniqueViolation,
   type DocumentChunkRecord,
 } from "@/lib/core/db";
-import { lookupUserByPhone } from "@/lib/security/auth/userRegistry";
 import { parsePositiveInt } from "@/lib/core/env";
 import { TerminalNotifyError } from "@/lib/core/queue";
 import { abortableSleep, isAbortError, isHttpTimeoutError } from "@/lib/core/http/fetchWithTimeout";

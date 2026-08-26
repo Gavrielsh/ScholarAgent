@@ -1,8 +1,12 @@
 // Baseline RAG — control configuration for comparative evaluation (proposal §6.2).
 // Single DB-ranked retrieval -> single LLM call. No in-memory re-rank stage.
 
-import type { KnowledgeChunk, PermissionLevel, UserContext } from "@/lib/security/auth/types";
-import { ROLE_DESCRIPTIONS } from "@/lib/security/auth/types";
+import {
+  ROLE_DESCRIPTIONS,
+  type KnowledgeChunk,
+  type PermissionLevel,
+  type UserContext,
+} from "@/lib/security/auth";
 import type { ChatMessage } from "@/lib/domain/chat/agent/state";
 import { insertRagAuditLog } from "@/lib/domain/admin/auditLogs";
 import {

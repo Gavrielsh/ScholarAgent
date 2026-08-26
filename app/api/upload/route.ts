@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { extractUserContext, UnauthenticatedError } from "@/lib/security/auth/extractUser";
-import { assertMinimumLevel, canClassifyAtLevel } from "@/lib/security/auth/rbac";
-import type { PermissionLevel } from "@/lib/security/auth/types";
+import { assertMinimumLevel, canClassifyAtLevel, type PermissionLevel } from "@/lib/security/auth";
+import { extractUserContext, UnauthenticatedError } from "@/lib/security/extractUser";
 import { extractTextFromUpload, ingestDocument, assertMimeMatchesContent } from "@/lib/domain/ingestion/processor/uploader";
 
 // 10 MB hard cap per upload. TODO: tune via env once usage patterns are clear.

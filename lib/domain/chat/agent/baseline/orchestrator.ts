@@ -1,6 +1,5 @@
 import type { ChatMessage } from "@/lib/domain/chat/agent/state";
-import type { UserContext } from "@/lib/security/auth/types";
-import { isAdminRole, isElevatedRole, isManagerRole } from "@/lib/security/auth/roles";
+import { isAdminRole, isElevatedRole, isManagerRole, type UserContext } from "@/lib/security/auth";
 import { resolveAdminAnalyticsFollowUp } from "@/lib/domain/chat/agent/baseline/adminAnalyticsHandler";
 import {
   resolveL0AdminFlow,

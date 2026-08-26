@@ -5,8 +5,7 @@ import mammoth from "mammoth";
 // TextResult.text holds the concatenated text from all pages.
 import { PDFParse } from "pdf-parse";
 
-import { MANAGER_PERMISSION_LEVEL } from "@/lib/security/auth/rls";
-import type { PermissionLevel } from "@/lib/security/auth/types";
+import { MANAGER_PERMISSION_LEVEL, type PermissionLevel } from "@/lib/security/auth";
 import { insertDocumentWithChunks } from "@/lib/core/db";
 import { buildChunkMetadata } from "@/lib/domain/ingestion/processor/chunkMetadata";
 import { chunkText, type ChunkOptions } from "@/lib/domain/ingestion/processor/chunker";

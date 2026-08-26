@@ -1,6 +1,5 @@
 import { getLlmAdapter } from "@/lib/domain/chat/llm/adapter";
-import { isAdminRole } from "@/lib/security/auth/roles";
-import type { PermissionLevel } from "@/lib/security/auth/types";
+import { isAdminRole, type PermissionLevel } from "@/lib/security/auth";
 import { loadTodayStaffContext } from "@/lib/domain/chat/session/adminHistory";
 import {
   exitAdminAnalyticsMode,

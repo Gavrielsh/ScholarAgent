@@ -5,7 +5,7 @@ import {
   type SimilarDocument,
 } from "@/lib/core/db";
 import { embedText } from "@/lib/domain/ingestion/processor/embeddings";
-import type { PermissionLevel } from "@/lib/security/auth/types";
+import type { PermissionLevel } from "@/lib/security/auth";
 
 export type { SimilarDocument };
 
