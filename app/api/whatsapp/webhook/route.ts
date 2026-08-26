@@ -6,28 +6,28 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { timingSafeStringEqual } from "@/lib/auth/timingSafe";
-import { logError, logInfo, logWarn } from "@/lib/logger";
-import { parsePositiveInt } from "@/lib/env/parseEnv";
-import { enqueueDocumentIngestion } from "@/lib/queue/documentIngestionQueue";
-import { enqueueWhatsAppIncomingMessage } from "@/lib/queue/whatsappIncomingQueue";
+import { timingSafeStringEqual } from "@/lib/security/auth/timingSafe";
+import { logError, logInfo, logWarn } from "@/lib/core/logger";
+import { parsePositiveInt } from "@/lib/core/env/parseEnv";
+import { enqueueDocumentIngestion } from "@/lib/domain/ingestion/queue/documentIngestionQueue";
+import { enqueueWhatsAppIncomingMessage } from "@/lib/domain/whatsapp/queue/whatsappIncomingQueue";
 import {
   releaseWhatsAppMessageClaim,
   tryClaimWhatsAppMessage,
-} from "@/lib/redis/idempotency";
+} from "@/lib/core/redis/idempotency";
 import {
   isStatusOnlyWebhook,
   parseInboundDelivery,
   peekInboundMessageType,
   type InboundDelivery,
-} from "@/lib/whatsapp/parseWebhook";
-import { sendWhatsAppTextMessage } from "@/lib/whatsapp/sendMessage";
+} from "@/lib/domain/whatsapp/core/parseWebhook";
+import { sendWhatsAppTextMessage } from "@/lib/domain/whatsapp/core/sendMessage";
 import {
   isWebhookSignatureRequired,
   META_SIGNATURE_HEADER,
   verifyMetaSignature,
-} from "@/lib/whatsapp/verifySignature";
-import type { WhatsAppWebhookPayload } from "@/lib/whatsapp/types";
+} from "@/lib/security/crypto/verifySignature";
+import type { WhatsAppWebhookPayload } from "@/lib/domain/whatsapp/core/types";
 
 export const runtime = "nodejs";
 
@@ -98,7 +98,7 @@ async function sendQueuedReceipt(to: string, messageId: string | null): Promise<
  * The sender's role is NOT checked in this file. A `users` lookup is a database
  * round trip and Meta redelivers anything not ACKed within a few seconds, so
  * the RBAC gate lives in the ingestion worker (`authorizeSender` in
- * lib/whatsapp/documentIngestionProcessor.ts). This route always ACKs 200.
+ * lib/domain/ingestion/processor/documentIngestionProcessor.ts). This route always ACKs 200.
  */
 function enqueueDelivery(delivery: InboundDelivery): Promise<string> {
   switch (delivery.kind) {

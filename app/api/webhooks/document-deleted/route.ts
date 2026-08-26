@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { timingSafeStringEqual } from "@/lib/auth/timingSafe";
-import { hardDeleteKnowledgeChunksByDocumentId } from "@/lib/db/pgvector";
-import { logError } from "@/lib/logger";
+import { timingSafeStringEqual } from "@/lib/security/auth/timingSafe";
+import { hardDeleteKnowledgeChunksByDocumentId } from "@/lib/core/db/pgvector";
+import { logError } from "@/lib/core/logger";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

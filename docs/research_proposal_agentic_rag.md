@@ -44,22 +44,65 @@ The system is implemented as a production-grade, event-driven enterprise applica
 
 | Layer / Component | Implemented Technology | Codebase Reference |
 |---|---|---|
-| **Core Runtime & Backend** | Next.js (App Router), TypeScript (ESNext, Node.js 20+) | `app/api/`, `lib/` |
-| **Database & Vector Store** | PostgreSQL 16 + `pgvector` (Cosine Distance `<=>`, HNSW/IVFFlat indexing) | `lib/db/client.ts`, `lib/db/pgvector.ts` |
-| **Search Mechanism** | **Hybrid Search:** Dense vector embeddings (1536-dim) + Hebrew/English Full-Text Search (`tsvector`, `ts_rank_cd`) via **Reciprocal Rank Fusion (RRF)** | `lib/db/pgvector.ts`, `migrations/003_baseline_rag_audit_hybrid.sql` |
-| **Security & Authorization** | Dual-layer: Application-level RBAC + Transactional PostgreSQL Row-Level Security (`SET LOCAL app.current_user_role`) | `lib/auth/rbac.ts`, `lib/auth/rls.ts`, `migrations/005_chat_history_rls.sql` |
-| **Asynchronous Message Queue** | **BullMQ + Redis** (separate queues for WhatsApp ingestion and heavy document parsing) | `lib/queue/`, `lib/redis/client.ts`, `docker/Dockerfile.worker` |
-| **Messaging & Gateway Interface** | WhatsApp Cloud API (Meta Graph API) + HMAC-SHA256 signature verification & Redis idempotency deduplication | `lib/whatsapp/`, `app/api/whatsapp/webhook/route.ts` |
-| **Agentic State & Orchestration** | Deterministic TypeScript State Orchestrator (`BaselineOrchestrator`, `IntentRouter`, `SafetySignals`, Session Managers) | `lib/agent/baseline/`, `lib/agent/state.ts` |
-| **Supported LLM Providers** | **Unified Adapter:** Google Gemini (1.5 Pro, 2.0 Flash), Anthropic Claude (3.5 Sonnet, 3 Haiku), OpenAI (GPT-4o, GPT-4o-mini), Mock Provider | `lib/llm/providers/`, `lib/llm/adapter.ts` |
-| **ETL & Data Sanitization** | Semantic chunking with heading preservation + automated PII scrubbing (Israeli ID, phone numbers, emails) | `lib/ingestion/chunker.ts`, `lib/ingestion/piiRedact.ts` |
-| **Evaluation & Benchmark** | Automated evaluation harness with Golden Dataset + RAGAS metric suite + Data Leakage Score (DLS) | `scripts/evaluate_runner.ts`, `scripts/data/golden_dataset.ts`, `lib/metrics/` |
+| **Core Runtime & Backend** | Next.js (App Router), TypeScript (ESNext, Node.js 20+) | `app/api/`, `lib/core/` |
+| **Database & Vector Store** | PostgreSQL 16 + `pgvector` (Cosine Distance `<=>`, HNSW/IVFFlat indexing) | `lib/core/db/client.ts`, `lib/core/db/pgvector.ts` |
+| **Search Mechanism** | **Hybrid Search:** Dense vector embeddings (1536-dim) + Hebrew/English Full-Text Search (`tsvector`, `ts_rank_cd`) via **Reciprocal Rank Fusion (RRF)** | `lib/core/db/pgvector.ts`, `migrations/001_initial_schema.sql` |
+| **Security & Authorization** | Dual-layer: Application-level RBAC + Transactional PostgreSQL Row-Level Security (`SET LOCAL app.current_user_role`) | `lib/security/auth/rbac.ts`, `lib/security/auth/rls.ts`, `migrations/001_initial_schema.sql` |
+| **Asynchronous Message Queue** | **BullMQ + Redis** (separate queues for WhatsApp ingestion and heavy document parsing) | `lib/core/queue/`, `lib/domain/ingestion/queue/`, `lib/domain/whatsapp/queue/`, `lib/core/redis/client.ts`, `docker/Dockerfile.worker` |
+| **Messaging & Gateway Interface** | WhatsApp Cloud API (Meta Graph API) + HMAC-SHA256 signature verification & Redis idempotency deduplication | `lib/domain/whatsapp/`, `lib/security/crypto/verifySignature.ts`, `app/api/whatsapp/webhook/route.ts` |
+| **Agentic State & Orchestration** | Deterministic TypeScript State Orchestrator (`BaselineOrchestrator`, `IntentRouter`, `SafetySignals`, Session Managers) | `lib/domain/chat/agent/baseline/`, `lib/domain/chat/agent/state.ts`, `lib/security/guardrails/safetySignals.ts` |
+| **Supported LLM Providers** | **Unified Adapter:** Google Gemini (1.5 Pro, 2.0 Flash), Anthropic Claude (3.5 Sonnet, 3 Haiku), OpenAI (GPT-4o, GPT-4o-mini), Mock Provider | `lib/domain/chat/llm/providers/`, `lib/domain/chat/llm/adapter.ts` |
+| **ETL & Data Sanitization** | Semantic chunking with heading preservation + automated PII scrubbing (Israeli ID, phone numbers, emails) | `lib/domain/ingestion/processor/chunker.ts`, `lib/security/privacy/piiRedact.ts` |
+| **Evaluation & Benchmark** | Automated evaluation harness with Golden Dataset + RAGAS metric suite + Data Leakage Score (DLS) | `scripts/evaluate_runner.ts`, `scripts/data/golden_dataset.ts`, `lib/core/metrics/` |
+
+### 3.1 Module Boundaries (Domain-Driven Design)
+
+The `lib/` tree is organized into three boundaries, intended so that
+dependencies flow inward: domain logic may depend on security and core, but not
+the reverse.
+
+| Boundary | Responsibility | Contents |
+|---|---|---|
+| **`lib/core/`** | Technology-facing infrastructure with no business rules | `db/`, `redis/`, `queue/` (connection + job runtime), `http/`, `env/`, `logger.ts`, `observability/`, `metrics/` |
+| **`lib/security/`** | Cross-cutting security concerns enforced independently of any single domain | `auth/` (RBAC, RLS, roles, user registry), `crypto/` (HMAC webhook signature verification), `privacy/` (PII redaction), `guardrails/` (inbound safety signals) |
+| **`lib/domain/`** | Business domains, each owning its own processing, queues, and workers | `admin/` (audit logs), `chat/` (`session/`, `agent/`, `llm/`), `ingestion/` (`processor/`, `queue/`, `workers/`), `whatsapp/` (`core/`, `queue/`, `workers/`) |
+
+Two consequences of this layout are relevant to the security claims in Sections 4
+and 5. First, PII redaction and the inbound safety guardrails are no longer
+embedded inside the ingestion and agent packages respectively; they are
+independent security modules invoked by those domains, which makes the
+sanitization boundary auditable in isolation. Second, HMAC signature
+verification sits in `lib/security/crypto/` rather than in the WhatsApp domain,
+so the gateway's authenticity check is separable from its message-parsing logic.
+
+`lib/security/` currently satisfies the intended direction in full: it depends
+only on `lib/core/` (the database client and the logger) and imports nothing
+from `lib/domain/`. `lib/core/` does **not** yet satisfy it. Four modules retain
+outward dependencies inherited from the pre-refactor layout, which the new
+boundaries make explicit rather than introduce:
+
+| Module | Outward dependency | Nature |
+|---|---|---|
+| `lib/core/db/pgvector.ts` | `lib/domain/ingestion/processor/` (`chunker`, `chunkMetadata`, `embeddings`), `lib/security/auth/` | The write path embeds and chunks inline, so the vector store owns ingestion logic |
+| `lib/core/metrics/ragas.ts` | `lib/domain/chat/llm/adapter` | LLM-as-judge scoring calls the chat domain's provider adapter |
+| `lib/core/observability/tracing.ts` | `lib/domain/chat/llm/types` | Trace payloads are typed in terms of chat message types |
+| `lib/core/db/client.ts`, `lib/core/metrics/dls.ts` | `lib/security/auth/types` | `PermissionLevel` / `UserContext` are used as RLS and scoring parameters |
+
+Resolving these requires relocating behavior rather than files — extracting the
+embed/chunk step out of the persistence layer, and lifting the shared permission
+and message types into a dependency-free `core` contract. That work is
+deliberately out of scope for the structural refactor described here, which
+preserved all logic unchanged.
+
+All intra-project imports use the absolute `@/lib/...` path alias; no relative
+cross-module imports exist, so a module's dependencies — and therefore any
+boundary violation — are readable directly from its import block.
 
 ---
 
 ## 4. Multi-Tier Authorization Model (Four-Tier Hierarchy)
 
-Following schema consolidation (`migrations/002_remove_l4.sql`), the system implements a strict **Four-Tier Role-Based and Row-Level Access Control Model (L0–L3)**:
+Following schema consolidation into a single canonical baseline (`migrations/001_initial_schema.sql`, which folds in the former incremental series), the system implements a strict **Four-Tier Role-Based and Row-Level Access Control Model (L0–L3)**:
 
 ```
 [L0: ADMIN] (Permission Level 0) ──► Full system visibility, audit logs, system telemetry
@@ -77,7 +120,7 @@ In this numeric representation, a lower integer denotes a higher privilege level
 - **Access Invariant:** A user with permission level $P_{\text{user}}$ is permitted to retrieve chunk $C$ if and only if:
   $$\text{ClassificationLevel}(C) \ge P_{\text{user}}$$
 - **Enforcement Layers:**
-  1. **Application-Layer RBAC:** Validates extracted user identity, active state, and role mappings (`lib/auth/extractUser.ts`, `lib/auth/rbac.ts`).
+  1. **Application-Layer RBAC:** Validates extracted user identity, active state, and role mappings (`lib/security/auth/extractUser.ts`, `lib/security/auth/rbac.ts`).
   2. **Database-Layer Transactional RLS:** Every query executes inside a transaction setting local session variables:
      ```sql
      SET LOCAL app.current_user_role = 'STAFF';

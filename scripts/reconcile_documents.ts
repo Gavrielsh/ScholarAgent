@@ -57,14 +57,15 @@ import {
   markDocumentReconcileFailure,
   type DocumentChunkRecord,
   type DocumentRegistryRow,
-} from "@/lib/db/pgvector";
-import { closePool } from "@/lib/db/client";
-import { chunkText, type Chunk } from "@/lib/ingestion/chunker";
-import { embedTextBatch } from "@/lib/ingestion/embeddings";
-import { redactPii } from "@/lib/ingestion/piiRedact";
-import { extractTextFromUpload } from "@/lib/ingestion/uploader";
-import { logError, logInfo, logWarn } from "@/lib/logger";
-import { downloadWhatsAppMedia } from "@/lib/whatsapp/mediaDownload";
+} from "@/lib/core/db/pgvector";
+import { closePool } from "@/lib/core/db/client";
+import { chunkText, type Chunk } from "@/lib/domain/ingestion/processor/chunker";
+import { buildChunkMetadata } from "@/lib/domain/ingestion/processor/chunkMetadata";
+import { embedTextBatch } from "@/lib/domain/ingestion/processor/embeddings";
+import { redactPii } from "@/lib/security/privacy/piiRedact";
+import { extractTextFromUpload } from "@/lib/domain/ingestion/processor/uploader";
+import { logError, logInfo, logWarn } from "@/lib/core/logger";
+import { downloadWhatsAppMedia } from "@/lib/domain/whatsapp/core/mediaDownload";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -92,7 +93,7 @@ const INLINE_TEXT_KEYS = ["extracted_text", "raw_text", "text", "content"] as co
 /** Metadata keys that may carry a path to the original file. */
 const SOURCE_PATH_KEYS = ["source_path", "local_path", "file_path", "relative_path"] as const;
 
-/** Mirrors the extractor table in lib/ingestion/uploader.ts. */
+/** Mirrors the extractor table in lib/domain/ingestion/processor/uploader.ts. */
 const MIME_BY_EXT: Record<string, string> = {
   ".pdf": "application/pdf",
   ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -538,27 +539,34 @@ async function reconcileDocument(
   }
 
   const vectors = await embedChunksInSlices(chunks, options);
+  const chunkMetadata = {
+    source: document.source,
+    organization_id: document.metadata?.organization_id ?? null,
+    ...(document.externalMediaId ? { wa_media_id: document.externalMediaId } : {}),
+    ...(document.externalMessageId ? { wa_message_id: document.externalMessageId } : {}),
+    original_size_bytes: document.sizeBytes,
+    reconciled: true,
+    reconciled_from: source.origin,
+  };
+
   const records: DocumentChunkRecord[] = chunks.map((chunk, i) => ({
     text: chunk.text,
-    chunk,
+    chunkIndex: chunk.index,
+    metadata: buildChunkMetadata({
+      documentId: document.documentId,
+      filename: document.filename,
+      mimeType: document.mimeType,
+      uploadedByUserId: document.uploadedByUserId,
+      classificationLevel: document.classificationLevel,
+      chunk,
+      extra: chunkMetadata,
+    }),
     embedding: vectors[i],
   }));
 
   const result = await backfillDocumentChunks({
     documentId: document.documentId,
-    filename: document.filename,
-    mimeType: document.mimeType,
-    uploadedByUserId: document.uploadedByUserId,
     classificationLevel: document.classificationLevel,
-    chunkMetadata: {
-      source: document.source,
-      organization_id: document.metadata?.organization_id ?? null,
-      ...(document.externalMediaId ? { wa_media_id: document.externalMediaId } : {}),
-      ...(document.externalMessageId ? { wa_message_id: document.externalMessageId } : {}),
-      original_size_bytes: document.sizeBytes,
-      reconciled: true,
-      reconciled_from: source.origin,
-    },
     chunks: records,
   });
 

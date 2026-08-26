@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { extractUserContext, UnauthenticatedError } from "@/lib/auth/extractUser";
-import { assertMinimumLevel } from "@/lib/auth/rbac";
-import type { PermissionLevel } from "@/lib/auth/types";
-import { extractTextFromUpload, ingestDocument, assertMimeMatchesContent } from "@/lib/ingestion/uploader";
+import { extractUserContext, UnauthenticatedError } from "@/lib/security/auth/extractUser";
+import { assertMinimumLevel, canClassifyAtLevel } from "@/lib/security/auth/rbac";
+import type { PermissionLevel } from "@/lib/security/auth/types";
+import { extractTextFromUpload, ingestDocument, assertMimeMatchesContent } from "@/lib/domain/ingestion/processor/uploader";
 
 // 10 MB hard cap per upload. TODO: tune via env once usage patterns are clear.
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
@@ -73,9 +73,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // A user cannot classify content at a level higher than their own privilege —
-  // otherwise an L1 Manager could publish L0 (admin-only) data.
-  if (classificationLevel < user.permissionLevel) {
+  // The rule itself lives in the security layer; the route only renders it.
+  if (!canClassifyAtLevel(user, classificationLevel as PermissionLevel)) {
     return jsonError(
       403,
       `אין לך הרשאה לסווג מסמך מתחת לרמת ההרשאה שלך (${user.permissionLevel}).`

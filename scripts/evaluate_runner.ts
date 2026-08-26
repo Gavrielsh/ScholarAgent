@@ -31,19 +31,19 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import chalk from "chalk";
 
-import { filterAuthorizedChunks } from "@/lib/auth/rbac";
-import { PERMISSION_ROLE, ROLE_DESCRIPTIONS } from "@/lib/auth/types";
-import type { KnowledgeChunk, PermissionLevel, UserContext } from "@/lib/auth/types";
-import { runBaselineRagCore } from "@/lib/agent/baseline/index";
-import { getLlmAdapter } from "@/lib/llm/adapter";
-import type { LlmMessage } from "@/lib/llm/types";
-import { computeDls, type DlsResult } from "@/lib/metrics/dls";
-import { evaluateRagas, type RagasScores } from "@/lib/metrics/ragas";
+import { filterAuthorizedChunks } from "@/lib/security/auth/rbac";
+import { PERMISSION_ROLE, ROLE_DESCRIPTIONS } from "@/lib/security/auth/types";
+import type { KnowledgeChunk, PermissionLevel, UserContext } from "@/lib/security/auth/types";
+import { runBaselineRagCore } from "@/lib/domain/chat/agent/baseline/index";
+import { getLlmAdapter } from "@/lib/domain/chat/llm/adapter";
+import type { LlmMessage } from "@/lib/domain/chat/llm/types";
+import { computeDls, type DlsResult } from "@/lib/core/metrics/dls";
+import { evaluateRagas, type RagasScores } from "@/lib/core/metrics/ragas";
 import {
-  querySimilarDocuments,
-  querySimilarDocumentsBypassRls,
+  retrieveSimilarDocuments,
+  retrieveSimilarDocumentsBypassRls,
   type SimilarDocument,
-} from "@/lib/db/pgvector";
+} from "@/lib/domain/ingestion/processor/retrieval";
 import { GOLDEN_DATASET, type EvalRecord, type QueryCategory } from "./data/golden_dataset";
 import dotenv from 'dotenv';
 dotenv.config({ path: '.env.local' });
@@ -235,7 +235,7 @@ async function runConfigA(record: EvalRecord): Promise<SingleConfigResult> {
   const userContext = buildUserContext(record);
 
   try {
-    const docs = await querySimilarDocumentsBypassRls(record.question, {
+    const docs = await retrieveSimilarDocumentsBypassRls(record.question, {
       limit: RETRIEVAL_LIMIT,
       overfetch: RETRIEVAL_OVERFETCH,
     });
@@ -255,7 +255,7 @@ async function runConfigA(record: EvalRecord): Promise<SingleConfigResult> {
       answer,
       contexts: contextTexts,
       groundTruth: record.groundTruthAnswer,
-    });
+    }, getLlmAdapter);
 
     return { dls, ragas, answer, latencyMs: Date.now() - started };
   } catch (err) {
@@ -272,7 +272,7 @@ async function runConfigB(record: EvalRecord): Promise<SingleConfigResult> {
   const userContext = buildUserContext(record);
 
   try {
-    const docs = await querySimilarDocuments(record.question, record.userRole, {
+    const docs = await retrieveSimilarDocuments(record.question, record.userRole, {
       limit: RETRIEVAL_LIMIT,
       overfetch: RETRIEVAL_OVERFETCH,
     });
@@ -292,7 +292,7 @@ async function runConfigB(record: EvalRecord): Promise<SingleConfigResult> {
       answer,
       contexts: contextTexts,
       groundTruth: record.groundTruthAnswer,
-    });
+    }, getLlmAdapter);
 
     return { dls, ragas, answer, latencyMs: Date.now() - started };
   } catch (err) {
@@ -333,7 +333,7 @@ async function runAgenticConfig(record: EvalRecord): Promise<SingleConfigResult>
       answer: result.answer,
       contexts: contextTexts,
       groundTruth: record.groundTruthAnswer,
-    });
+    }, getLlmAdapter);
 
     return {
       dls: result.dls,
