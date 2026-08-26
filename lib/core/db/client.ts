@@ -240,6 +240,5 @@ export async function closePool(): Promise<void> {
   }
 
   if (errors.length > 0) {
-    throw errors[0];
-  }
+    throw new AggregateError(errors, "Multiple errors occurred while closing Postgres pools.");  }
 }

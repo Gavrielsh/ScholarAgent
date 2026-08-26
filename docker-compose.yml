@@ -11,25 +11,6 @@ services:
       timeout: 3s
       retries: 5
 
-  postgres:
-    image: ankane/pgvector:latest
-    container_name: scholaragent-pg
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: scholaragent
-    ports:
-      - "5432:5432"
-    volumes:
-      - scholaragent-pgdata:/var/lib/postgresql/data
-      - ./migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d scholaragent"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   app:
     profiles: ["full"]
     build:
@@ -38,28 +19,24 @@ services:
     container_name: scholaragent-app
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     ports:
       - "3000:3000"
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgresql://user:password@postgres:5432/scholaragent
-      PG_SSLMODE: disable
+      DATABASE_URL: ${DATABASE_URL}
+      PG_SSLMODE: ${PG_SSLMODE:-require}
       PG_POOL_MAX: "10"
       PG_POOL_MIN: "1"
       LLM_PROVIDER: mock
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-dev-verify-token}
       WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
       WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:-}
       REDIS_URL: redis://redis:6379
 
-  # The ONLY consumer of the whatsapp-incoming queue. The `app` service is a
-  # producer (webhook -> enqueue -> ACK); it must never run a worker.
-  # Behind the `full` profile so `docker compose up -d` brings up infra only
-  # (redis + postgres) and cannot race a local `npx tsx scripts/whatsapp-worker.ts`.
   whatsapp-worker:
     profiles: ["full"]
     build:
@@ -67,27 +44,21 @@ services:
       dockerfile: docker/Dockerfile.worker
     container_name: scholaragent-whatsapp-worker
     restart: unless-stopped
-    # Must exceed WORKER_SHUTDOWN_TIMEOUT_MS (25s) so the drain can finish
-    # before Docker escalates SIGTERM to SIGKILL. The 10s default would cut
-    # every in-flight RAG call short.
     stop_grace_period: 40s
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgresql://user:password@postgres:5432/scholaragent
-      PG_SSLMODE: disable
+      DATABASE_URL: ${DATABASE_URL}
+      PG_SSLMODE: ${PG_SSLMODE:-require}
       PG_POOL_MAX: "10"
       PG_POOL_MIN: "1"
       LLM_PROVIDER: mock
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       REDIS_URL: redis://redis:6379
       WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
       WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      USER_MGMT_DEBUG: ${USER_MGMT_DEBUG:-0}
       WORKER_SHUTDOWN_TIMEOUT_MS: "25000"
       WHATSAPP_JOB_TIMEOUT_MS: "90000"
-
-volumes:
-  scholaragent-pgdata:
