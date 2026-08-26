@@ -110,7 +110,7 @@ function stripBidiControls(value: string): string {
  * Exists because this flow is the one place where the pipeline hands the
  * handlers a string that differs from what the admin typed: everything upstream
  * of the orchestrator runs on PII-redacted text (see `redactPii` in
- * lib/ingestion/piiRedact.ts), so a parse failure here is far more often a
+ * lib/security/privacy/piiRedact.ts), so a parse failure here is far more often a
  * mismatch between the two strings than a genuinely malformed input. The trace
  * prints both, with code points, so that is visible in one log line instead of
  * being re-derived from a unit test that never sees the redacted form.
@@ -371,7 +371,7 @@ async function handleAddUserInput(
   // `query` has been through `redactPii`, which rewrites any Israeli phone
   // number to "[PHONE_REDACTED]" — parsing it can only ever yield MISSING_PHONE.
   // `commandText` is the same message before redaction, supplied for exactly
-  // this reason (lib/whatsapp/incomingMessageProcessor.ts). It falls back to
+  // this reason (lib/domain/whatsapp/core/incomingMessageProcessor.ts). It falls back to
   // `query` for callers outside the WhatsApp pipeline, such as the evaluator.
   const parsed = parseAddUserInput(commandText ?? query);
 

@@ -25,7 +25,7 @@ import { UNAUTHORIZED_NUMBER_MESSAGE } from "@/lib/domain/whatsapp/core/userMess
 // ── Replies ────────────────────────────────────────────────────────────────
 const SUCCESS_MESSAGE = "המסמך עובד בהצלחה וזמין במערכת.";
 const FAILURE_MESSAGE = "עיבוד המסמך נכשל. אפשר לנסות לשלוח אותו שוב בעוד מספר דקות.";
-// Identical wording to lib/whatsapp/incomingMessageProcessor.ts: an unregistered
+// Identical wording to lib/domain/whatsapp/core/incomingMessageProcessor.ts: an unregistered
 // number must not be able to tell the two paths apart.
 const PERMISSION_DENIED_MESSAGE =
   "אין לך הרשאה להוסיף מסמכים למאגר הידע. הפעולה שמורה לצוות מטה (L0) ולמנהלות הכשרה (L1).";
@@ -53,7 +53,7 @@ const MAX_CHUNKS_PER_DOCUMENT = parsePositiveInt(process.env.DOCUMENT_MAX_CHUNKS
 /**
  * Default corpus tier for a document that arrives without a level directive.
  *
- * L1 means "visible to L0 and L1 only" under the RLS rule in lib/auth/rls.ts
+ * L1 means "visible to L0 and L1 only" under the RLS rule in lib/security/auth/rls.ts
  * (`classification_level >= user permission level`). Defaulting to the most
  * restrictive useful tier is the safe direction to be wrong in: widening a
  * document later is an UPDATE, whereas un-leaking one is not possible.

@@ -2,7 +2,7 @@
 // guardrails keep the bot in its educational, non-identifying scope.
 //
 // Entry point for the runtime pipeline is `evaluateInboundSafety` at the bottom
-// of this file. It is called from lib/whatsapp/incomingMessageProcessor.ts
+// of this file. It is called from lib/domain/whatsapp/core/incomingMessageProcessor.ts
 // BEFORE any database write, LLM call, or trace — nothing else may run first.
 
 import { shouldSkipPrivacyGuardrails } from "@/lib/security/auth/roles";

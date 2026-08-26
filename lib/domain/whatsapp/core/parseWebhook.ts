@@ -69,7 +69,7 @@ export function parseInboundEvent(payload: WhatsAppWebhookPayload): ParsedInboun
 
 /**
  * `application/pdf; charset=binary` and `APPLICATION/PDF` both have to resolve to
- * the plain type, because the extractor table in lib/ingestion/uploader.ts is
+ * the plain type, because the extractor table in lib/domain/ingestion/processor/uploader.ts is
  * keyed on the exact lower-case MIME string.
  */
 function normalizeMimeType(raw: string): string {

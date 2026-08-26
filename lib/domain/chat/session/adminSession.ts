@@ -32,7 +32,7 @@ const ADMIN_SESSION_MODES = new Set<AdminSessionMode>([
 /**
  * L0/L1 menu and prompt state (chat-history + user management).
  *
- * Backed by Redis (same rationale as lib/chat/adminAnalyticsSession.ts): the
+ * Backed by Redis (same rationale as lib/domain/chat/session/adminAnalyticsSession.ts): the
  * BullMQ worker runs with concurrency > 1 and no per-sender lock, so a process-
  * local Map desyncs when two messages from the same admin overlap or land on
  * different instances.

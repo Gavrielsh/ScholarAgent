@@ -3,7 +3,7 @@
 //   1. GET /{version}/{media-id}          → JSON envelope with a short-lived URL
 //   2. GET <that url>                     → the bytes, Bearer token still required
 //
-// Both hops go through lib/http/fetchWithTimeout.ts so they inherit the same
+// Both hops go through lib/core/http/fetchWithTimeout.ts so they inherit the same
 // AbortController deadline discipline as every other outbound call here, and
 // both are cancellable by the BullMQ job signal.
 
@@ -163,7 +163,7 @@ async function resolveWhatsAppMediaUrl(
 
 /**
  * Steps 1 + 2. Returns the raw bytes; parsing is the caller's concern
- * (see `extractTextFromUpload` in lib/ingestion/uploader.ts).
+ * (see `extractTextFromUpload` in lib/domain/ingestion/processor/uploader.ts).
  */
 export async function downloadWhatsAppMedia(
   mediaId: string,

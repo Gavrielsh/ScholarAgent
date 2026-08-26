@@ -92,7 +92,7 @@ const INLINE_TEXT_KEYS = ["extracted_text", "raw_text", "text", "content"] as co
 /** Metadata keys that may carry a path to the original file. */
 const SOURCE_PATH_KEYS = ["source_path", "local_path", "file_path", "relative_path"] as const;
 
-/** Mirrors the extractor table in lib/ingestion/uploader.ts. */
+/** Mirrors the extractor table in lib/domain/ingestion/processor/uploader.ts. */
 const MIME_BY_EXT: Record<string, string> = {
   ".pdf": "application/pdf",
   ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",

@@ -44,7 +44,7 @@ export interface BaselineProcessInput {
   senderPhone: string;
   /**
    * Already redacted and safety-screened by
-   * lib/whatsapp/incomingMessageProcessor.ts. Never raw webhook text.
+   * lib/domain/whatsapp/core/incomingMessageProcessor.ts. Never raw webhook text.
    */
   query: string;
   /**
