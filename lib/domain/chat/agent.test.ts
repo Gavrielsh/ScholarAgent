@@ -1,7 +1,4 @@
 import {
-  matchesUserManagementHeuristic,
-} from "@/lib/domain/chat/agent/baseline/intentRouter";
-import {
   ADD_INPUT_EXAMPLE,
   ADD_INVALID_LEVEL_MESSAGE,
   ADD_MISSING_PHONE_MESSAGE,
@@ -10,10 +7,12 @@ import {
   ADMIN_ACTION_LIST_USERS,
   canManagePermissionLevel,
   isUserManagementButtonId,
+  matchesUserManagementHeuristic,
   parseAddUserInput,
   parseDeleteUserInput,
+  parseL0MenuChoice,
   parseUserManagementMenuChoice,
-} from "@/lib/domain/chat/agent/baseline/userManagementHandlers";
+} from "@/lib/domain/chat/agent";
 import { normalizePhoneNumber } from "@/lib/security/auth";
 import { redactPii } from "@/lib/security/guardrails";
 import { chunkWhatsAppText, WHATSAPP_TEXT_CHAR_LIMIT } from "@/lib/domain/whatsapp/core/formatting";
@@ -253,5 +252,28 @@ describe("chunkWhatsAppText", () => {
     const text = "a".repeat(WHATSAPP_TEXT_CHAR_LIMIT + 50);
     const chunks = chunkWhatsAppText(text);
     expect(chunks.every((chunk) => chunk.length <= WHATSAPP_TEXT_CHAR_LIMIT)).toBe(true);
+  });
+});
+
+describe("parseL0MenuChoice", () => {
+  it("maps typed 1/2, titles, and button ids to daily/specific", () => {
+    expect(parseL0MenuChoice("1")).toBe("daily");
+    expect(parseL0MenuChoice("1.")).toBe("daily");
+    expect(parseL0MenuChoice("2")).toBe("specific");
+    expect(parseL0MenuChoice("2)")).toBe("specific");
+    expect(parseL0MenuChoice("סיכום יומי")).toBe("daily");
+    expect(parseL0MenuChoice("משתמש ספציפי")).toBe("specific");
+    expect(parseL0MenuChoice("1. Daily summary")).toBe("daily");
+    expect(parseL0MenuChoice("2. Specific user")).toBe("specific");
+    expect(parseL0MenuChoice("", "l0_daily_summary")).toBe("daily");
+    expect(parseL0MenuChoice("", "l0_specific_user")).toBe("specific");
+  });
+
+  it("treats bare cancel words as exit and ignores unrelated text", () => {
+    expect(parseL0MenuChoice("ביטול")).toBe("cancel");
+    expect(parseL0MenuChoice("cancel")).toBe("cancel");
+    expect(parseL0MenuChoice("חזור")).toBe("cancel");
+    expect(parseL0MenuChoice("מה מזג האוויר")).toBeNull();
+    expect(parseL0MenuChoice("12")).toBeNull();
   });
 });

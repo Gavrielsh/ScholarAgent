@@ -1,5 +1,9 @@
 // Baseline RAG — control configuration for comparative evaluation (proposal §6.2).
 // Single DB-ranked retrieval -> single LLM call. No in-memory re-rank stage.
+//
+// Kept separate from lib/domain/chat/agent.ts: the orchestrator calls into this
+// module, and scripts/evaluate_runner.ts calls `runBaselineRagCore` directly
+// without ever touching intent routing or the admin handlers.
 
 import {
   ROLE_DESCRIPTIONS,
@@ -7,7 +11,7 @@ import {
   type PermissionLevel,
   type UserContext,
 } from "@/lib/security/auth";
-import type { ChatMessage } from "@/lib/domain/chat/agent/state";
+import type { ChatMessage } from "@/lib/domain/chat/state";
 import { insertRagAuditLog } from "@/lib/domain/admin/auditLogs";
 import {
   retrieveSimilarDocuments,

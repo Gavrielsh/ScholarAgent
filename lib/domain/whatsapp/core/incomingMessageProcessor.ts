@@ -1,11 +1,11 @@
-import { recordBaselineRagMetrics } from "@/lib/domain/chat/agent/baseline";
-import { processBaselineQuery } from "@/lib/domain/chat/agent/baseline/orchestrator";
+import { processBaselineQuery } from "@/lib/domain/chat/agent";
+import { recordBaselineRagMetrics } from "@/lib/domain/chat/rag";
 import {
   evaluateInboundSafety,
   redactPii,
   type InboundSafetyDecision,
 } from "@/lib/security/guardrails";
-import type { ChatMessage } from "@/lib/domain/chat/agent/state";
+import type { ChatMessage } from "@/lib/domain/chat/state";
 import { lookupUserByPhone, type UserContext } from "@/lib/security/auth";
 import { appendChatEntries, readChatHistory } from "@/lib/domain/chat/session/history";
 import { buildBoundedConversationContext, truncateInboundMessage } from "@/lib/domain/chat/session/context";

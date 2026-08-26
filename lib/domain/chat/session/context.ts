@@ -1,4 +1,4 @@
-import type { ChatMessage } from "@/lib/domain/chat/agent/state";
+import type { ChatMessage } from "@/lib/domain/chat/state";
 import type { ChatHistoryEntry } from "@/lib/domain/chat/session/history";
 
 /** Conservative chars-per-token ratio for Hebrew/Latin mixed corpora. */

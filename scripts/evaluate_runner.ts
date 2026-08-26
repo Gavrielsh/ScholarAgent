@@ -39,7 +39,7 @@ import {
   type PermissionLevel,
   type UserContext,
 } from "@/lib/security/auth";
-import { runBaselineRagCore } from "@/lib/domain/chat/agent/baseline/index";
+import { runBaselineRagCore } from "@/lib/domain/chat/rag";
 import { getLlmAdapter } from "@/lib/domain/chat/llm/adapter";
 import type { LlmMessage } from "@/lib/domain/chat/llm/types";
 import {
