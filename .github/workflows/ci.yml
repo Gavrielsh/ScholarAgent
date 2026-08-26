@@ -1,0 +1,57 @@
+# Typecheck, lint, and unit tests for every PR and every push to main.
+#
+# The four steps below are exactly what a contributor runs locally, in the same
+# order, so a green run here means the same commands pass on a clean checkout.
+# They need no services: the suite is pure unit tests, with no Postgres, Redis,
+# or WhatsApp credentials involved.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A second push to the same branch makes the first run's result irrelevant.
+# Cancel it rather than paying for a queue of superseded runs. Never cancel on
+# main — those runs are the record of what the branch actually does.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Typecheck, lint, test
+    runs-on: ubuntu-latest
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 20 to match docker/Dockerfile and docker/Dockerfile.worker, so a
+      # version-specific failure cannot pass here and break the image build.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Each step runs even if an earlier one failed: a typecheck error and a
+      # failing test are usually independent, and seeing both in one run beats
+      # fixing them one round trip at a time.
+      - name: Typecheck
+        if: ${{ !cancelled() }}
+        run: npx tsc --noEmit
+
+      - name: Lint
+        if: ${{ !cancelled() }}
+        run: npm run lint
+
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: npm test
