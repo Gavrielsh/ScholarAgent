@@ -37,8 +37,12 @@ import type { KnowledgeChunk, PermissionLevel, UserContext } from "@/lib/securit
 import { runBaselineRagCore } from "@/lib/domain/chat/agent/baseline/index";
 import { getLlmAdapter } from "@/lib/domain/chat/llm/adapter";
 import type { LlmMessage } from "@/lib/domain/chat/llm/types";
-import { computeDls, type DlsResult } from "@/lib/core/metrics/dls";
-import { evaluateRagas, type RagasScores } from "@/lib/core/metrics/ragas";
+import {
+  computeDls,
+  evaluateRagas,
+  type DlsResult,
+  type RagasScores,
+} from "@/lib/core/telemetry";
 import {
   retrieveSimilarDocuments,
   retrieveSimilarDocumentsBypassRls,
