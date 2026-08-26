@@ -1,12 +1,12 @@
 import { Worker } from "bullmq";
 
 import { getQueueConnection } from "@/lib/core/queue/connection";
+import { parsePositiveInt } from "@/lib/core/env";
 import {
   currentAttempt,
   JobTimeoutError,
   LOCK_GRACE_MS,
   maxAttempts,
-  parsePositiveInt,
   runWithDeadline,
 } from "@/lib/core/queue/jobRuntime";
 import { isAbortError } from "@/lib/core/http/fetchWithTimeout";

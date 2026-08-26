@@ -1,4 +1,5 @@
-import { JobTimeoutError, parsePositiveInt, runWithDeadline } from "@/lib/core/queue/jobRuntime";
+import { parsePositiveInt } from "@/lib/core/env";
+import { JobTimeoutError, runWithDeadline } from "@/lib/core/queue/jobRuntime";
 
 describe("parsePositiveInt", () => {
   it("rejects zero, NaN, and negatives", () => {

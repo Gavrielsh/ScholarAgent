@@ -9,7 +9,8 @@ import {
   type DocumentChunkRecord,
 } from "@/lib/core/db";
 import { lookupUserByPhone } from "@/lib/security/auth/userRegistry";
-import { parsePositiveInt, TerminalNotifyError } from "@/lib/core/queue/jobRuntime";
+import { parsePositiveInt } from "@/lib/core/env";
+import { TerminalNotifyError } from "@/lib/core/queue/jobRuntime";
 import { abortableSleep, isAbortError, isHttpTimeoutError } from "@/lib/core/http/fetchWithTimeout";
 import { chunkText, type Chunk } from "@/lib/domain/ingestion/processor/chunker";
 import { buildChunkMetadata } from "@/lib/domain/ingestion/processor/chunkMetadata";

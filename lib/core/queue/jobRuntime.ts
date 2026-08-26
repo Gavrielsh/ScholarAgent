@@ -7,8 +7,6 @@
 
 import { logWarn } from "@/lib/core/logger";
 
-export { parseNonNegativeInt, parsePositiveInt } from "@/lib/core/env/parseEnv";
-
 export class JobTimeoutError extends Error {
   constructor(jobId: string, timeoutMs: number) {
     super(`Job ${jobId} exceeded its ${timeoutMs}ms deadline.`);

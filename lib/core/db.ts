@@ -8,7 +8,7 @@ import {
   type AccessLevel,
 } from "@/lib/core/db/accessLevel";
 import { logError, logWarn } from "@/lib/core/logger";
-import { parseNonNegativeInt, parsePositiveInt } from "@/lib/core/env/parseEnv";
+import { parseNonNegativeInt, parsePositiveInt } from "@/lib/core/env";
 
 // ---------------------------------------------------------------------------
 // Connection pools

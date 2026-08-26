@@ -7,7 +7,7 @@ import {
   parseJsonBody,
 } from "@/lib/core/http/fetchWithTimeout";
 import { logWarn } from "@/lib/core/logger";
-import { parsePositiveInt } from "@/lib/core/env/parseEnv";
+import { parsePositiveInt } from "@/lib/core/env";
 
 // Embeddings via Google AI Studio (Gemini embedding models).
 interface GeminiEmbeddingResponse {
