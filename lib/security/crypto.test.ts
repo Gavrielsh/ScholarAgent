@@ -1,7 +1,7 @@
 import {
   isWebhookSignatureRequired,
   verifyMetaSignature,
-} from "@/lib/security/crypto/verifySignature";
+} from "@/lib/security/crypto";
 
 describe("isWebhookSignatureRequired", () => {
   const original = {

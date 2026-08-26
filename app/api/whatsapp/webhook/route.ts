@@ -6,7 +6,6 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { timingSafeStringEqual } from "@/lib/security/auth/timingSafe";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
 import { parsePositiveInt } from "@/lib/core/env";
 import { enqueueDocumentIngestion } from "@/lib/domain/ingestion/queue/documentIngestionQueue";
@@ -25,8 +24,9 @@ import { sendWhatsAppTextMessage } from "@/lib/domain/whatsapp/core/sendMessage"
 import {
   isWebhookSignatureRequired,
   META_SIGNATURE_HEADER,
+  timingSafeStringEqual,
   verifyMetaSignature,
-} from "@/lib/security/crypto/verifySignature";
+} from "@/lib/security/crypto";
 import type { WhatsAppWebhookPayload } from "@/lib/domain/whatsapp/core/types";
 
 export const runtime = "nodejs";

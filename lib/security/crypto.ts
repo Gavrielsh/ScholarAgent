@@ -1,11 +1,31 @@
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+
+import { logWarn } from "@/lib/core/logger";
+
+// ---------------------------------------------------------------------------
+// Constant-time comparison
+// ---------------------------------------------------------------------------
+
+/**
+ * Constant-time equality for secrets of unknown length.
+ *
+ * `crypto.timingSafeEqual` throws on mismatched buffer sizes, so both sides are
+ * hashed to SHA-256 first. The comparison then always runs over 32 bytes.
+ */
+export function timingSafeStringEqual(left: string, right: string): boolean {
+  const leftHash = createHash("sha256").update(left).digest();
+  const rightHash = createHash("sha256").update(right).digest();
+  return timingSafeEqual(leftHash, rightHash);
+}
+
+// ---------------------------------------------------------------------------
+// Meta webhook signature verification
+// ---------------------------------------------------------------------------
+
 // Meta signs every webhook POST with an HMAC-SHA256 of the raw request body,
 // keyed by the app secret, delivered in the X-Hub-Signature-256 header.
 // Verification must run against the RAW body bytes — re-serialising the parsed
 // JSON changes key order/whitespace and will never match.
-
-import { createHmac, timingSafeEqual } from "node:crypto";
-
-import { logWarn } from "@/lib/core/logger";
 
 export const META_SIGNATURE_HEADER = "x-hub-signature-256";
 
