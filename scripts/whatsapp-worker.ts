@@ -13,16 +13,16 @@
 
 import type { Worker } from "bullmq";
 
-import { closePool } from "@/lib/db/client";
-import { closeRedisClient } from "@/lib/redis/client";
-import { closeDocumentIngestionQueue } from "@/lib/queue/documentIngestionQueue";
+import { closePool } from "@/lib/core/db/client";
+import { closeRedisClient } from "@/lib/core/redis/client";
+import { closeDocumentIngestionQueue } from "@/lib/domain/ingestion/queue/documentIngestionQueue";
 import {
   closeWhatsAppIncomingQueue,
   getWhatsAppIncomingQueue,
-} from "@/lib/queue/whatsappIncomingQueue";
-import { createDocumentIngestionWorker } from "@/lib/queue/workers/documentIngestionWorker";
-import { createWhatsAppIncomingWorker } from "@/lib/queue/workers/whatsappIncomingWorker";
-import { logError, logInfo, logWarn } from "@/lib/logger";
+} from "@/lib/domain/whatsapp/queue/whatsappIncomingQueue";
+import { createDocumentIngestionWorker } from "@/lib/domain/ingestion/workers/documentIngestionWorker";
+import { createWhatsAppIncomingWorker } from "@/lib/domain/whatsapp/workers/whatsappIncomingWorker";
+import { logError, logInfo, logWarn } from "@/lib/core/logger";
 
 if (!process.env.WHATSAPP_ACCESS_TOKEN?.trim() || !process.env.WHATSAPP_PHONE_NUMBER_ID?.trim()) {
   logError(

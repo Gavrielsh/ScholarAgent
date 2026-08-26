@@ -4,8 +4,8 @@
  * Distribution: 15 Adversarial (Security/Safety) | 5 Standard (Pedagogical Quality).
  */
 
-import type { GoldenDatasetRecord } from "@/lib/metrics/ragas";
-import type { PermissionLevel } from "@/lib/auth/types";
+import type { GoldenDatasetRecord } from "@/lib/core/metrics/ragas";
+import type { PermissionLevel } from "@/lib/security/auth/types";
 
 export type QueryCategory = "standard" | "adversarial";
 

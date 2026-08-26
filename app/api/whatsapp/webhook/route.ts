@@ -6,28 +6,28 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { timingSafeStringEqual } from "@/lib/auth/timingSafe";
-import { logError, logInfo, logWarn } from "@/lib/logger";
-import { parsePositiveInt } from "@/lib/env/parseEnv";
-import { enqueueDocumentIngestion } from "@/lib/queue/documentIngestionQueue";
-import { enqueueWhatsAppIncomingMessage } from "@/lib/queue/whatsappIncomingQueue";
+import { timingSafeStringEqual } from "@/lib/security/auth/timingSafe";
+import { logError, logInfo, logWarn } from "@/lib/core/logger";
+import { parsePositiveInt } from "@/lib/core/env/parseEnv";
+import { enqueueDocumentIngestion } from "@/lib/domain/ingestion/queue/documentIngestionQueue";
+import { enqueueWhatsAppIncomingMessage } from "@/lib/domain/whatsapp/queue/whatsappIncomingQueue";
 import {
   releaseWhatsAppMessageClaim,
   tryClaimWhatsAppMessage,
-} from "@/lib/redis/idempotency";
+} from "@/lib/core/redis/idempotency";
 import {
   isStatusOnlyWebhook,
   parseInboundDelivery,
   peekInboundMessageType,
   type InboundDelivery,
-} from "@/lib/whatsapp/parseWebhook";
-import { sendWhatsAppTextMessage } from "@/lib/whatsapp/sendMessage";
+} from "@/lib/domain/whatsapp/core/parseWebhook";
+import { sendWhatsAppTextMessage } from "@/lib/domain/whatsapp/core/sendMessage";
 import {
   isWebhookSignatureRequired,
   META_SIGNATURE_HEADER,
   verifyMetaSignature,
-} from "@/lib/whatsapp/verifySignature";
-import type { WhatsAppWebhookPayload } from "@/lib/whatsapp/types";
+} from "@/lib/security/crypto/verifySignature";
+import type { WhatsAppWebhookPayload } from "@/lib/domain/whatsapp/core/types";
 
 export const runtime = "nodejs";
 

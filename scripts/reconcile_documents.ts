@@ -57,14 +57,14 @@ import {
   markDocumentReconcileFailure,
   type DocumentChunkRecord,
   type DocumentRegistryRow,
-} from "@/lib/db/pgvector";
-import { closePool } from "@/lib/db/client";
-import { chunkText, type Chunk } from "@/lib/ingestion/chunker";
-import { embedTextBatch } from "@/lib/ingestion/embeddings";
-import { redactPii } from "@/lib/ingestion/piiRedact";
-import { extractTextFromUpload } from "@/lib/ingestion/uploader";
-import { logError, logInfo, logWarn } from "@/lib/logger";
-import { downloadWhatsAppMedia } from "@/lib/whatsapp/mediaDownload";
+} from "@/lib/core/db/pgvector";
+import { closePool } from "@/lib/core/db/client";
+import { chunkText, type Chunk } from "@/lib/domain/ingestion/processor/chunker";
+import { embedTextBatch } from "@/lib/domain/ingestion/processor/embeddings";
+import { redactPii } from "@/lib/security/privacy/piiRedact";
+import { extractTextFromUpload } from "@/lib/domain/ingestion/processor/uploader";
+import { logError, logInfo, logWarn } from "@/lib/core/logger";
+import { downloadWhatsAppMedia } from "@/lib/domain/whatsapp/core/mediaDownload";
 
 // ---------------------------------------------------------------------------
 // Configuration
