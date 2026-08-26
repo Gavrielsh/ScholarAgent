@@ -38,8 +38,8 @@ export const USER_DELETED_MESSAGE = "המשתמש הוסר בהצלחה";
 
 export const ADD_FORMAT_RETRY =
   "פורמט לא תקין. אנא נסה שוב לפי הפורמט:\nשם משתמש מספר טלפון רמת הרשאה";
-  export const ADD_INPUT_EXAMPLE = "ישראל ישראלי, 0541234567, 0";
-  export const ADD_NOT_ENOUGH_ARGS_MESSAGE =
+export const ADD_INPUT_EXAMPLE = "ישראל ישראלי, 0541234567, 0";
+export const ADD_NOT_ENOUGH_ARGS_MESSAGE =
   `חסרים פרטים. אנא הזן שם, מספר טלפון ורמת הרשאה.\nדוגמה לקלט תקין: ${ADD_INPUT_EXAMPLE}`;
 export const ADD_INVALID_LEVEL_MESSAGE =
   `רמת ההרשאה לא זוהתה. יש להזין ספרה בין 0 ל-3.\nדוגמה לקלט תקין: ${ADD_INPUT_EXAMPLE}`;
@@ -101,6 +101,33 @@ const BIDI_CONTROL_CHARS = /[\u200E\u200F\u202A-\u202E]/g;
 
 function stripBidiControls(value: string): string {
   return value.replace(BIDI_CONTROL_CHARS, "");
+}
+
+/**
+ * Opt-in forensic logging for the add/delete parsers, off unless
+ * USER_MGMT_DEBUG=1.
+ *
+ * Exists because this flow is the one place where the pipeline hands the
+ * handlers a string that differs from what the admin typed: everything upstream
+ * of the orchestrator runs on PII-redacted text (see `redactPii` in
+ * lib/ingestion/piiRedact.ts), so a parse failure here is far more often a
+ * mismatch between the two strings than a genuinely malformed input. The trace
+ * prints both, with code points, so that is visible in one log line instead of
+ * being re-derived from a unit test that never sees the redacted form.
+ *
+ * Logs raw admin input verbatim — keep it off outside of an active
+ * investigation.
+ */
+const USER_MGMT_DEBUG = process.env.USER_MGMT_DEBUG === "1";
+
+function describeRaw(label: string, value: string): Record<string, unknown> {
+  return {
+    [`${label}_json`]: JSON.stringify(value),
+    [`${label}_len`]: value.length,
+    [`${label}_codepoints`]: Array.from(value).map(
+      (char) => `${char}:U+${char.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`
+    ),
+  };
 }
 
 export function isUserManagementButtonId(buttonId: string | undefined): boolean {
@@ -168,46 +195,99 @@ export function parseUserManagementMenuChoice(
   return null;
 }
 
+/** `0`, `3`, `L1`, `l0` — the level as admins actually type it. */
+const LEVEL_TOKEN = /^L?([0-3])$/i;
+
+/**
+ * Parses "name, phone, level" from one free-text WhatsApp line.
+ *
+ * Tolerant of both separators on purpose: ADD_USER_PROMPT shows commas,
+ * ADD_FORMAT_RETRY shows spaces, and `tokenize` splits on either, so an admin
+ * who mixes them still gets through. Field *order* is not fixed either — the
+ * phone is identified by being the only token that normalises to a phone
+ * number, and the level by matching LEVEL_TOKEN, so whatever is left is the
+ * name. That is what lets "אח שלי 1 0543118077" and "L2 אח שלי 0543118077"
+ * both resolve.
+ *
+ * The checks run phone → level → name so the returned reason names the field
+ * the admin actually has to fix.
+ */
 export function parseAddUserInput(raw: string): ParseAddUserResult {
-  // חיתוך המחרוזת לפי פסיקים במקום רווחים
-  const parts = raw.split(",");
-  
-  if (parts.length !== 3) {
-    return { success: false, reason: "NOT_ENOUGH_ARGS" };
+  const tokens = tokenize(raw);
+
+  const trace = (
+    result: ParseAddUserResult,
+    meta: Record<string, unknown>
+  ): ParseAddUserResult => {
+    if (USER_MGMT_DEBUG) {
+      logInfo("add_user_parse_trace", "parseAddUserInput result.", {
+        ...describeRaw("raw", raw),
+        tokens,
+        phoneCandidate: null,
+        normalizedPhone: null,
+        levelCandidate: null,
+        ...meta,
+        outcome: result.success ? "SUCCESS" : result.reason,
+      });
+    }
+    return result;
+  };
+
+  if (tokens.length < 3) {
+    return trace({ success: false, reason: "NOT_ENOUGH_ARGS" }, {});
   }
 
-  const rawName = parts[0];
-  const rawPhone = parts[1];
-  const rawLevel = parts[2];
-
-  // 1. בדיקת שם משתמש
-  const name = rawName.trim();
-  if (!name) {
-    return { success: false, reason: "MISSING_NAME" };
-  }
-
-  // 2. בדיקת טלפון
-  const phone = normalizePhoneNumber(rawPhone);
-  if (!phone) {
-    return { success: false, reason: "MISSING_PHONE" };
-  }
-
-  // 3. בדיקת רמת הרשאה
-  let parsedLevel: PermissionLevel | null = null;
-  const cleanLevel = stripBidiControls(rawLevel).toUpperCase().replace("L", "").trim();
-  
-  if (/^[0-3]$/.test(cleanLevel)) {
-    const num = Number.parseInt(cleanLevel, 10);
-    if (isPermissionLevel(num)) {
-      parsedLevel = num;
+  // Phone first. `normalizePhoneNumber` strips every non-digit, so this is the
+  // one test that cannot be fooled by a Hebrew name or an L-prefixed level, and
+  // it is immune to the bidi marks WhatsApp injects around number runs.
+  let phoneIndex = -1;
+  let phone: string | null = null;
+  for (let i = 0; i < tokens.length; i++) {
+    const candidate = normalizePhoneNumber(tokens[i]);
+    if (candidate) {
+      phoneIndex = i;
+      phone = candidate;
+      break;
     }
   }
 
-  if (parsedLevel === null) {
-    return { success: false, reason: "INVALID_LEVEL" };
+  if (phoneIndex === -1 || !phone) {
+    return trace({ success: false, reason: "MISSING_PHONE" }, {});
   }
 
-  return { success: true, data: { name, phone, level: parsedLevel } };
+  const phoneMeta = { phoneCandidate: tokens[phoneIndex], normalizedPhone: phone };
+
+  // Scanned from the end: the canonical format puts the level last, so a bare
+  // 0–3 sitting inside the name cannot steal it.
+  let levelIndex = -1;
+  let level: PermissionLevel | null = null;
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    if (i === phoneIndex) continue;
+    const match = LEVEL_TOKEN.exec(stripBidiControls(tokens[i]));
+    if (!match) continue;
+    const parsed = Number.parseInt(match[1], 10);
+    if (!isPermissionLevel(parsed)) continue;
+    levelIndex = i;
+    level = parsed;
+    break;
+  }
+
+  if (levelIndex === -1 || level === null) {
+    return trace({ success: false, reason: "INVALID_LEVEL" }, phoneMeta);
+  }
+
+  const name = tokens
+    .filter((_, index) => index !== phoneIndex && index !== levelIndex)
+    .join(" ")
+    .trim();
+
+  const meta = { ...phoneMeta, levelCandidate: tokens[levelIndex] };
+
+  if (!name) {
+    return trace({ success: false, reason: "MISSING_NAME" }, meta);
+  }
+
+  return trace({ success: true, data: { name, phone, level } }, meta);
 }
 
 export function parseDeleteUserInput(raw: string): ParsedDeleteUserInput | null {
@@ -284,10 +364,30 @@ function formatUserTable(
 async function handleAddUserInput(
   adminPhone: string,
   query: string,
+  commandText: string | undefined,
   requesterLevel: PermissionLevel,
   session: AdminSession
 ): Promise<UserManagementFlowResult> {
-  const parsed = parseAddUserInput(query);
+  // `query` has been through `redactPii`, which rewrites any Israeli phone
+  // number to "[PHONE_REDACTED]" — parsing it can only ever yield MISSING_PHONE.
+  // `commandText` is the same message before redaction, supplied for exactly
+  // this reason (lib/whatsapp/incomingMessageProcessor.ts). It falls back to
+  // `query` for callers outside the WhatsApp pipeline, such as the evaluator.
+  const parsed = parseAddUserInput(commandText ?? query);
+
+  if (USER_MGMT_DEBUG) {
+    logInfo("add_user_branch_trace", "handleAddUserInput branch selected.", {
+      adminPhone,
+      ...describeRaw("query", query),
+      ...describeRaw("commandText", commandText ?? ""),
+      usedCommandText: commandText !== undefined,
+      outcome: parsed.success ? "SUCCESS" : parsed.reason,
+      replyConstant: parsed.success ? null : ADD_PARSE_ERROR_MESSAGES[parsed.reason],
+      // Echoed so a log line proves which build produced it.
+      addInputExample: ADD_INPUT_EXAMPLE,
+    });
+  }
+
   if (!parsed.success) {
     return failInvalid(adminPhone, session, ADD_PARSE_ERROR_MESSAGES[parsed.reason]);
   }
@@ -312,10 +412,23 @@ async function handleAddUserInput(
 async function handleDeleteUserInput(
   adminPhone: string,
   query: string,
+  commandText: string | undefined,
   requesterLevel: PermissionLevel,
   session: AdminSession
 ): Promise<UserManagementFlowResult> {
-  const parsed = parseDeleteUserInput(query);
+  // Same redaction problem as handleAddUserInput — see the note there.
+  const parsed = parseDeleteUserInput(commandText ?? query);
+
+  if (USER_MGMT_DEBUG) {
+    logInfo("delete_user_branch_trace", "handleDeleteUserInput branch selected.", {
+      adminPhone,
+      ...describeRaw("query", query),
+      ...describeRaw("commandText", commandText ?? ""),
+      usedCommandText: commandText !== undefined,
+      outcome: parsed ? "SUCCESS" : "PARSE_FAILED",
+    });
+  }
+
   if (!parsed) return failInvalid(adminPhone, session, DELETE_FORMAT_RETRY);
 
   const requesterPhone = normalizePhoneNumber(adminPhone) ?? adminPhone;
@@ -370,7 +483,16 @@ async function applyUserManagementChoice(
 
 export async function resolveUserManagementFlow(input: {
   adminPhone: string;
+  /** PII-redacted text. Safe to log; used for menu/heuristic matching. */
   query: string;
+  /**
+   * The same message *before* redaction, for the deterministic add/delete
+   * parsers only — a redacted phone number carries no digits, so parsing
+   * `query` can never succeed. Never logged (outside USER_MGMT_DEBUG),
+   * persisted, traced, or sent to an LLM. Optional so non-WhatsApp callers
+   * keep working.
+   */
+  commandText?: string;
   buttonId?: string;
   requesterPermissionLevel: PermissionLevel;
   signal?: AbortSignal | null;
@@ -438,6 +560,7 @@ export async function resolveUserManagementFlow(input: {
     return handleAddUserInput(
       input.adminPhone,
       input.query,
+      input.commandText,
       input.requesterPermissionLevel,
       session
     );
@@ -447,6 +570,7 @@ export async function resolveUserManagementFlow(input: {
     return handleDeleteUserInput(
       input.adminPhone,
       input.query,
+      input.commandText,
       input.requesterPermissionLevel,
       session
     );

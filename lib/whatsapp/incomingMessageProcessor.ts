@@ -39,7 +39,17 @@ export interface IncomingMessageContext {
 
 /**
  * Everything the pipeline is allowed to touch after redaction.
- * There is intentionally no field holding the original message text.
+ *
+ * `commandText` is the single, deliberate exception to "nothing downstream sees
+ * the original text", and its use is confined to the deterministic
+ * user-management parsers. It exists because `redactPii` rewrites every phone
+ * number to "[PHONE_REDACTED]", so an admin typing "name, 0541234567, L1" into
+ * the add-user prompt produced a string with no digits left in it and the flow
+ * could never succeed. The phone number is that flow's entire payload and is
+ * written to `users.phone_number` moments later, so masking it on the way in
+ * protected nothing. Everything that redaction actually exists for — chat
+ * history, logs, traces, the safety gate, retrieval, the LLM — still runs on
+ * `redactedText`/`queryText`.
  */
 interface SanitizedInbound {
   senderId: string;
@@ -48,6 +58,11 @@ interface SanitizedInbound {
   redactedText: string;
   /** What retrieval/the LLM should answer — may be a de-identified rewrite. */
   queryText: string;
+  /**
+   * Truncated but NOT redacted. Admin-command parsing only — must never be
+   * persisted, logged, traced, or sent to an LLM.
+   */
+  commandText: string;
   buttonId?: string;
 }
 
@@ -118,6 +133,8 @@ function sanitizeInbound(event: ParsedInboundEvent): SanitizedInbound {
     messageId: event.messageId,
     redactedText,
     queryText: redactedText,
+    // Same 8k cap, without the redaction pass. See SanitizedInbound.
+    commandText: truncated,
     buttonId: event.buttonId,
   };
 }
@@ -225,6 +242,7 @@ async function handleInboundMessage(
   const processResult = await processBaselineQuery({
     senderPhone: senderId,
     query: inbound.queryText,
+    commandText: inbound.commandText,
     userContext,
     priorMessages,
     buttonId: inbound.buttonId,

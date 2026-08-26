@@ -15,6 +15,7 @@ import {
   parseUserManagementMenuChoice,
 } from "@/lib/agent/baseline/userManagementHandlers";
 import { normalizePhoneNumber } from "@/lib/auth/userRegistry";
+import { redactPii } from "@/lib/ingestion/piiRedact";
 import { chunkWhatsAppText, WHATSAPP_TEXT_CHAR_LIMIT } from "@/lib/whatsapp/formatting";
 
 describe("normalizePhoneNumber", () => {
@@ -134,6 +135,65 @@ describe("parseAddUserInput / parseDeleteUserInput", () => {
     expect(ADD_INVALID_LEVEL_MESSAGE).toContain("0 ל-3");
     expect(ADD_INVALID_LEVEL_MESSAGE).toContain(ADD_INPUT_EXAMPLE);
     expect(ADD_MISSING_PHONE_MESSAGE).toContain(ADD_INPUT_EXAMPLE);
+  });
+});
+
+/**
+ * The gap that let the add-user flow ship broken.
+ *
+ * Every other test in this file calls the parsers with the text the admin
+ * typed. The WhatsApp pipeline does not: sanitizeInbound runs redactPii first,
+ * which rewrites any phone number to "[PHONE_REDACTED]". So the parsers passed
+ * in CI and returned MISSING_PHONE on every single real message. These tests
+ * compose the two stages the way production does, and pin the contract that the
+ * handlers must parse the pre-redaction text.
+ */
+describe("redaction boundary", () => {
+  const raw = "ליאור, 0543118077, L1";
+
+  it("destroys the phone number before the parser can see it", () => {
+    expect(redactPii(raw)).toBe("ליאור, [PHONE_REDACTED], L1");
+    expect(parseAddUserInput(redactPii(raw))).toEqual({
+      success: false,
+      reason: "MISSING_PHONE",
+    });
+  });
+
+  it("parses the same message when the pre-redaction text is used", () => {
+    expect(parseAddUserInput(raw)).toEqual({
+      success: true,
+      data: { name: "ליאור", phone: "972543118077", level: 1 },
+    });
+  });
+
+  it("redacts every phone shape the parsers are expected to accept", () => {
+    for (const input of [
+      "יוסי כהן, 0501234567, 2",
+      "דנה, +972541234567, 1",
+      "דנה, 054-311-8077, 1",
+      "דנה לוי 0543118077 3",
+    ]) {
+      expect(redactPii(input)).toContain("[PHONE_REDACTED]");
+      expect(parseAddUserInput(redactPii(input))).toEqual({
+        success: false,
+        reason: "MISSING_PHONE",
+      });
+      expect(parseAddUserInput(input).success).toBe(true);
+    }
+  });
+
+  it("breaks the delete flow the same way", () => {
+    expect(parseDeleteUserInput(redactPii("ליאור 0543118077"))).toBeNull();
+    expect(parseDeleteUserInput("ליאור 0543118077")).toEqual({
+      name: "ליאור",
+      phone: "972543118077",
+    });
+  });
+
+  it("still masks the phone in text bound for history, logs, and the LLM", () => {
+    // The fix must not have weakened redaction itself — only routed around it
+    // for the one deterministic parser that needs the digits.
+    expect(redactPii(raw)).not.toContain("0543118077");
   });
 });
 

@@ -47,6 +47,14 @@ export interface BaselineProcessInput {
    * lib/whatsapp/incomingMessageProcessor.ts. Never raw webhook text.
    */
   query: string;
+  /**
+   * The same message before `redactPii`, for deterministic admin-command
+   * parsing only. Reaches nothing but `resolveUserManagementFlow`: not
+   * retrieval, not the LLM, not history, not the metrics sink. Redaction turns
+   * every phone number into "[PHONE_REDACTED]", which is unparseable by the
+   * add/delete user flows — that is the only reason this field exists.
+   */
+  commandText?: string;
   userContext: UserContext;
   priorMessages?: ChatMessage[];
   buttonId?: string;
@@ -79,7 +87,15 @@ function sweepQueryLexically(query: string, userContext: UserContext): LexicalVe
 export async function processBaselineQuery(
   input: BaselineProcessInput
 ): Promise<BaselineProcessResult> {
-  const { query, userContext, priorMessages = [], buttonId, senderPhone, signal } = input;
+  const {
+    query,
+    commandText,
+    userContext,
+    priorMessages = [],
+    buttonId,
+    senderPhone,
+    signal,
+  } = input;
 
   // Defence in depth. The processor is the designated safety gate, but this
   // function is also reachable from scripts/evaluate_runner.ts and any future
@@ -132,6 +148,7 @@ export async function processBaselineQuery(
     const managed = await resolveUserManagementFlow({
       adminPhone: senderPhone,
       query,
+      commandText,
       buttonId,
       requesterPermissionLevel: userContext.permissionLevel,
       signal,

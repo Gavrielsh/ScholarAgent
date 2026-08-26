@@ -29,8 +29,8 @@ COPY scripts ./scripts
 # `--import tsx` rather than `--require ts-node/register`: the CJS `--require`
 # hook does not cover Node's ESM resolver, which is the path actually taken here,
 # so the container crash-looped on `Unknown file extension ".ts"`. tsx registers
-# both hooks and resolves the `@/*` tsconfig paths natively — which is also why
-# the old `tsconfig-paths/register` is gone; that package is not even a
-# dependency of this project. Keeps node as PID 1, so signal handling is
-# unaffected. This mirrors how the worker is run locally.
+# both hooks and resolves the `@/*` tsconfig paths natively, so no separate
+# `tsconfig-paths/register` is needed. Keeps node as PID 1, so signal handling is
+# unaffected. `npm run worker:whatsapp` uses this same command, so a bug that
+# reproduces locally reproduces here.
 CMD ["node", "--import", "tsx", "scripts/whatsapp-worker.ts"]
