@@ -3,7 +3,7 @@ import {
   containsMandatoryHandoffSignals,
   MANDATORY_HANDOFF_RESPONSE_HE,
   PRIVACY_BLOCK_RESPONSE_HE,
-} from "@/lib/security/guardrails/safetySignals";
+} from "@/lib/security/guardrails";
 
 describe("classifySafetySignals", () => {
   it("classifies a valid educational query with zero risk", () => {

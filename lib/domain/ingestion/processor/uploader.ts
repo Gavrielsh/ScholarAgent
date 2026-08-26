@@ -10,7 +10,7 @@ import { insertDocumentWithChunks } from "@/lib/core/db";
 import { buildChunkMetadata } from "@/lib/domain/ingestion/processor/chunkMetadata";
 import { chunkText, type ChunkOptions } from "@/lib/domain/ingestion/processor/chunker";
 import { embedTextBatch } from "@/lib/domain/ingestion/processor/embeddings";
-import { redactPii } from "@/lib/security/privacy/piiRedact";
+import { redactPii } from "@/lib/security/guardrails";
 
 // ---------------------------------------------------------------------------
 // Public surface

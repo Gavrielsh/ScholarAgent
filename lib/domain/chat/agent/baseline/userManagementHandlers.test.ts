@@ -15,7 +15,7 @@ import {
   parseUserManagementMenuChoice,
 } from "@/lib/domain/chat/agent/baseline/userManagementHandlers";
 import { normalizePhoneNumber } from "@/lib/security/auth";
-import { redactPii } from "@/lib/security/privacy/piiRedact";
+import { redactPii } from "@/lib/security/guardrails";
 import { chunkWhatsAppText, WHATSAPP_TEXT_CHAR_LIMIT } from "@/lib/domain/whatsapp/core/formatting";
 
 describe("normalizePhoneNumber", () => {

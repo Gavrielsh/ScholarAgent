@@ -1,4 +1,4 @@
-import { redactPii } from "@/lib/security/privacy/piiRedact";
+import { redactPii } from "@/lib/security/guardrails";
 
 export interface Chunk {
   index: number;

@@ -20,4 +20,4 @@ export {
   PRIVACY_BLOCK_RESPONSE_HE,
   type InboundSafetyDecision,
   type SafetySignals,
-} from "@/lib/security/guardrails/safetySignals";
+} from "@/lib/security/guardrails";

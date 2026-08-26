@@ -21,7 +21,7 @@ import {
 import {
   containsMandatoryHandoffSignals,
   MANDATORY_HANDOFF_RESPONSE_HE,
-} from "@/lib/security/guardrails/safetySignals";
+} from "@/lib/security/guardrails";
 import {
   clearAdminSession,
   getAdminSession,

@@ -82,7 +82,7 @@ export function isElevatedRole(level: PermissionLevel): boolean {
  * every tier without exception: an L1 training manager relaying a child's
  * message is one of the likeliest paths for a crisis to reach this system, and
  * the previous `shouldSkipGuardrails` silently excluded exactly that case.
- * See `evaluateInboundSafety` in lib/security/guardrails/safetySignals.ts.
+ * See `evaluateInboundSafety` in lib/security/guardrails.ts.
  */
 export function shouldSkipPrivacyGuardrails(user: UserContext): boolean {
   return isElevatedRole(user.permissionLevel);

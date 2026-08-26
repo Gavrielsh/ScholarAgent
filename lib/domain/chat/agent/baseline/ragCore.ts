@@ -39,7 +39,7 @@ function isConversationMessage(message: ChatMessage): message is ChatMessage & {
 }
 
 export interface BaselineRagInput {
-  /** Redacted + safety-screened. See lib/security/guardrails/safetySignals.ts. */
+  /** Redacted + safety-screened. See lib/security/guardrails.ts. */
   query: string;
   userContext: UserContext;
   priorMessages?: ChatMessage[];

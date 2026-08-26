@@ -18,7 +18,7 @@ import { abortableSleep, isAbortError, isHttpTimeoutError } from "@/lib/core/htt
 import { chunkText, type Chunk } from "@/lib/domain/ingestion/processor/chunker";
 import { buildChunkMetadata } from "@/lib/domain/ingestion/processor/chunkMetadata";
 import { embedTextBatch } from "@/lib/domain/ingestion/processor/embeddings";
-import { redactPii } from "@/lib/security/privacy/piiRedact";
+import { redactPii } from "@/lib/security/guardrails";
 import { extractTextFromUpload } from "@/lib/domain/ingestion/processor/uploader";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
 import {
