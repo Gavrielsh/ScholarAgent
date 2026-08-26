@@ -9,7 +9,7 @@ import {
   parsePositiveInt,
   runWithDeadline,
 } from "@/lib/core/queue/jobRuntime";
-import { releaseWhatsAppMessageClaim } from "@/lib/core/redis/idempotency";
+import { releaseWhatsAppMessageClaim } from "@/lib/core/redis";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
 import { isAbortError } from "@/lib/core/http/fetchWithTimeout";
 import {

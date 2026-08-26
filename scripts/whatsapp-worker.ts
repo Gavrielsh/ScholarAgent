@@ -14,7 +14,7 @@
 import type { Worker } from "bullmq";
 
 import { closePool } from "@/lib/core/db";
-import { closeRedisClient } from "@/lib/core/redis/client";
+import { closeRedisClient } from "@/lib/core/redis";
 import { closeDocumentIngestionQueue } from "@/lib/domain/ingestion/queue/documentIngestionQueue";
 import {
   closeWhatsAppIncomingQueue,

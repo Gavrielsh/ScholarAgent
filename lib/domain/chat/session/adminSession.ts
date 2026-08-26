@@ -2,7 +2,7 @@ import {
   deleteSessionValue,
   getSessionValue,
   setSessionValue,
-} from "@/lib/core/redis/jsonSession";
+} from "@/lib/core/redis";
 
 export type AdminSessionMode =
   | "awaiting_menu_choice"

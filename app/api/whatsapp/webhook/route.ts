@@ -14,7 +14,7 @@ import { enqueueWhatsAppIncomingMessage } from "@/lib/domain/whatsapp/queue/what
 import {
   releaseWhatsAppMessageClaim,
   tryClaimWhatsAppMessage,
-} from "@/lib/core/redis/idempotency";
+} from "@/lib/core/redis";
 import {
   isStatusOnlyWebhook,
   parseInboundDelivery,

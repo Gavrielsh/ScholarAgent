@@ -11,7 +11,7 @@ import {
 } from "@/lib/core/queue/jobRuntime";
 import { isAbortError } from "@/lib/core/http/fetchWithTimeout";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
-import { releaseWhatsAppMessageClaim } from "@/lib/core/redis/idempotency";
+import { releaseWhatsAppMessageClaim } from "@/lib/core/redis";
 import { processDocumentIngestion } from "@/lib/domain/ingestion/processor/documentIngestionProcessor";
 import { markMessageReadAndTyping } from "@/lib/domain/whatsapp/core/messaging";
 import type { ParsedInboundDocumentEvent } from "@/lib/domain/whatsapp/core/types";

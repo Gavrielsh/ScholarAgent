@@ -3,7 +3,7 @@ import {
   expireSessionValue,
   getSessionValue,
   setSessionValue,
-} from "@/lib/core/redis/jsonSession";
+} from "@/lib/core/redis";
 
 /**
  * ADMIN_ANALYTICS_MODE session flag for L0 admins who just received a chat-history
