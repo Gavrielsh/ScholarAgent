@@ -43,7 +43,9 @@ export function matchesUserManagementHeuristic(query: string): boolean {
 // Deliberately whole-message matches (anchored ^...$): an admin's analytics
 // follow-up question might legitimately contain the word "exit"/"יציאה" mid-sentence
 // (e.g. "מי יצא מהיסטוריית השיחה?"), so only a bare exit command should short-circuit.
-const ANALYTICS_EXIT_HEURISTICS: RegExp[] = [/^\s*(cancel|exit|בטל|ביטול|יציאה|צא)\s*$/i];
+const ANALYTICS_EXIT_HEURISTICS: RegExp[] = [
+  /^\s*(cancel|exit|בטל|ביטול|יציאה|צא|חזור)\s*$/i,
+];
 
 /**
  * Cheap lexical check for an explicit exit from ADMIN_ANALYTICS_MODE, tried before

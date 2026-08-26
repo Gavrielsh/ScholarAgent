@@ -12,13 +12,16 @@ import {
   clearAdminSession,
   getAdminSession,
   isUserManagementSessionMode,
+  MAX_INVALID_ATTEMPTS,
+  recordInvalidAttempt,
+  SESSION_ABANDONED_MESSAGE,
   setAdminSession,
 } from "@/lib/chat/adminSession";
-import { logError } from "@/lib/logger";
+import { logError, logInfo } from "@/lib/logger";
 import { formatWhatsAppMarkdown } from "@/lib/whatsapp/formatting";
 import { sendWhatsAppInteractiveButtons } from "@/lib/whatsapp/messaging";
 
-import { resolveFastModel } from "./intentRouter";
+import { matchesAdminAnalyticsExitCommand, resolveFastModel } from "./intentRouter";
 
 const L0_BUTTON_DAILY = "l0_daily_summary";
 const L0_BUTTON_SPECIFIC = "l0_specific_user";
@@ -28,9 +31,53 @@ const STAFF_ONLY_SUMMARY_PROMPT =
 const FULL_SCOPE_SUMMARY_PROMPT =
   "סכם את אינטראקציות היום עם כל המשתמשים (L0 עד L3) במשפט אחד בלבד — פסקה אחת קצרה בעברית, ללא רשימות.";
 
+const L0_SPECIFIC_USER_PROMPT =
+  "הקלד/י את שם המשתמש (כפי שמופיע במערכת) כדי לקבל את היסטוריית השיחה שלו להיום.";
+const L0_MENU_RETRY_MESSAGE =
+  "בחירה לא מזוהה. הקלד/י 1 לסיכום יומי, 2 למשתמש ספציפי, או ביטול ליציאה.";
+const L0_MENU_CANCELLED_MESSAGE = "הפעולה בוטלה.";
+const L0_UNKNOWN_BUTTON_MESSAGE = "בחירה לא מזוהה. שלח שוב בקשה להיסטוריית שיחות.";
+
+export type L0MenuChoice = "daily" | "specific" | "cancel";
+
+/**
+ * Maps a button tap OR a typed reply ("1", "2", button title) to a menu action.
+ * WhatsApp clients that cannot render reply-buttons show a numbered list; users
+ * then type the number instead of tapping. That text must not fall through to RAG.
+ */
+export function parseL0MenuChoice(query: string, buttonId?: string): L0MenuChoice | null {
+  if (buttonId === L0_BUTTON_DAILY) return "daily";
+  if (buttonId === L0_BUTTON_SPECIFIC) return "specific";
+
+  const text = query.trim();
+  if (!text) return null;
+  if (matchesAdminAnalyticsExitCommand(text)) return "cancel";
+
+  if (
+    /^\s*1[\.)]?\s*$/.test(text) ||
+    /^\s*1[\.)]?\s*(?:סיכום\s*יומי|daily\s*summary)\s*$/i.test(text) ||
+    /^\s*(?:סיכום\s*יומי|daily\s*summary)\s*$/i.test(text) ||
+    text === L0_BUTTON_DAILY
+  ) {
+    return "daily";
+  }
+
+  if (
+    /^\s*2[\.)]?\s*$/.test(text) ||
+    /^\s*2[\.)]?\s*(?:משתמש\s*ספציפי|specific\s*user)\s*$/i.test(text) ||
+    /^\s*(?:משתמש\s*ספציפי|specific\s*user)\s*$/i.test(text) ||
+    text === L0_BUTTON_SPECIFIC
+  ) {
+    return "specific";
+  }
+
+  return null;
+}
+
 async function summarizeStaffDay(
   rawData: string,
-  requesterPermissionLevel: PermissionLevel
+  requesterPermissionLevel: PermissionLevel,
+  signal?: AbortSignal | null
 ): Promise<string> {
   const systemPrompt = isAdminRole(requesterPermissionLevel)
     ? FULL_SCOPE_SUMMARY_PROMPT
@@ -39,6 +86,7 @@ async function summarizeStaffDay(
   const answer = await adapter.generateText({
     model: resolveFastModel(),
     temperature: 0.2,
+    signal,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: rawData },
@@ -48,58 +96,46 @@ async function summarizeStaffDay(
 }
 
 export async function runL1DailyStaffSummary(
-  requesterPermissionLevel: PermissionLevel
+  requesterPermissionLevel: PermissionLevel,
+  signal?: AbortSignal | null
 ): Promise<string> {
   // Report scope (L0 → all tiers, everyone else → L2/L3) is resolved inside
   // fetchTodayStaffChatHistories from this trusted, DB-derived level - never from
   // an externally-supplied filter.
   const { formatted } = await loadTodayStaffContext(requesterPermissionLevel);
-  return summarizeStaffDay(formatted, requesterPermissionLevel);
+  return summarizeStaffDay(formatted, requesterPermissionLevel, signal);
 }
 
-async function sendL0HistoryMenu(to: string): Promise<void> {
+async function sendL0HistoryMenu(to: string, signal?: AbortSignal | null): Promise<void> {
   await setAdminSession(to, "awaiting_menu_choice");
   await sendWhatsAppInteractiveButtons({
     to,
-    bodyText: "בחר סוג דוח היסטוריית שיחות:",
+    bodyText: "בחר סוג דוח היסטוריית שיחות:\n1. סיכום יומי\n2. משתמש ספציפי",
     buttons: [
       { id: L0_BUTTON_DAILY, title: "סיכום יומי" },
       { id: L0_BUTTON_SPECIFIC, title: "משתמש ספציפי" },
     ],
+    signal,
   });
 }
 
-async function handleL0ButtonReply(
+async function fulfillDailySummary(
   adminPhone: string,
-  buttonId: string,
-  requesterPermissionLevel: PermissionLevel
-): Promise<{ answer: string; clearSession: boolean } | { sentPrompt: true }> {
-  if (buttonId === L0_BUTTON_DAILY) {
-    await clearAdminSession(adminPhone);
-    const answer = await runL1DailyStaffSummary(requesterPermissionLevel);
-    // Task 2: a report was just generated, so free-text follow-up questions from
-    // this admin should now route to the DB-grounded analytics handler instead of
-    // falling back to RAG document search.
-    await enterAdminAnalyticsMode(adminPhone);
-    return { answer, clearSession: true };
-  }
-
-  if (buttonId === L0_BUTTON_SPECIFIC) {
-    await setAdminSession(adminPhone, "awaiting_user_name");
-    return {
-      sentPrompt: true,
-    };
-  }
-
+  requesterPermissionLevel: PermissionLevel,
+  signal?: AbortSignal | null
+): Promise<{ type: "text"; answer: string }> {
   await clearAdminSession(adminPhone);
-  return {
-    answer: "בחירה לא מזוהה. שלח שוב בקשה להיסטוריית שיחות.",
-    clearSession: true,
-  };
+  const answer = await runL1DailyStaffSummary(requesterPermissionLevel, signal);
+  await enterAdminAnalyticsMode(adminPhone);
+  return { type: "text", answer };
 }
 
-const L0_SPECIFIC_USER_PROMPT =
-  "הקלד/י את שם המשתמש (כפי שמופיע במערכת) כדי לקבל את היסטוריית השיחה שלו להיום.";
+async function fulfillSpecificUserPrompt(
+  adminPhone: string
+): Promise<{ type: "prompt_sent"; promptText: string }> {
+  await setAdminSession(adminPhone, "awaiting_user_name");
+  return { type: "prompt_sent", promptText: L0_SPECIFIC_USER_PROMPT };
+}
 
 async function handleL0SpecificUserName(
   nameInput: string,
@@ -122,6 +158,7 @@ export async function resolveL0AdminFlow(input: {
   buttonId?: string;
   isChatHistoryIntent: boolean;
   requesterPermissionLevel: PermissionLevel;
+  signal?: AbortSignal | null;
 }): Promise<
   | { type: "text"; answer: string }
   | { type: "interactive_sent" }
@@ -147,40 +184,57 @@ export async function resolveL0AdminFlow(input: {
     return { type: "text", answer: "" };
   }
 
-  if (input.buttonId) {
-    const result = await handleL0ButtonReply(
-      input.adminPhone,
-      input.buttonId,
-      input.requesterPermissionLevel
-    );
-    if ("sentPrompt" in result) {
-      return { type: "prompt_sent", promptText: L0_SPECIFIC_USER_PROMPT };
-    }
-    return { type: "text", answer: result.answer };
+  const menuChoice = parseL0MenuChoice(input.query, input.buttonId);
+  const inHistoryMenu = session?.mode === "awaiting_menu_choice";
+
+  if (menuChoice === "cancel" && (inHistoryMenu || session?.mode === "awaiting_user_name")) {
+    await clearAdminSession(input.adminPhone);
+    return { type: "text", answer: L0_MENU_CANCELLED_MESSAGE };
+  }
+
+  if (menuChoice === "daily" && (inHistoryMenu || input.buttonId)) {
+    logInfo("l0_menu_choice_resolved", "Daily summary selected.", {
+      adminPhone: input.adminPhone,
+      via: input.buttonId ? "button" : "text",
+    });
+    return fulfillDailySummary(input.adminPhone, input.requesterPermissionLevel, input.signal);
+  }
+
+  if (menuChoice === "specific" && (inHistoryMenu || input.buttonId)) {
+    logInfo("l0_menu_choice_resolved", "Specific-user prompt selected.", {
+      adminPhone: input.adminPhone,
+      via: input.buttonId ? "button" : "text",
+    });
+    return fulfillSpecificUserPrompt(input.adminPhone);
+  }
+
+  if (input.buttonId && !menuChoice) {
+    await clearAdminSession(input.adminPhone);
+    return { type: "text", answer: L0_UNKNOWN_BUTTON_MESSAGE };
   }
 
   if (session?.mode === "awaiting_user_name") {
     await clearAdminSession(input.adminPhone);
     const answer = await handleL0SpecificUserName(input.query, input.requesterPermissionLevel);
-    // Same rationale as the daily-summary branch above: a report was just
-    // generated, so enable DB-grounded follow-up Q&A for this admin.
     await enterAdminAnalyticsMode(input.adminPhone);
     return { type: "text", answer };
   }
 
-  if (session?.mode === "awaiting_menu_choice") {
-    return {
-      type: "text",
-      answer: "אנא בחר אחת מהאפשרויות בכפתורים שנשלחו, או שלח בקשה חדשה להיסטוריית שיחות.",
-    };
+  if (inHistoryMenu && session) {
+    if (input.isChatHistoryIntent) {
+      await sendL0HistoryMenu(input.adminPhone, input.signal);
+      return { type: "interactive_sent" };
+    }
+    if ((await recordInvalidAttempt(input.adminPhone, session)) >= MAX_INVALID_ATTEMPTS) {
+      return { type: "text", answer: SESSION_ABANDONED_MESSAGE };
+    }
+    return { type: "text", answer: L0_MENU_RETRY_MESSAGE };
   }
 
   if (input.isChatHistoryIntent) {
-    await sendL0HistoryMenu(input.adminPhone);
+    await sendL0HistoryMenu(input.adminPhone, input.signal);
     return { type: "interactive_sent" };
   }
 
   return { type: "text", answer: "" };
 }
-
-

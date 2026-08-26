@@ -23,7 +23,11 @@ import {
   containsMandatoryHandoffSignals,
   MANDATORY_HANDOFF_RESPONSE_HE,
 } from "@/lib/agent/baseline/safetySignals";
-import { getAdminSession, isUserManagementSessionMode } from "@/lib/chat/adminSession";
+import {
+  clearAdminSession,
+  getAdminSession,
+  isUserManagementSessionMode,
+} from "@/lib/chat/adminSession";
 import { logError } from "@/lib/logger";
 
 export type BaselineDeliveryKind = "text" | "interactive_sent" | "already_sent_prompt";
@@ -100,9 +104,22 @@ export async function processBaselineQuery(
     };
   }
 
-  const adminSession = isElevatedRole(userContext.permissionLevel)
+  let adminSession = isElevatedRole(userContext.permissionLevel)
     ? await getAdminSession(senderPhone)
     : null;
+
+  // A fresh chat-history request must escape an in-progress add/delete prompt
+  // so a leftover user-management session cannot swallow the rest of the bot.
+  if (
+    adminSession &&
+    isUserManagementSessionMode(adminSession.mode) &&
+    matchesChatHistoryHeuristic(query) &&
+    !isUserManagementButtonId(buttonId)
+  ) {
+    await clearAdminSession(senderPhone);
+    adminSession = null;
+  }
+
   const userManagementActive =
     !!adminSession && isUserManagementSessionMode(adminSession.mode);
   const userManagementRequested =
@@ -117,6 +134,7 @@ export async function processBaselineQuery(
       query,
       buttonId,
       requesterPermissionLevel: userContext.permissionLevel,
+      signal,
     });
     if (managed.type === "interactive_sent") {
       return { kind: "interactive_sent", answer: "", ragMetrics: null, intent: "CHAT_HISTORY" };
@@ -145,6 +163,7 @@ export async function processBaselineQuery(
       adminPhone: senderPhone,
       query,
       requesterPermissionLevel: userContext.permissionLevel,
+      signal,
     });
     if (analytics.handled) {
       return { kind: "text", answer: analytics.answer, ragMetrics: null, intent: "CHAT_HISTORY" };
@@ -166,6 +185,7 @@ export async function processBaselineQuery(
       // Trusted, DB-resolved level (never from buttonId/query) — see the guard at
       // the top of resolveL0AdminFlow.
       requesterPermissionLevel: userContext.permissionLevel,
+      signal,
     });
 
     if (l0.type === "interactive_sent") {
@@ -181,7 +201,7 @@ export async function processBaselineQuery(
   }
 
   if (isManagerRole(userContext.permissionLevel) && intent === "CHAT_HISTORY") {
-    const answer = await runL1DailyStaffSummary(userContext.permissionLevel);
+    const answer = await runL1DailyStaffSummary(userContext.permissionLevel, signal);
     return { kind: "text", answer, ragMetrics: null, intent };
   }
 

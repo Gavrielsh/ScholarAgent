@@ -25,11 +25,12 @@ const CLASSIFIER_PROMPT =
  * that regex heuristics can't provide (see file header comment there re: LLM-free
  * routing for the *hot* path; this only runs for the narrow ADMIN_ANALYTICS_MODE case).
  */
-async function isAnalyticalQuery(query: string): Promise<boolean> {
+async function isAnalyticalQuery(query: string, signal?: AbortSignal | null): Promise<boolean> {
   try {
     const raw = await getLlmAdapter().generateText({
       model: resolveFastModel(),
       temperature: 0,
+      signal,
       messages: [
         { role: "system", content: CLASSIFIER_PROMPT },
         { role: "user", content: query },
@@ -64,13 +65,15 @@ const ANALYTICS_QA_PROMPT =
  * database" the router falls into instead of RAG. */
 async function answerFromChatHistory(
   query: string,
-  requesterPermissionLevel: PermissionLevel
+  requesterPermissionLevel: PermissionLevel,
+  signal?: AbortSignal | null
 ): Promise<string> {
   const { formatted } = await loadTodayStaffContext(requesterPermissionLevel);
 
   const answer = await getLlmAdapter().generateText({
     model: resolveFastModel(),
     temperature: 0.2,
+    signal,
     messages: [
       { role: "system", content: ANALYTICS_QA_PROMPT },
       { role: "user", content: `נתוני היום:\n${formatted}\n\nשאלת המנהל: ${query}` },
@@ -94,6 +97,7 @@ export async function resolveAdminAnalyticsFollowUp(input: {
   adminPhone: string;
   query: string;
   requesterPermissionLevel: PermissionLevel;
+  signal?: AbortSignal | null;
 }): Promise<AdminAnalyticsFollowUpResult> {
   // Security: only L0 admins can ever enter/consult ADMIN_ANALYTICS_MODE. This
   // mirrors the guard in resolveL0AdminFlow - requesterPermissionLevel is always
@@ -112,7 +116,7 @@ export async function resolveAdminAnalyticsFollowUp(input: {
     return { handled: true, answer: EXIT_CONFIRMATION_HE };
   }
 
-  const analytical = await isAnalyticalQuery(input.query);
+  const analytical = await isAnalyticalQuery(input.query, input.signal);
   if (!analytical) {
     // Ambiguous/unrelated query: gracefully exit the mode and let the orchestrator's
     // normal RAG path answer it, instead of forcing an analytics answer.
@@ -120,6 +124,10 @@ export async function resolveAdminAnalyticsFollowUp(input: {
     return { handled: false };
   }
 
-  const answer = await answerFromChatHistory(input.query, input.requesterPermissionLevel);
+  const answer = await answerFromChatHistory(
+    input.query,
+    input.requesterPermissionLevel,
+    input.signal
+  );
   return { handled: true, answer };
 }

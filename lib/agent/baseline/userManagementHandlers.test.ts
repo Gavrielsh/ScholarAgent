@@ -2,12 +2,17 @@ import {
   matchesUserManagementHeuristic,
 } from "@/lib/agent/baseline/intentRouter";
 import {
+  ADD_INPUT_EXAMPLE,
+  ADD_INVALID_LEVEL_MESSAGE,
+  ADD_MISSING_PHONE_MESSAGE,
+  ADD_NOT_ENOUGH_ARGS_MESSAGE,
   ADMIN_ACTION_ADD_USER,
   ADMIN_ACTION_LIST_USERS,
   canManagePermissionLevel,
   isUserManagementButtonId,
   parseAddUserInput,
   parseDeleteUserInput,
+  parseUserManagementMenuChoice,
 } from "@/lib/agent/baseline/userManagementHandlers";
 import { normalizePhoneNumber } from "@/lib/auth/userRegistry";
 import { chunkWhatsAppText, WHATSAPP_TEXT_CHAR_LIMIT } from "@/lib/whatsapp/formatting";
@@ -28,27 +33,68 @@ describe("normalizePhoneNumber", () => {
 describe("parseAddUserInput / parseDeleteUserInput", () => {
   it("parses a multi-word name, phone, and level despite extra spaces", () => {
     expect(parseAddUserInput("יוסי כהן   0501234567   2")).toEqual({
-      name: "יוסי כהן",
-      phone: "972501234567",
-      level: 2,
+      success: true,
+      data: {
+        name: "יוסי כהן",
+        phone: "972501234567",
+        level: 2,
+      },
     });
   });
 
-  it("rejects an invalid permission level and keeps the caller in session", () => {
-    expect(parseAddUserInput("יוסי 0501234567 9")).toBeNull();
-    expect(parseAddUserInput("יוסי 0501234567")).toBeNull();
+  it("returns INVALID_LEVEL or NOT_ENOUGH_ARGS instead of a generic null", () => {
+    expect(parseAddUserInput("יוסי 0501234567 9")).toEqual({
+      success: false,
+      reason: "INVALID_LEVEL",
+    });
+    expect(parseAddUserInput("יוסי 0501234567")).toEqual({
+      success: false,
+      reason: "NOT_ENOUGH_ARGS",
+    });
+  });
+
+  it("strips WhatsApp RTL bidi marks so a wrapped 0–3 level still parses", () => {
+    expect(parseAddUserInput(`ישראל 0541234567 \u200E0`)).toEqual({
+      success: true,
+      data: {
+        name: "ישראל",
+        phone: "972541234567",
+        level: 0,
+      },
+    });
+    expect(parseAddUserInput(`ישראל \u200F0541234567\u200E \u202A0\u202C`)).toEqual({
+      success: true,
+      data: {
+        name: "ישראל",
+        phone: "972541234567",
+        level: 0,
+      },
+    });
+  });
+
+  it("classifies missing phone when a level is present but no number", () => {
+    expect(parseAddUserInput("ישראל לאטלפון 0")).toEqual({
+      success: false,
+      reason: "MISSING_PHONE",
+    });
   });
 
   it("accepts L-prefixed levels and comma-separated tokens", () => {
     expect(parseAddUserInput("יוסי כהן, 0501234567, L1")).toEqual({
-      name: "יוסי כהן",
-      phone: "972501234567",
-      level: 1,
+      success: true,
+      data: {
+        name: "יוסי כהן",
+        phone: "972501234567",
+        level: 1,
+      },
     });
     expect(parseAddUserInput("דנה 0501234567 l0")).toEqual({
-      name: "דנה",
-      phone: "972501234567",
-      level: 0,
+      success: true,
+      data: {
+        name: "דנה",
+        phone: "972501234567",
+        level: 0,
+      },
     });
   });
 
@@ -62,19 +108,32 @@ describe("parseAddUserInput / parseDeleteUserInput", () => {
 
   it("parses add/delete input regardless of phone and level token order", () => {
     expect(parseAddUserInput("אח שלי 1 0543118077")).toEqual({
-      name: "אח שלי",
-      phone: "972543118077",
-      level: 1,
+      success: true,
+      data: {
+        name: "אח שלי",
+        phone: "972543118077",
+        level: 1,
+      },
     });
     expect(parseAddUserInput("L2 אח שלי 0543118077")).toEqual({
-      name: "אח שלי",
-      phone: "972543118077",
-      level: 2,
+      success: true,
+      data: {
+        name: "אח שלי",
+        phone: "972543118077",
+        level: 2,
+      },
     });
     expect(parseDeleteUserInput("0543118077 דנה לוי")).toEqual({
       name: "דנה לוי",
       phone: "972543118077",
     });
+  });
+
+  it("includes a concrete valid example on every add-user parse error message", () => {
+    expect(ADD_NOT_ENOUGH_ARGS_MESSAGE).toContain(ADD_INPUT_EXAMPLE);
+    expect(ADD_INVALID_LEVEL_MESSAGE).toContain("0 ל-3");
+    expect(ADD_INVALID_LEVEL_MESSAGE).toContain(ADD_INPUT_EXAMPLE);
+    expect(ADD_MISSING_PHONE_MESSAGE).toContain(ADD_INPUT_EXAMPLE);
   });
 });
 
@@ -104,6 +163,18 @@ describe("isUserManagementButtonId", () => {
     expect(isUserManagementButtonId(ADMIN_ACTION_LIST_USERS)).toBe(true);
     expect(isUserManagementButtonId("l0_daily_summary")).toBe(false);
     expect(isUserManagementButtonId(undefined)).toBe(false);
+  });
+});
+
+describe("parseUserManagementMenuChoice", () => {
+  it("maps typed 1/2/3 and button ids to add/delete/list", () => {
+    expect(parseUserManagementMenuChoice("1")).toBe("add");
+    expect(parseUserManagementMenuChoice("2.")).toBe("delete");
+    expect(parseUserManagementMenuChoice("3")).toBe("list");
+    expect(parseUserManagementMenuChoice("ביטול")).toBe("cancel");
+    expect(parseUserManagementMenuChoice("hello")).toBeNull();
+    expect(parseUserManagementMenuChoice("", ADMIN_ACTION_ADD_USER)).toBe("add");
+    expect(parseUserManagementMenuChoice("\u200E1")).toBe("add");
   });
 });
 
