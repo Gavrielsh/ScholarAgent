@@ -8,7 +8,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
 import { parsePositiveInt } from "@/lib/core/env";
-import { enqueueDocumentIngestion } from "@/lib/domain/ingestion/queue/documentIngestionQueue";
+import { enqueueDocumentIngestion } from "@/lib/domain/ingestion/worker";
 import { enqueueWhatsAppIncomingMessage } from "@/lib/domain/whatsapp/worker";
 import {
   releaseWhatsAppMessageClaim,
@@ -98,7 +98,7 @@ async function sendQueuedReceipt(to: string, messageId: string | null): Promise<
  * The sender's role is NOT checked in this file. A `users` lookup is a database
  * round trip and Meta redelivers anything not ACKed within a few seconds, so
  * the RBAC gate lives in the ingestion worker (`authorizeSender` in
- * lib/domain/ingestion/processor/documentIngestionProcessor.ts). This route always ACKs 200.
+ * lib/domain/ingestion/pipeline.ts). This route always ACKs 200.
  */
 function enqueueDelivery(delivery: InboundDelivery): Promise<string> {
   switch (delivery.kind) {

@@ -600,7 +600,7 @@ async function resolveWhatsAppMediaUrl(
 
 /**
  * Steps 1 + 2. Returns the raw bytes; parsing is the caller's concern
- * (see `extractTextFromUpload` in lib/domain/ingestion/processor/uploader.ts).
+ * (see `extractTextFromUpload` in lib/domain/ingestion/pipeline.ts).
  */
 export async function downloadWhatsAppMedia(
   mediaId: string,

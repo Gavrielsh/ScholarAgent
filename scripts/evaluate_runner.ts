@@ -51,7 +51,7 @@ import {
   retrieveSimilarDocuments,
   retrieveSimilarDocumentsBypassRls,
   type SimilarDocument,
-} from "@/lib/domain/ingestion/processor/retrieval";
+} from "@/lib/domain/ingestion/retrieval";
 import { GOLDEN_DATASET, type EvalRecord, type QueryCategory } from "./data/golden_dataset";
 import dotenv from 'dotenv';
 dotenv.config({ path: '.env.local' });

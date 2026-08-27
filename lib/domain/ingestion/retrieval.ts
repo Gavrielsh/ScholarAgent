@@ -4,7 +4,7 @@ import {
   type QuerySimilarOptions,
   type SimilarDocument,
 } from "@/lib/core/db";
-import { embedText } from "@/lib/domain/ingestion/processor/embeddings";
+import { embedText } from "@/lib/domain/ingestion/embeddings";
 import type { PermissionLevel } from "@/lib/security/auth";
 
 export type { SimilarDocument };

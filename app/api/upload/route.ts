@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { assertMinimumLevel, canClassifyAtLevel, type PermissionLevel } from "@/lib/security/auth";
 import { extractUserContext, UnauthenticatedError } from "@/lib/security/extractUser";
-import { extractTextFromUpload, ingestDocument, assertMimeMatchesContent } from "@/lib/domain/ingestion/processor/uploader";
+import { extractTextFromUpload, ingestDocument, assertMimeMatchesContent } from "@/lib/domain/ingestion/pipeline";
 
 // 10 MB hard cap per upload. TODO: tune via env once usage patterns are clear.
 const MAX_FILE_BYTES = 10 * 1024 * 1024;

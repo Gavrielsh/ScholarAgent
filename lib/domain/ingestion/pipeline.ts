@@ -1,5 +1,20 @@
-import { randomUUID } from "node:crypto";
+// Document ingestion pipeline: chunk -> describe -> extract -> ingest.
+//
+// Sections are in dependency order. chunker splits redacted text, chunkMetadata
+// describes each chunk, uploader turns an uploaded file into a stored document,
+// and documentIngestionProcessor drives the whole thing for a WhatsApp upload.
+//
+// Embedding lives in lib/domain/ingestion/embeddings.ts, not here. This file
+// statically imports mammoth and pdf-parse, and the retrieval path needs
+// embedText on every RAG query — merging the two would put both parsers in the
+// chat agent's module graph.
 
+import mammoth from "mammoth";
+// pdf-parse v2 exports a class-based API with named exports (no default export).
+// LoadParameters.data accepts Uint8Array | ArrayBuffer | Buffer.
+// TextResult.text holds the concatenated text from all pages.
+import { PDFParse } from "pdf-parse";
+import { redactPii } from "@/lib/security/guardrails";
 import {
   isElevatedRole,
   lookupUserByPhone,
@@ -7,6 +22,7 @@ import {
   type PermissionLevel,
   type UserContext,
 } from "@/lib/security/auth";
+import { randomUUID } from "node:crypto";
 import {
   insertDocumentWithChunks,
   isUniqueViolation,
@@ -15,11 +31,7 @@ import {
 import { parsePositiveInt } from "@/lib/core/env";
 import { TerminalNotifyError } from "@/lib/core/queue";
 import { abortableSleep, isAbortError, isHttpTimeoutError } from "@/lib/core/http/fetchWithTimeout";
-import { chunkText, type Chunk } from "@/lib/domain/ingestion/processor/chunker";
-import { buildChunkMetadata } from "@/lib/domain/ingestion/processor/chunkMetadata";
-import { embedTextBatch } from "@/lib/domain/ingestion/processor/embeddings";
-import { redactPii } from "@/lib/security/guardrails";
-import { extractTextFromUpload } from "@/lib/domain/ingestion/processor/uploader";
+import { embedTextBatch } from "@/lib/domain/ingestion/embeddings";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
 import {
   downloadWhatsAppMedia,
@@ -29,6 +41,351 @@ import {
   WhatsAppMediaError,
 } from "@/lib/domain/whatsapp/client";
 import type { ParsedInboundDocumentEvent } from "@/lib/domain/whatsapp/types";
+
+// -------------------------------------------------------------------------
+// Chunking
+// -------------------------------------------------------------------------
+
+export interface Chunk {
+  index: number;
+  text: string;
+  charStart: number;
+  charEnd: number;
+}
+
+export interface ChunkOptions {
+  /** Target size in characters (semantic units are packed up to this budget). */
+  chunkSize?: number;
+  /** Overlap between consecutive chunks, in characters. */
+  overlap?: number;
+}
+
+const DEFAULT_CHUNK_SIZE = 1500;
+const DEFAULT_OVERLAP = 200;
+
+// Hebrew end punctuation + Latin sentence ends.
+const SENTENCE_SPLIT = /(?<=[.!?\u05C0\u05BE])\s+/u;
+
+function mergeAbbreviationFragments(parts: string[]): string[] {
+  const out: string[] = [];
+  for (const p of parts) {
+    const cur = p.trim();
+    if (!cur) continue;
+    const glued =
+      out.length > 0 &&
+      cur.length <= 4 &&
+      /^[\u0590-\u05FFA-Za-z\u05F4\u05F3.+-]+$/.test(cur);
+    if (glued) {
+      out[out.length - 1] = `${out[out.length - 1]} ${cur}`.trim();
+    } else {
+      out.push(cur);
+    }
+  }
+  return out;
+}
+
+function splitIntoSemanticUnits(text: string): string[] {
+  const paragraphs = text
+    .replace(/\r\n/g, "\n")
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  const units: string[] = [];
+  for (const para of paragraphs) {
+    const rawParts = para.split(SENTENCE_SPLIT).map((s) => s.trim()).filter(Boolean);
+    units.push(...mergeAbbreviationFragments(rawParts));
+  }
+  return units.length > 0 ? units : [text.trim()].filter(Boolean);
+}
+
+/**
+ * Semantic-ish chunking: paragraph → sentence-like units (Hebrew + Latin aware),
+ * then packs units into a character budget with overlap.
+ */
+export function chunkText(rawText: string, options: ChunkOptions = {}): Chunk[] {
+  const text = redactPii(rawText).replace(/\r\n/g, "\n").trim();
+  if (!text) return [];
+
+  const chunkSize = Math.max(200, options.chunkSize ?? DEFAULT_CHUNK_SIZE);
+  const overlap = Math.max(0, Math.min(options.overlap ?? DEFAULT_OVERLAP, chunkSize - 1));
+
+  const units = splitIntoSemanticUnits(text);
+  const effectiveUnits = units.length > 0 ? units : [text];
+
+  const chunks: Chunk[] = [];
+  let index = 0;
+  let virtualCursor = 0;
+  let current = "";
+
+  const pushChunk = (body: string) => {
+    const slice = body.trim();
+    if (!slice) return;
+    chunks.push({
+      index,
+      text: slice,
+      charStart: virtualCursor,
+      charEnd: virtualCursor + slice.length,
+    });
+    index += 1;
+    virtualCursor += Math.max(1, slice.length - overlap);
+  };
+
+  for (const unit of effectiveUnits) {
+    const candidate = current ? `${current}\n\n${unit}` : unit;
+    if (candidate.length <= chunkSize) {
+      current = candidate;
+      continue;
+    }
+
+    if (current.trim()) {
+      pushChunk(current);
+      current = unit;
+      continue;
+    }
+
+    // Single unit larger than budget — hard window with overlap on raw characters.
+    for (let o = 0; o < unit.length; o += Math.max(1, chunkSize - overlap)) {
+      const part = unit.slice(o, o + chunkSize);
+      pushChunk(part);
+    }
+    current = "";
+  }
+
+  if (current.trim()) {
+    pushChunk(current);
+  }
+
+  return chunks;
+}
+
+// -------------------------------------------------------------------------
+// Chunk metadata
+// -------------------------------------------------------------------------
+
+/**
+ * The metadata contract for a knowledge_base row.
+ *
+ * Every ingestion path (HTTP upload, WhatsApp document, reconciliation) builds
+ * its chunk metadata here so the JSONB shape stays identical. Downstream code
+ * depends on specific keys — `hardDeleteKnowledgeChunksByDocumentId` filters on
+ * `document_id`, and the admin reports read `uploaded_by` — so a path that
+ * spelled one of them differently would silently opt its own rows out of those
+ * operations.
+ *
+ * This function is the only place those key names are written. The persistence
+ * layer takes the finished payload and serialises it verbatim, so call this
+ * rather than assembling the object at a call site.
+ */
+export interface ChunkMetadataInput {
+  documentId: string;
+  filename: string;
+  mimeType: string;
+  uploadedByUserId: string;
+  classificationLevel: PermissionLevel;
+  chunk: Pick<Chunk, "index" | "charStart" | "charEnd">;
+  /** Channel-specific extras (media id, sender phone, original byte size…). */
+  extra?: Record<string, unknown>;
+}
+
+export function buildChunkMetadata(input: ChunkMetadataInput): Record<string, unknown> {
+  return {
+    ...(input.extra ?? {}),
+    document_id: input.documentId,
+    filename: input.filename,
+    mime_type: input.mimeType,
+    uploaded_by: input.uploadedByUserId,
+    // Mirrors classification_level so consumers can filter in SQL without joining.
+    required_role: input.classificationLevel,
+    chunk_index: input.chunk.index,
+    char_start: input.chunk.charStart,
+    char_end: input.chunk.charEnd,
+  };
+}
+
+// -------------------------------------------------------------------------
+// Upload extraction and ingestion
+// -------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Public surface
+// ---------------------------------------------------------------------------
+
+export interface UploadDocumentInput {
+  filename: string;
+  mimeType: string;
+  /** Pre-extracted plain text (from extractTextFromUpload or callers that handle extraction themselves). */
+  text: string;
+  classificationLevel: PermissionLevel;
+  uploadedByUserId: string;
+  /** Must be L0 or L1 — used for write-path RLS. */
+  uploadedByPermissionLevel: PermissionLevel;
+  extraMetadata?: Record<string, unknown>;
+  /** Override chunking parameters per document type (optional). */
+  chunkOptions?: ChunkOptions;
+  source?: string;
+}
+
+export interface UploadDocumentResult {
+  documentId: string;
+  chunkCount: number;
+  insertedChunkIds: string[];
+  failures: Array<{ index: number; error: string }>;
+}
+
+/**
+ * Rejects a claimed MIME type that does not match the file's magic bytes.
+ * Text types are not sniffed (UTF-8 has no reliable header).
+ */
+export function assertMimeMatchesContent(bytes: Uint8Array, mimeType: string): void {
+  const mime = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (mime === "application/pdf") {
+    const header = String.fromCharCode(bytes[0] ?? 0, bytes[1] ?? 0, bytes[2] ?? 0, bytes[3] ?? 0);
+    if (header !== "%PDF") {
+      throw new Error("סוג הקובץ המוצהר הוא PDF אך תוכן הקובץ אינו PDF.");
+    }
+    return;
+  }
+  if (mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+    if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
+      throw new Error("סוג הקובץ המוצהר הוא DOCX אך תוכן הקובץ אינו ארכיון ZIP.");
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Core ingestion function
+// ---------------------------------------------------------------------------
+
+export async function ingestDocument(input: UploadDocumentInput): Promise<UploadDocumentResult> {
+  if (!input.text.trim()) {
+    throw new Error("Cannot ingest a document with no extractable text.");
+  }
+  if (input.uploadedByPermissionLevel > MANAGER_PERMISSION_LEVEL) {
+    throw new Error("Corpus writes require L0 or L1.");
+  }
+
+  const documentId = randomUUID();
+  const sanitized = redactPii(input.text);
+  const chunks = chunkText(sanitized, input.chunkOptions).filter((chunk) => chunk.text.trim());
+
+  if (chunks.length === 0) {
+    return { documentId, chunkCount: 0, insertedChunkIds: [], failures: [] };
+  }
+
+  const vectors = await embedTextBatch(chunks.map((c) => c.text));
+
+  if (vectors.length !== chunks.length) {
+    throw new Error(
+      `Embedding count mismatch: got ${vectors.length}, expected ${chunks.length}.`
+    );
+  }
+
+  const sizeBytes =
+    typeof input.extraMetadata?.original_size_bytes === "number"
+      ? input.extraMetadata.original_size_bytes
+      : null;
+
+  const result = await insertDocumentWithChunks({
+    documentId,
+    source: input.source ?? "upload_api",
+    filename: input.filename,
+    mimeType: input.mimeType,
+    sizeBytes,
+    sha256: null,
+    externalMediaId: null,
+    externalMessageId: null,
+    uploadedByUserId: input.uploadedByUserId,
+    uploadedByPhone: null,
+    classificationLevel: input.classificationLevel,
+    writePermissionLevel: input.uploadedByPermissionLevel,
+    documentMetadata: input.extraMetadata ?? {},
+    chunks: chunks.map((chunk, i) => ({
+      text: chunk.text,
+      chunkIndex: chunk.index,
+      metadata: buildChunkMetadata({
+        documentId,
+        filename: input.filename,
+        mimeType: input.mimeType,
+        uploadedByUserId: input.uploadedByUserId,
+        classificationLevel: input.classificationLevel,
+        chunk,
+        extra: {
+          source: input.source ?? "upload_api",
+          ...(input.extraMetadata ?? {}),
+        },
+      }),
+      embedding: vectors[i],
+    })),
+  });
+
+  return {
+    documentId: result.documentId,
+    chunkCount: chunks.length,
+    insertedChunkIds: result.insertedChunkIds,
+    failures: [],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Text extraction
+// ---------------------------------------------------------------------------
+
+type TextExtractor = (bytes: ArrayBuffer) => Promise<string>;
+
+const EXTRACTORS: Record<string, TextExtractor> = {
+  // Plain text formats — decoded directly as UTF-8; no additional libraries needed.
+  "text/plain":    async (bytes) => new TextDecoder("utf-8").decode(bytes),
+  "text/markdown": async (bytes) => new TextDecoder("utf-8").decode(bytes),
+  "text/csv":      async (bytes) => new TextDecoder("utf-8").decode(bytes),
+
+  // PDF — pdf-parse v2 class-based API.
+  // PDFParse constructor accepts LoadParameters.data as Uint8Array | ArrayBuffer.
+  // getText() returns a TextResult whose .text property holds the full document text.
+  // destroy() releases the pdfjs DocumentLoadingTask and worker (prevents resource leaks
+  // when many PDFs are processed in a batch ingestion loop).
+  "application/pdf": async (bytes) => {
+    const parser = new PDFParse({ data: new Uint8Array(bytes) });
+    try {
+      const result = await parser.getText();
+      return result.text.trim();
+    } finally {
+      await parser.destroy();
+    }
+  },
+
+  // DOCX — mammoth (already in package.json as a dependency).
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+    async (bytes) =>
+      (await mammoth.extractRawText({ buffer: Buffer.from(bytes) })).value ?? "",
+};
+
+/**
+ * Extracts plain text from a raw file buffer based on its MIME type.
+ * Throws for unsupported types rather than returning empty text silently.
+ *
+ * Supported MIME types:
+ *   text/plain · text/markdown · text/csv
+ *   application/pdf
+ *   application/vnd.openxmlformats-officedocument.wordprocessingml.document
+ */
+export async function extractTextFromUpload(
+  bytes: ArrayBuffer,
+  mimeType: string
+): Promise<string> {
+  const extractor = EXTRACTORS[mimeType];
+  if (!extractor) {
+    const supported = Object.keys(EXTRACTORS).join(", ");
+    throw new Error(
+      `Unsupported MIME type for text extraction: "${mimeType}". Supported: ${supported}`
+    );
+  }
+  return extractor(bytes);
+}
+
+// -------------------------------------------------------------------------
+// WhatsApp document ingestion processor
+// -------------------------------------------------------------------------
 
 // ── Replies ────────────────────────────────────────────────────────────────
 const SUCCESS_MESSAGE = "המסמך עובד בהצלחה וזמין במערכת.";

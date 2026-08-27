@@ -1,4 +1,4 @@
-import { documentIngestionJobId } from "@/lib/domain/ingestion/queue/documentIngestionQueue";
+import { documentIngestionJobId } from "@/lib/domain/ingestion/worker";
 
 describe("documentIngestionJobId", () => {
   // BullMQ's Queue.add throws `Custom Id cannot contain :`, which surfaced as a

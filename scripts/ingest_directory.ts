@@ -27,7 +27,7 @@ import path from "path";
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
-import { extractTextFromUpload, ingestDocument } from "@/lib/domain/ingestion/processor/uploader";
+import { extractTextFromUpload, ingestDocument } from "@/lib/domain/ingestion/pipeline";
 import { closePool } from "@/lib/core/db";
 import type { PermissionLevel } from "@/lib/security/auth";
 

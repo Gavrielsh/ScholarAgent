@@ -16,7 +16,7 @@ import { insertRagAuditLog } from "@/lib/domain/admin/auditLogs";
 import {
   retrieveSimilarDocuments,
   type SimilarDocument,
-} from "@/lib/domain/ingestion/processor/retrieval";
+} from "@/lib/domain/ingestion/retrieval";
 import { getLlmAdapter, type LlmMessage } from "@/lib/domain/chat/llm";
 import { computeDls, startBaselineRagTrace, type DlsResult } from "@/lib/core/telemetry";
 import { logError } from "@/lib/core/logger";

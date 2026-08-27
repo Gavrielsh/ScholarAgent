@@ -59,11 +59,14 @@ import {
   type DocumentChunkRecord,
   type DocumentRegistryRow,
 } from "@/lib/core/db";
-import { chunkText, type Chunk } from "@/lib/domain/ingestion/processor/chunker";
-import { buildChunkMetadata } from "@/lib/domain/ingestion/processor/chunkMetadata";
-import { embedTextBatch } from "@/lib/domain/ingestion/processor/embeddings";
+import {
+  buildChunkMetadata,
+  chunkText,
+  extractTextFromUpload,
+  type Chunk,
+} from "@/lib/domain/ingestion/pipeline";
+import { embedTextBatch } from "@/lib/domain/ingestion/embeddings";
 import { redactPii } from "@/lib/security/guardrails";
-import { extractTextFromUpload } from "@/lib/domain/ingestion/processor/uploader";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
 import { downloadWhatsAppMedia } from "@/lib/domain/whatsapp/client";
 
@@ -93,7 +96,7 @@ const INLINE_TEXT_KEYS = ["extracted_text", "raw_text", "text", "content"] as co
 /** Metadata keys that may carry a path to the original file. */
 const SOURCE_PATH_KEYS = ["source_path", "local_path", "file_path", "relative_path"] as const;
 
-/** Mirrors the extractor table in lib/domain/ingestion/processor/uploader.ts. */
+/** Mirrors the extractor table in lib/domain/ingestion/pipeline.ts. */
 const MIME_BY_EXT: Record<string, string> = {
   ".pdf": "application/pdf",
   ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",

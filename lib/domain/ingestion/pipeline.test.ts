@@ -1,4 +1,4 @@
-import { buildChunkMetadata } from "@/lib/domain/ingestion/processor/chunkMetadata";
+import { buildChunkMetadata, resolveClassificationLevel } from "@/lib/domain/ingestion/pipeline";
 
 // The persistence layer serialises this payload verbatim, and the delete path
 // (`metadata->>'document_id'`) plus the admin reports (`uploaded_by`) filter on
@@ -44,5 +44,24 @@ describe("buildChunkMetadata", () => {
     });
     expect(meta.document_id).toBe("doc-1");
     expect(meta.uploaded_by).toBe("user-7");
+  });
+});
+
+describe("resolveClassificationLevel", () => {
+  it("defaults to the manager tier when the caption carries no directive", () => {
+    expect(resolveClassificationLevel(null, 0)).toBe(1);
+    expect(resolveClassificationLevel("סיכום פעילות נובמבר", 0)).toBe(1);
+  });
+
+  it("honours an explicit directive in any of the accepted spellings", () => {
+    expect(resolveClassificationLevel("#L3 חומרי הדרכה", 0)).toBe(3);
+    expect(resolveClassificationLevel("level: 2", 0)).toBe(2);
+    expect(resolveClassificationLevel("רמה 0", 0)).toBe(0);
+  });
+
+  it("never lets a sender classify above their own privilege", () => {
+    // An L1 Manager asking for the admin-only tier is clamped back to L1.
+    expect(resolveClassificationLevel("#L0", 1)).toBe(1);
+    expect(resolveClassificationLevel(null, 1)).toBe(1);
   });
 });
