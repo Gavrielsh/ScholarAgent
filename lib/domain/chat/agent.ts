@@ -8,8 +8,7 @@
 // merged in. Folding lib/domain/chat/state.ts into this file would have created
 // an agent -> rag -> agent cycle, so ChatMessage stays a standalone leaf.
 
-import { CLAUDE_FAST_MODEL } from "@/lib/domain/chat/llm/providers/claude";
-import { getLlmAdapter } from "@/lib/domain/chat/llm/adapter";
+import { CLAUDE_FAST_MODEL, getLlmAdapter } from "@/lib/domain/chat/llm";
 import {
   deleteAdminManagedUser,
   getAllManagedUsers,
