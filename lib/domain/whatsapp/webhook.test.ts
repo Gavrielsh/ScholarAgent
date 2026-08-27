@@ -3,8 +3,8 @@ import {
   parseInboundDocumentEvent,
   parseInboundEvent,
   peekInboundMessageType,
-} from "@/lib/domain/whatsapp/core/parseWebhook";
-import type { WhatsAppWebhookPayload } from "@/lib/domain/whatsapp/core/types";
+} from "@/lib/domain/whatsapp/webhook";
+import type { WhatsAppWebhookPayload } from "@/lib/domain/whatsapp/types";
 
 function payload(message: Record<string, unknown>): WhatsAppWebhookPayload {
   return {

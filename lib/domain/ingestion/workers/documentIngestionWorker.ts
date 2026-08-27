@@ -13,9 +13,11 @@ import { isAbortError } from "@/lib/core/http/fetchWithTimeout";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
 import { releaseWhatsAppMessageClaim } from "@/lib/core/redis";
 import { processDocumentIngestion } from "@/lib/domain/ingestion/processor/documentIngestionProcessor";
-import { markMessageReadAndTyping } from "@/lib/domain/whatsapp/core/messaging";
-import type { ParsedInboundDocumentEvent } from "@/lib/domain/whatsapp/core/types";
-import { DOCUMENT_INGESTION_QUEUE_NAME } from "@/lib/domain/whatsapp/core/types";
+import { markMessageReadAndTyping } from "@/lib/domain/whatsapp/client";
+import {
+  DOCUMENT_INGESTION_QUEUE_NAME,
+  type ParsedInboundDocumentEvent,
+} from "@/lib/domain/whatsapp/types";
 
 /**
  * Deliberately far below the chat worker's 5.

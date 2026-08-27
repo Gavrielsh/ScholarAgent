@@ -9,7 +9,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
 import { parsePositiveInt } from "@/lib/core/env";
 import { enqueueDocumentIngestion } from "@/lib/domain/ingestion/queue/documentIngestionQueue";
-import { enqueueWhatsAppIncomingMessage } from "@/lib/domain/whatsapp/queue/whatsappIncomingQueue";
+import { enqueueWhatsAppIncomingMessage } from "@/lib/domain/whatsapp/worker";
 import {
   releaseWhatsAppMessageClaim,
   tryClaimWhatsAppMessage,
@@ -19,15 +19,15 @@ import {
   parseInboundDelivery,
   peekInboundMessageType,
   type InboundDelivery,
-} from "@/lib/domain/whatsapp/core/parseWebhook";
-import { sendWhatsAppTextMessage } from "@/lib/domain/whatsapp/core/sendMessage";
+} from "@/lib/domain/whatsapp/webhook";
+import { sendWhatsAppTextMessage } from "@/lib/domain/whatsapp/client";
 import {
   isWebhookSignatureRequired,
   META_SIGNATURE_HEADER,
   timingSafeStringEqual,
   verifyMetaSignature,
 } from "@/lib/security/crypto";
-import type { WhatsAppWebhookPayload } from "@/lib/domain/whatsapp/core/types";
+import type { WhatsAppWebhookPayload } from "@/lib/domain/whatsapp/types";
 
 export const runtime = "nodejs";
 

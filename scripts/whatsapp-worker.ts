@@ -18,10 +18,10 @@ import { closeRedisClient } from "@/lib/core/redis";
 import { closeDocumentIngestionQueue } from "@/lib/domain/ingestion/queue/documentIngestionQueue";
 import {
   closeWhatsAppIncomingQueue,
+  createWhatsAppIncomingWorker,
   getWhatsAppIncomingQueue,
-} from "@/lib/domain/whatsapp/queue/whatsappIncomingQueue";
+} from "@/lib/domain/whatsapp/worker";
 import { createDocumentIngestionWorker } from "@/lib/domain/ingestion/workers/documentIngestionWorker";
-import { createWhatsAppIncomingWorker } from "@/lib/domain/whatsapp/workers/whatsappIncomingWorker";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
 
 if (!process.env.WHATSAPP_ACCESS_TOKEN?.trim() || !process.env.WHATSAPP_PHONE_NUMBER_ID?.trim()) {

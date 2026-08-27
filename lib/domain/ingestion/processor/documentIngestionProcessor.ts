@@ -24,16 +24,16 @@ import { logError, logInfo, logWarn } from "@/lib/core/logger";
 import {
   downloadWhatsAppMedia,
   isRetryableMediaError,
+  sendWhatsAppTextMessage,
+  UNAUTHORIZED_NUMBER_MESSAGE,
   WhatsAppMediaError,
-} from "@/lib/domain/whatsapp/core/mediaDownload";
-import { sendWhatsAppTextMessage } from "@/lib/domain/whatsapp/core/sendMessage";
-import type { ParsedInboundDocumentEvent } from "@/lib/domain/whatsapp/core/types";
-import { UNAUTHORIZED_NUMBER_MESSAGE } from "@/lib/domain/whatsapp/core/userMessages";
+} from "@/lib/domain/whatsapp/client";
+import type { ParsedInboundDocumentEvent } from "@/lib/domain/whatsapp/types";
 
 // ── Replies ────────────────────────────────────────────────────────────────
 const SUCCESS_MESSAGE = "המסמך עובד בהצלחה וזמין במערכת.";
 const FAILURE_MESSAGE = "עיבוד המסמך נכשל. אפשר לנסות לשלוח אותו שוב בעוד מספר דקות.";
-// Identical wording to lib/domain/whatsapp/core/incomingMessageProcessor.ts: an unregistered
+// Identical wording to lib/domain/whatsapp/webhook.ts: an unregistered
 // number must not be able to tell the two paths apart.
 const PERMISSION_DENIED_MESSAGE =
   "אין לך הרשאה להוסיף מסמכים למאגר הידע. הפעולה שמורה לצוות מטה (L0) ולמנהלות הכשרה (L1).";

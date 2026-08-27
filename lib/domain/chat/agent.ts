@@ -43,8 +43,10 @@ import {
   setAdminSession,
   type AdminSession,
 } from "@/lib/domain/chat/session/adminSession";
-import { formatWhatsAppMarkdown } from "@/lib/domain/whatsapp/core/formatting";
-import { sendWhatsAppInteractiveButtons } from "@/lib/domain/whatsapp/core/messaging";
+import {
+  formatWhatsAppMarkdown,
+  sendWhatsAppInteractiveButtons,
+} from "@/lib/domain/whatsapp/client";
 import type { ChatMessage } from "@/lib/domain/chat/state";
 import { runBaselineRagCore, type BaselineRagCoreResult } from "@/lib/domain/chat/rag";
 import {
@@ -827,7 +829,7 @@ async function handleAddUserInput(
   // `query` has been through `redactPii`, which rewrites any Israeli phone
   // number to "[PHONE_REDACTED]" — parsing it can only ever yield MISSING_PHONE.
   // `commandText` is the same message before redaction, supplied for exactly
-  // this reason (lib/domain/whatsapp/core/incomingMessageProcessor.ts). It falls back to
+  // this reason (lib/domain/whatsapp/webhook.ts). It falls back to
   // `query` for callers outside the WhatsApp pipeline, such as the evaluator.
   const parsed = parseAddUserInput(commandText ?? query);
 
@@ -1058,7 +1060,7 @@ export interface BaselineProcessInput {
   senderPhone: string;
   /**
    * Already redacted and safety-screened by
-   * lib/domain/whatsapp/core/incomingMessageProcessor.ts. Never raw webhook text.
+   * lib/domain/whatsapp/webhook.ts. Never raw webhook text.
    */
   query: string;
   /**

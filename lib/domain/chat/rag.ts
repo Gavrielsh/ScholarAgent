@@ -20,7 +20,7 @@ import {
 import { getLlmAdapter, type LlmMessage } from "@/lib/domain/chat/llm";
 import { computeDls, startBaselineRagTrace, type DlsResult } from "@/lib/core/telemetry";
 import { logError } from "@/lib/core/logger";
-import { formatWhatsAppMarkdown } from "@/lib/domain/whatsapp/core/formatting";
+import { formatWhatsAppMarkdown } from "@/lib/domain/whatsapp/client";
 import { MAX_HISTORY_TURNS } from "@/lib/domain/chat/session/context";
 
 /**

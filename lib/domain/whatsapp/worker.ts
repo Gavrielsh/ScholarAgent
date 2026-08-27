@@ -1,6 +1,11 @@
-import { Worker } from "bullmq";
+// WhatsApp incoming queue and its BullMQ worker.
+//
+// Both stay inside lib/domain/whatsapp/ by design: the queue definition and the
+// job handler are domain concerns. Only the generic plumbing they build on —
+// the connection factory, the deadline race, the attempt accounting — lives in
+// lib/core/queue.ts.
 
-import { parsePositiveInt } from "@/lib/core/env";
+import { Queue, Worker } from "bullmq";
 import {
   currentAttempt,
   getQueueConnection,
@@ -9,16 +14,73 @@ import {
   maxAttempts,
   runWithDeadline,
 } from "@/lib/core/queue";
+import { parsePositiveInt } from "@/lib/core/env";
+import { WHATSAPP_INCOMING_QUEUE_NAME, type ParsedInboundEvent } from "@/lib/domain/whatsapp/types";
 import { releaseWhatsAppMessageClaim } from "@/lib/core/redis";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
 import { isAbortError } from "@/lib/core/http/fetchWithTimeout";
-import {
-  markMessageReadAndTyping,
-  startTypingKeepAlive,
-} from "@/lib/domain/whatsapp/core/messaging";
-import { processIncomingMessage } from "@/lib/domain/whatsapp/core/incomingMessageProcessor";
-import type { ParsedInboundEvent } from "@/lib/domain/whatsapp/core/types";
-import { WHATSAPP_INCOMING_QUEUE_NAME } from "@/lib/domain/whatsapp/core/types";
+import { markMessageReadAndTyping, startTypingKeepAlive } from "@/lib/domain/whatsapp/client";
+import { processIncomingMessage } from "@/lib/domain/whatsapp/webhook";
+
+// -------------------------------------------------------------------------
+// Queue
+// -------------------------------------------------------------------------
+
+const DEFAULT_JOB_ATTEMPTS = 5;
+const DEFAULT_BACKOFF_MS = 2_000;
+
+let incomingQueue: Queue<ParsedInboundEvent> | null = null;
+
+/**
+ * BullMQ rejects custom job ids containing a colon. Mirror the document queue
+ * sanitiser so a late Meta redelivery cannot create a second chat job after
+ * the Redis claim TTL expires.
+ */
+export function whatsappIncomingJobId(messageId: string): string {
+  return `wa_${messageId.replace(/:/g, "_")}`;
+}
+
+function getIncomingQueue(): Queue<ParsedInboundEvent> {
+  if (!incomingQueue) {
+    incomingQueue = new Queue<ParsedInboundEvent>(WHATSAPP_INCOMING_QUEUE_NAME, {
+      connection: getQueueConnection(),
+      defaultJobOptions: {
+        attempts: parsePositiveInt(
+          process.env.WHATSAPP_INCOMING_JOB_ATTEMPTS,
+          DEFAULT_JOB_ATTEMPTS
+        ),
+        backoff: { type: "exponential", delay: DEFAULT_BACKOFF_MS },
+        removeOnComplete: { count: 1_000 },
+        removeOnFail: { count: 5_000 },
+      },
+    });
+  }
+  return incomingQueue;
+}
+
+export function getWhatsAppIncomingQueue(): Queue<ParsedInboundEvent> {
+  return getIncomingQueue();
+}
+
+export async function enqueueWhatsAppIncomingMessage(
+  event: ParsedInboundEvent
+): Promise<string> {
+  const job = await getIncomingQueue().add("process-incoming", event, {
+    jobId: event.messageId ? whatsappIncomingJobId(event.messageId) : undefined,
+  });
+  return job.id ?? String(job.name);
+}
+
+export async function closeWhatsAppIncomingQueue(): Promise<void> {
+  if (!incomingQueue) return;
+  const queue = incomingQueue;
+  incomingQueue = null;
+  await queue.close();
+}
+
+// -------------------------------------------------------------------------
+// Worker
+// -------------------------------------------------------------------------
 
 const DEFAULT_CONCURRENCY = 5;
 const DEFAULT_RATE_LIMIT_MAX = 10;

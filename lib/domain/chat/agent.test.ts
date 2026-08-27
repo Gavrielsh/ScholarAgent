@@ -15,7 +15,7 @@ import {
 } from "@/lib/domain/chat/agent";
 import { normalizePhoneNumber } from "@/lib/security/auth";
 import { redactPii } from "@/lib/security/guardrails";
-import { chunkWhatsAppText, WHATSAPP_TEXT_CHAR_LIMIT } from "@/lib/domain/whatsapp/core/formatting";
+import { chunkWhatsAppText, WHATSAPP_TEXT_CHAR_LIMIT } from "@/lib/domain/whatsapp/client";
 
 describe("normalizePhoneNumber", () => {
   it("converts Israeli local numbers to the WhatsApp E.164 form stored in the DB", () => {

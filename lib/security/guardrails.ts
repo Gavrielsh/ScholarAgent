@@ -4,7 +4,7 @@
 //
 // The two halves run in order: callers redact first with `redactPii`, then pass
 // the redacted text to `evaluateInboundSafety` at the bottom of this file. That
-// entry point is called from lib/domain/whatsapp/core/incomingMessageProcessor.ts
+// entry point is called from lib/domain/whatsapp/webhook.ts
 // BEFORE any database write, LLM call, or trace — nothing else may run first.
 
 import { shouldSkipPrivacyGuardrails, type UserContext } from "@/lib/security/auth";

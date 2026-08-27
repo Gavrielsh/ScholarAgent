@@ -12,7 +12,7 @@ import {
  * Backed by Redis (same store as lib/domain/chat/session/adminSession.ts) because:
  *  - it must survive across serverless/worker instances and restarts, and
  *  - the BullMQ worker runs with concurrency > 1 and no per-sender lock
- *    (lib/domain/whatsapp/workers/whatsappIncomingWorker.ts), so two rapid messages from the
+ *    (lib/domain/whatsapp/worker.ts), so two rapid messages from the
  *    same admin can be processed concurrently. Every operation below is a single
  *    atomic Redis command (SET/GET/EXPIRE/DEL) - there is no read-modify-write of
  *    the stored value itself, so concurrent calls can never corrupt the flag.

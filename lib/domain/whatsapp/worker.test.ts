@@ -1,4 +1,4 @@
-import { whatsappIncomingJobId } from "@/lib/domain/whatsapp/queue/whatsappIncomingQueue";
+import { whatsappIncomingJobId } from "@/lib/domain/whatsapp/worker";
 
 describe("whatsappIncomingJobId", () => {
   it("never produces a colon, prefix included", () => {
