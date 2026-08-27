@@ -1,7 +1,7 @@
 /**
  * sync_google_drive.ts — Google Drive → pgvector synchronisation for ScholarAgent
  *
- * Walks a single Drive folder and ingests every supported document into the
+ * Walks a Drive folder tree and ingests every supported document into the
  * knowledge base through the normal ingestion pipeline, so Drive-sourced
  * documents are chunked, PII-redacted, embedded and RLS-classified exactly like
  * WhatsApp uploads and HTTP uploads.
@@ -12,16 +12,42 @@
  *
  * Required environment:
  *   GOOGLE_APPLICATION_CREDENTIALS  Path to a service-account JSON key.
- *   GOOGLE_DRIVE_FOLDER_ID          Folder to synchronise (its direct children).
+ *   GOOGLE_DRIVE_FOLDER_ID          Root folder to synchronise, recursively.
  *   DATABASE_URL                    Standard ScholarAgent connection string.
  *   GEMINI_API_KEY (or the configured embedding provider's key).
  *
  * Optional environment:
- *   DRIVE_SYNC_CLASSIFICATION_LEVEL  0-3, default 0 (admin-only). See below.
+ *   DRIVE_SYNC_CLASSIFICATION_LEVEL  0-3, default 0 (admin-only).
  *   DRIVE_SYNC_MAX_BYTES             Per-file size ceiling, default 20 MiB.
  *
- * The service account must be granted read access to the folder — sharing the
- * folder with the service account's email address is enough.
+ * The service account must be granted read access to the root folder — sharing
+ * the folder with the service account's email address is enough, and the grant
+ * is inherited by every subfolder.
+ *
+ * Traversal
+ * ---------
+ * The whole tree is walked breadth-first from the root folder. Each folder is
+ * listed with `'<id>' in parents and trashed = false`, and any child that is
+ * itself a folder is queued rather than skipped, so nesting depth is unbounded.
+ *
+ * A `visitedFolderIds` set guards the walk. Drive is a graph, not a tree: a
+ * folder can legitimately appear under more than one parent, and shortcuts can
+ * point back up the tree. Without the set such a layout would make the queue
+ * cycle forever, re-ingesting the same documents on every lap.
+ *
+ * File types
+ * ----------
+ * Two kinds of file are ingested, and they need different Drive calls:
+ *
+ *   - Binary uploads (PDF, DOCX, TXT, MD, CSV) are fetched with
+ *     `files.get({ alt: "media" })`.
+ *   - Native Workspace files (Docs, Sheets, Slides) have no byte stream at all;
+ *     `alt: "media"` returns 403 for them. They are converted on Google's side
+ *     with `files.export`, which is a different method with a different
+ *     parameter set — notably it accepts no `supportsAllDrives`.
+ *
+ * Native formats with no text-bearing export (Forms, Sites, Drawings, Jamboards,
+ * Apps Script) are skipped and reported.
  *
  * Idempotency
  * -----------
@@ -65,16 +91,14 @@ const UPLOADED_BY_USER_ID = "system-drive-sync";
 
 const DEFAULT_MAX_BYTES = 20 * 1024 * 1024;
 
+const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
+const SHORTCUT_MIME_TYPE = "application/vnd.google-apps.shortcut";
+
 /**
  * Drive MIME type → the MIME type the ingestion pipeline's extractor table keys
- * on. Anything absent here is skipped and reported, rather than downloaded and
- * then rejected by `extractTextFromUpload`.
- *
- * Native Google formats (`application/vnd.google-apps.*`) are deliberately not
- * listed: they carry no byte stream and would need `files.export` rather than
- * `files.get`, which is a different code path and a different fidelity trade-off.
+ * on, for files that have a real byte stream.
  */
-const SUPPORTED_MIME_TYPES: Record<string, string> = {
+const BINARY_MIME_TYPES: Record<string, string> = {
   "application/pdf": "application/pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -90,6 +114,20 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   ".txt": "text/plain",
   ".md": "text/markdown",
   ".csv": "text/csv",
+};
+
+/**
+ * Native Workspace type → the format to ask `files.export` for.
+ *
+ * Every target here is one the pipeline's extractor table already handles, so an
+ * exported document takes exactly the same path as an uploaded one. Sheets go to
+ * CSV rather than plain text because CSV keeps the row/column structure that
+ * makes a table's cells legible once chunked.
+ */
+const WORKSPACE_EXPORT_MIME_TYPES: Record<string, string> = {
+  "application/vnd.google-apps.document": "text/plain",
+  "application/vnd.google-apps.spreadsheet": "text/csv",
+  "application/vnd.google-apps.presentation": "text/plain",
 };
 
 // ---------------------------------------------------------------------------
@@ -161,13 +199,17 @@ async function createDriveClient(): Promise<drive_v3.Drive> {
   return google.drive({ version: "v3", auth: authClient as never });
 }
 
-/** A Drive file, reduced to the fields this script actually needs. */
-interface DriveFile {
+/** A Drive entry, reduced to the fields this script actually needs. */
+interface DriveEntry {
   id: string;
   name: string;
   mimeType: string;
   modifiedTime: string;
   sizeBytes: number | null;
+  /** Id of the folder this entry was listed under. */
+  parentFolderId: string;
+  /** Slash-joined folder names from the root, e.g. "Training/2026". */
+  parentPath: string;
 }
 
 function extensionOf(name: string): string {
@@ -175,29 +217,13 @@ function extensionOf(name: string): string {
   return dot === -1 ? "" : name.slice(dot).toLowerCase();
 }
 
-/**
- * Resolves the MIME type the pipeline should extract with.
- *
- * Drive's reported type wins when it is one we support; otherwise the filename
- * extension is consulted, because Drive commonly reports `.md` as `text/plain`
- * or `application/octet-stream` depending on how the file was uploaded.
- */
-function resolveMimeType(file: DriveFile): string | null {
-  const declared = file.mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
-  const byExtension = MIME_BY_EXTENSION[extensionOf(file.name)];
-
-  // A markdown file uploaded as text/plain should still be tagged text/markdown.
-  if (byExtension === "text/markdown") return byExtension;
-  if (SUPPORTED_MIME_TYPES[declared]) return SUPPORTED_MIME_TYPES[declared];
-  return byExtension ?? null;
-}
-
-/** Every non-trashed direct child of the folder, following pagination to the end. */
-async function listFolderFiles(
+/** Lists one folder's direct children, following pagination to the end. */
+async function listFolderChildren(
   drive: drive_v3.Drive,
-  folderId: string
-): Promise<DriveFile[]> {
-  const files: DriveFile[] = [];
+  folderId: string,
+  parentPath: string
+): Promise<DriveEntry[]> {
+  const entries: DriveEntry[] = [];
   let pageToken: string | undefined;
 
   do {
@@ -213,39 +239,177 @@ async function listFolderFiles(
 
     for (const file of response.data.files ?? []) {
       // id/name/mimeType/modifiedTime are all optional in the generated types.
-      // A file missing any of them cannot be fetched or compared, so skip it
+      // An entry missing any of them cannot be fetched or compared, so skip it
       // rather than casting the absence away.
       if (!file.id || !file.name || !file.mimeType || !file.modifiedTime) {
         console.warn(`  ⚠ skipping a Drive entry with incomplete metadata (id=${file.id ?? "?"})`);
         continue;
       }
-      files.push({
+      entries.push({
         id: file.id,
         name: file.name,
         mimeType: file.mimeType,
         modifiedTime: file.modifiedTime,
+        // Native Workspace files report no size at all — that is expected, not
+        // an error, and leaves the size ceiling inapplicable to them.
         sizeBytes: file.size === null || file.size === undefined ? null : Number(file.size),
+        parentFolderId: folderId,
+        parentPath,
       });
     }
 
     pageToken = response.data.nextPageToken ?? undefined;
   } while (pageToken);
 
-  return files;
+  return entries;
 }
 
-async function downloadFile(drive: drive_v3.Drive, fileId: string): Promise<ArrayBuffer> {
+interface TraversalResult {
+  files: DriveEntry[];
+  foldersVisited: number;
+}
+
+/**
+ * Breadth-first walk of the whole tree under `rootFolderId`.
+ *
+ * Collects every non-folder entry, at any depth, before any ingestion begins, so
+ * the run can report a total up front and a listing failure deep in the tree
+ * surfaces before the first document is written.
+ */
+async function collectFilesRecursively(
+  drive: drive_v3.Drive,
+  rootFolderId: string
+): Promise<TraversalResult> {
+  const files: DriveEntry[] = [];
+  // Guards against Drive's graph shape: multi-parent folders and shortcut loops
+  // would otherwise make this queue cycle forever.
+  const visitedFolderIds = new Set<string>([rootFolderId]);
+  const queue: Array<{ id: string; path: string }> = [{ id: rootFolderId, path: "" }];
+  let foldersVisited = 0;
+
+  while (queue.length > 0) {
+    const folder = queue.shift();
+    if (!folder) break;
+
+    foldersVisited += 1;
+    const children = await listFolderChildren(drive, folder.id, folder.path);
+
+    for (const child of children) {
+      if (child.mimeType === FOLDER_MIME_TYPE) {
+        if (visitedFolderIds.has(child.id)) {
+          console.log(`  ↩  ${child.name}/ — already visited, not descending again`);
+          continue;
+        }
+        visitedFolderIds.add(child.id);
+        queue.push({
+          id: child.id,
+          path: folder.path ? `${folder.path}/${child.name}` : child.name,
+        });
+        continue;
+      }
+      files.push(child);
+    }
+  }
+
+  return { files, foldersVisited };
+}
+
+/**
+ * How a given Drive entry can be turned into text, if at all.
+ *
+ * `ingestMimeType` is what the pipeline's extractor table is keyed on in both
+ * cases; `exportMimeType` is non-null only when Drive has to convert the file
+ * server-side first.
+ */
+type FetchPlan =
+  | { kind: "binary"; ingestMimeType: string }
+  | { kind: "export"; ingestMimeType: string; exportMimeType: string }
+  | { kind: "unsupported"; reason: string };
+
+function planFetch(entry: DriveEntry): FetchPlan {
+  const declared = entry.mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
+
+  if (declared === SHORTCUT_MIME_TYPE) {
+    return {
+      kind: "unsupported",
+      reason: "shortcut — sync the file's own location instead",
+    };
+  }
+
+  const exportMimeType = WORKSPACE_EXPORT_MIME_TYPES[declared];
+  if (exportMimeType) {
+    return { kind: "export", ingestMimeType: exportMimeType, exportMimeType };
+  }
+
+  if (declared.startsWith("application/vnd.google-apps.")) {
+    // Forms, Sites, Drawings, Jamboards, Apps Script: native types with no
+    // text-bearing export target.
+    return { kind: "unsupported", reason: `no text export for ${entry.mimeType}` };
+  }
+
+  const byExtension = MIME_BY_EXTENSION[extensionOf(entry.name)];
+  // A markdown file uploaded as text/plain should still be tagged text/markdown.
+  if (byExtension === "text/markdown") {
+    return { kind: "binary", ingestMimeType: byExtension };
+  }
+  if (BINARY_MIME_TYPES[declared]) {
+    return { kind: "binary", ingestMimeType: BINARY_MIME_TYPES[declared] };
+  }
+  if (byExtension) {
+    return { kind: "binary", ingestMimeType: byExtension };
+  }
+
+  return { kind: "unsupported", reason: `unsupported type ${entry.mimeType}` };
+}
+
+/** Normalises whatever gaxios hands back into an ArrayBuffer. */
+function toArrayBuffer(data: unknown): ArrayBuffer {
+  if (Buffer.isBuffer(data)) {
+    return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+  }
+  if (data instanceof ArrayBuffer) {
+    return data;
+  }
+  // Exports of text formats can arrive already decoded to a string.
+  if (typeof data === "string") {
+    const encoded = new TextEncoder().encode(data);
+    return encoded.buffer.slice(
+      encoded.byteOffset,
+      encoded.byteOffset + encoded.byteLength
+    ) as ArrayBuffer;
+  }
+  throw new Error(`Unexpected Drive response body of type ${typeof data}.`);
+}
+
+async function downloadBinaryFile(
+  drive: drive_v3.Drive,
+  fileId: string
+): Promise<ArrayBuffer> {
   const response = await drive.files.get(
     { fileId, alt: "media", supportsAllDrives: true },
     { responseType: "arraybuffer" }
   );
-  // With responseType "arraybuffer" the generated typings still describe
-  // `data` as unknown, so narrow it here rather than at every call site.
-  const data = response.data as ArrayBuffer | Buffer;
-  if (Buffer.isBuffer(data)) {
-    return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
-  }
-  return data;
+  return toArrayBuffer(response.data);
+}
+
+/**
+ * Converts a native Workspace file server-side and downloads the result.
+ *
+ * `files.export` accepts only `fileId` and `mimeType` — there is no
+ * `supportsAllDrives` on this method, unlike `files.get`. Google caps an export
+ * at 10 MB of converted content and fails the request beyond that, which is
+ * reported as-is rather than silently truncating the document.
+ */
+async function exportWorkspaceFile(
+  drive: drive_v3.Drive,
+  fileId: string,
+  exportMimeType: string
+): Promise<ArrayBuffer> {
+  const response = await drive.files.export(
+    { fileId, mimeType: exportMimeType },
+    { responseType: "arraybuffer" }
+  );
+  return toArrayBuffer(response.data);
 }
 
 // ---------------------------------------------------------------------------
@@ -264,7 +428,7 @@ interface RegisteredDocument {
  * SECURITY and its SELECT policy compares `classification_level` against
  * `app.user_permission_level`. With that setting unset the comparison is NULL,
  * no row is visible, and this function would report every file as new — turning
- * every run into a full re-ingest of the whole folder.
+ * every run into a full re-ingest of the whole tree.
  */
 async function findRegisteredDocument(driveFileId: string): Promise<RegisteredDocument | null> {
   return withRlsTransaction(ADMIN_PERMISSION_LEVEL, async (client) => {
@@ -299,7 +463,7 @@ async function deleteRegisteredDocument(documentId: string): Promise<void> {
 // Sync
 // ---------------------------------------------------------------------------
 
-type Outcome = "new" | "updated" | "unchanged" | "skipped" | "failed";
+type Outcome = "new" | "updated" | "unchanged" | "skipped";
 
 interface SyncTotals {
   new: number;
@@ -308,43 +472,54 @@ interface SyncTotals {
   skipped: number;
   failed: number;
   chunks: number;
+  exported: number;
+}
+
+function displayName(entry: DriveEntry): string {
+  return entry.parentPath ? `${entry.parentPath}/${entry.name}` : entry.name;
 }
 
 async function syncFile(
   drive: drive_v3.Drive,
-  file: DriveFile,
+  entry: DriveEntry,
   config: SyncConfig,
   totals: SyncTotals
 ): Promise<Outcome> {
-  const mimeType = resolveMimeType(file);
-  if (!mimeType) {
-    console.log(`  ⏭  ${file.name} — unsupported type (${file.mimeType})`);
+  const label = displayName(entry);
+  const plan = planFetch(entry);
+
+  if (plan.kind === "unsupported") {
+    console.log(`  ⏭  ${label} — ${plan.reason}`);
     totals.skipped += 1;
     return "skipped";
   }
 
-  if (config.maxBytes > 0 && file.sizeBytes !== null && file.sizeBytes > config.maxBytes) {
+  // Native Workspace files report no size, so the ceiling only ever applies to
+  // binary uploads. Their export size is enforced by Google instead.
+  if (config.maxBytes > 0 && entry.sizeBytes !== null && entry.sizeBytes > config.maxBytes) {
     console.log(
-      `  ⏭  ${file.name} — ${file.sizeBytes} bytes exceeds DRIVE_SYNC_MAX_BYTES (${config.maxBytes})`
+      `  ⏭  ${label} — ${entry.sizeBytes} bytes exceeds DRIVE_SYNC_MAX_BYTES (${config.maxBytes})`
     );
     totals.skipped += 1;
     return "skipped";
   }
 
-  const existing = await findRegisteredDocument(file.id);
+  const existing = await findRegisteredDocument(entry.id);
 
   // The comparison is on Drive's own modifiedTime string, stored verbatim on the
   // previous ingestion. Comparing parsed dates instead would make an unchanged
   // file look changed whenever Drive alters its timestamp formatting.
-  if (existing && existing.driveModifiedTime === file.modifiedTime) {
-    console.log(`  ✓  ${file.name} — unchanged (${file.modifiedTime})`);
+  if (existing && existing.driveModifiedTime === entry.modifiedTime) {
+    console.log(`  ✓  ${label} — unchanged (${entry.modifiedTime})`);
     totals.unchanged += 1;
     return "unchanged";
   }
 
   const isUpdate = existing !== null;
-  const label = isUpdate ? "updated in Drive" : "new";
-  console.log(`  →  ${file.name} — ${label} (${file.modifiedTime})`);
+  const via = plan.kind === "export" ? ` via export → ${plan.exportMimeType}` : "";
+  console.log(
+    `  →  ${label} — ${isUpdate ? "updated in Drive" : "new"}${via} (${entry.modifiedTime})`
+  );
 
   if (config.dryRun) {
     console.log(`     [dry-run] would ${isUpdate ? "re-ingest" : "ingest"} this file`);
@@ -352,13 +527,21 @@ async function syncFile(
     return isUpdate ? "updated" : "new";
   }
 
-  const bytes = await downloadFile(drive, file.id);
+  const bytes =
+    plan.kind === "export"
+      ? await exportWorkspaceFile(drive, entry.id, plan.exportMimeType)
+      : await downloadBinaryFile(drive, entry.id);
 
-  // Same guard the HTTP upload route applies: a file whose declared type does
-  // not match its magic bytes is rejected before it reaches a parser.
-  assertMimeMatchesContent(new Uint8Array(bytes), mimeType);
+  if (plan.kind === "export") {
+    totals.exported += 1;
+  }
 
-  const text = await extractTextFromUpload(bytes, mimeType);
+  // Same guard the HTTP upload route applies. It sniffs PDF and DOCX only, so it
+  // is a no-op for the text formats every export produces — harmless to call
+  // uniformly, and it keeps binary downloads honest.
+  assertMimeMatchesContent(new Uint8Array(bytes), plan.ingestMimeType);
+
+  const text = await extractTextFromUpload(bytes, plan.ingestMimeType);
   if (!text.trim()) {
     console.log(`     ⚠ no extractable text — skipping (scanned image or empty document?)`);
     totals.skipped += 1;
@@ -372,8 +555,8 @@ async function syncFile(
   }
 
   const result = await ingestDocument({
-    filename: file.name,
-    mimeType,
+    filename: entry.name,
+    mimeType: plan.ingestMimeType,
     text,
     classificationLevel: config.classificationLevel,
     uploadedByUserId: UPLOADED_BY_USER_ID,
@@ -382,11 +565,17 @@ async function syncFile(
     uploadedByPermissionLevel: ADMIN_PERMISSION_LEVEL,
     source: SOURCE,
     extraMetadata: {
-      drive_file_id: file.id,
-      drive_modified_time: file.modifiedTime,
+      // The two idempotency keys. Nothing else in this object is read back.
+      drive_file_id: entry.id,
+      drive_modified_time: entry.modifiedTime,
+      // Root of the sync, unchanged in meaning from before recursion existed.
       drive_folder_id: config.folderId,
-      drive_mime_type: file.mimeType,
-      original_size_bytes: file.sizeBytes,
+      // Where the file actually sits, now that the walk goes deeper than the root.
+      drive_parent_folder_id: entry.parentFolderId,
+      drive_path: label,
+      drive_mime_type: entry.mimeType,
+      drive_export_mime_type: plan.kind === "export" ? plan.exportMimeType : null,
+      original_size_bytes: entry.sizeBytes,
       synced_at: new Date().toISOString(),
     },
   });
@@ -405,21 +594,26 @@ async function main(): Promise<void> {
   const config = readConfig();
 
   console.log("Google Drive → ScholarAgent sync");
-  console.log(`  folder:         ${config.folderId}`);
+  console.log(`  root folder:    ${config.folderId}`);
   console.log(`  classification: L${config.classificationLevel}`);
-  console.log(`  max file size:  ${config.maxBytes} bytes`);
+  console.log(`  max file size:  ${config.maxBytes} bytes (binary uploads only)`);
   if (config.dryRun) console.log("  mode:           DRY RUN (nothing is written)");
   console.log("");
 
   const drive = await createDriveClient();
-  const files = await listFolderFiles(drive, config.folderId);
+
+  console.log("Walking the folder tree…");
+  const { files, foldersVisited } = await collectFilesRecursively(drive, config.folderId);
 
   if (files.length === 0) {
-    console.log("No files found in the folder. Is it shared with the service account?");
+    console.log(
+      `No files found across ${foldersVisited} folder(s). ` +
+        "Is the root shared with the service account?"
+    );
     return;
   }
 
-  console.log(`Found ${files.length} file(s).\n`);
+  console.log(`Found ${files.length} file(s) across ${foldersVisited} folder(s).\n`);
 
   const totals: SyncTotals = {
     new: 0,
@@ -428,28 +622,31 @@ async function main(): Promise<void> {
     skipped: 0,
     failed: 0,
     chunks: 0,
+    exported: 0,
   };
 
   // Sequential on purpose: each ingestion holds a document, its chunks and every
   // 768-float vector in memory, and they all contend for the same embedding
   // provider quota. Parallelising here buys throttling, not throughput.
-  for (const file of files) {
+  for (const entry of files) {
     try {
-      await syncFile(drive, file, config, totals);
+      await syncFile(drive, entry, config, totals);
     } catch (err) {
-      // One unreadable file must not abandon the rest of the folder.
+      // One unreadable file must not abandon the rest of the tree.
       const message = err instanceof Error ? err.message : String(err);
-      console.error(`  ❌ ${file.name} — ${message}`);
+      console.error(`  ❌ ${displayName(entry)} — ${message}`);
       totals.failed += 1;
     }
   }
 
   console.log("\n─────────────────────────────────────────");
+  console.log(`  folders:   ${foldersVisited}`);
   console.log(`  new:       ${totals.new}`);
   console.log(`  updated:   ${totals.updated}`);
   console.log(`  unchanged: ${totals.unchanged}`);
   console.log(`  skipped:   ${totals.skipped}`);
   console.log(`  failed:    ${totals.failed}`);
+  console.log(`  exported:  ${totals.exported} (native Workspace files)`);
   console.log(`  chunks:    ${totals.chunks}`);
   console.log("─────────────────────────────────────────");
 
