@@ -3,6 +3,14 @@
 // Both stay inside lib/domain/ingestion/: the queue definition and the job
 // handler are domain concerns. Only the generic plumbing they build on lives in
 // lib/core/queue.ts.
+//
+// IMPORTANT: this file must NOT import lib/domain/ingestion/pipeline.ts at the
+// top level. The producer half (enqueueDocumentIngestion) is imported by
+// app/api/whatsapp/webhook/route.ts, and a static edge from here to the pipeline
+// puts pdf-parse/pdfjs-dist into that route's bundle, where webpack's transform
+// breaks it ("Object.defineProperty called on non-object") and the route fails
+// to compile. The consumer half loads the pipeline dynamically, inside the job
+// processor, so only a process that actually runs jobs ever resolves it.
 
 import { Queue, Worker } from "bullmq";
 import {
@@ -21,7 +29,6 @@ import {
 import { isAbortError } from "@/lib/core/http/fetchWithTimeout";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
 import { releaseWhatsAppMessageClaim } from "@/lib/core/redis";
-import { processDocumentIngestion } from "@/lib/domain/ingestion/pipeline";
 import { markMessageReadAndTyping } from "@/lib/domain/whatsapp/client";
 
 // -------------------------------------------------------------------------
@@ -150,6 +157,11 @@ export function createDocumentIngestionWorker(): Worker<ParsedInboundDocumentEve
         if (messageId) {
           await markMessageReadAndTyping(messageId, signal);
         }
+
+        // Loaded here rather than at module scope: see the note at the top of
+        // this file. Node caches the module, so only the first job on this
+        // process pays for resolving it.
+        const { processDocumentIngestion } = await import("@/lib/domain/ingestion/pipeline");
 
         await processDocumentIngestion(job.data, {
           attempt: currentAttempt(job),

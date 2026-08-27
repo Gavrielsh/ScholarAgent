@@ -2,7 +2,7 @@
 const nextConfig = {
   output: "standalone",
   experimental: {
-    serverComponentsExternalPackages: ["pg"],
+    serverComponentsExternalPackages: ["pg", "pdf-parse", "pdfjs-dist"],
     instrumentationHook: true,
   },
   eslint: {
