@@ -6,3 +6,4 @@ tsconfig.tsbuildinfo
 
 local_data/
 scripts/output/
+google-credentials.json
