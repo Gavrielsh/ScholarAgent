@@ -1,0 +1,40 @@
+name: ScholarAgent CI
+
+# Triggers on push or pull request targeting the main branch
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-and-lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Fetch repository code
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 2. Setup Node.js runtime with npm caching
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      # 3. Deterministic dependency installation based on package-lock.json
+      - name: Install Dependencies
+        run: npm ci
+
+      # 4. Static type checking without compilation output
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # 5. Code style and quality verification
+      - name: Run Linter
+        run: npm run lint
+
+      # 6. Execute test suite
+      - name: Run Tests
+        run: npm test
