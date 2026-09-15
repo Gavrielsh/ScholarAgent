@@ -38,3 +38,35 @@ jobs:
       # 6. Execute test suite
       - name: Run Tests
         run: npm test
+
+  build-containers:
+    # Runs only after test-and-lint job succeeds
+    needs: test-and-lint
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Fetch repository code
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 2. Set up Docker Buildx for optimized caching and multi-platform builds
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 3. Verify Docker build for the web application
+      - name: Build Web Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          push: false
+          tags: scholaragent-web:latest
+
+      # 4. Verify Docker build for the background worker
+      - name: Build Worker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile.worker
+          push: false
+          tags: scholaragent-worker:latest
