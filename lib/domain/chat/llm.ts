@@ -227,9 +227,13 @@ export class GeminiAdapter implements LlmAdapter {
 // Uses raw fetch to match the pattern of all other providers in this codebase.
 // Docs: https://docs.anthropic.com/en/api/messages
 
-const DEFAULT_MODEL = "claude-sonnet-4-6";
+// Claude 5 family. The thesis reports model-comparison results, so the arms
+// must name the current frontier rather than whichever generation was current
+// when the proposal was written — a faithfulness number on a superseded model
+// dates the finding rather than supporting it.
+const DEFAULT_MODEL = "claude-sonnet-5-5";
 /** Lightweight model for fast intent-classification calls. */
-const DEFAULT_FAST_MODEL = "claude-haiku-4-5-20251001";
+const DEFAULT_FAST_MODEL = "claude-haiku-5-5";
 const ANTHROPIC_VERSION = "2023-06-01";
 const ENDPOINT = "https://api.anthropic.com/v1/messages";
 
@@ -330,10 +334,20 @@ export class ClaudeAdapter implements LlmAdapter {
       input.model?.trim() ?? process.env.CLAUDE_MODEL?.trim() ?? DEFAULT_MODEL;
 
     // Normalize generic aliases used by evaluation runners or configs.
+    // The superseded ids stay mapped so an older config or a recorded run
+    // keeps resolving instead of failing against the API.
     const lower = modelRequested.toLowerCase();
-    if (lower === "claude" || lower === "claude-3-5-sonnet") {
+    if (
+      lower === "claude" ||
+      lower === "claude-3-5-sonnet" ||
+      lower === "claude-sonnet-4-6"
+    ) {
       modelRequested = DEFAULT_MODEL;
-    } else if (lower === "claude-fast" || lower === "claude-3-haiku") {
+    } else if (
+      lower === "claude-fast" ||
+      lower === "claude-3-haiku" ||
+      lower === "claude-haiku-4-5-20251001"
+    ) {
       modelRequested = DEFAULT_FAST_MODEL;
     }
 
