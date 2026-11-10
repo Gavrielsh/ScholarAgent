@@ -34,6 +34,8 @@ export interface UserContext {
   permissionLevel: PermissionLevel;
   roleName: string;
   organizationId?: string;
+  /** From `users.display_name`. Absent for rows with no name on file. */
+  displayName?: string;
 }
 
 // A knowledge-base chunk carries the minimum permission level required to access it.
@@ -138,6 +140,7 @@ interface UserRow {
   phone_number: string;
   permission_level: PermissionLevel;
   organization_id: string | null;
+  display_name: string | null;
 }
 
 function redactPhone(phoneNumber: string): string {
@@ -159,6 +162,7 @@ function toUserContext(row: UserRow): UserContext | null {
     permissionLevel: row.permission_level,
     roleName: PERMISSION_ROLE[row.permission_level],
     organizationId: row.organization_id ?? undefined,
+    displayName: row.display_name?.trim() || undefined,
   };
 }
 
@@ -181,7 +185,7 @@ export async function lookupUserByPhone(phoneNumber: string): Promise<UserContex
   let result;
   try {
     result = await query<UserRow>(
-      `SELECT id, phone_number, permission_level, organization_id
+      `SELECT id, phone_number, permission_level, organization_id, display_name
          FROM users
         WHERE phone_number = $1
         LIMIT 1;`,
@@ -216,7 +220,7 @@ export async function lookupUserById(userId: string): Promise<UserContext | null
   let result;
   try {
     result = await query<UserRow>(
-      `SELECT id, phone_number, permission_level, organization_id
+      `SELECT id, phone_number, permission_level, organization_id, display_name
          FROM users
         WHERE id = $1
         LIMIT 1;`,

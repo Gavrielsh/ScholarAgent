@@ -38,23 +38,14 @@ const FALLBACK_USER_NAME_HE = "חבר/ה";
 /**
  * Best-effort display name for the greeting.
  *
- * `UserContext` does not currently carry one — `lookupUserByPhone` maps the
- * users row onto { userId, permissionLevel, roleName, organizationId } and drops
- * `display_name` on the way. The optional field is read structurally so this
- * starts personalising the moment `displayName` is threaded onto the context in
- * lib/security/auth.ts, with no further change here. Until then every caller
- * takes the fallback.
+ * Falls back for callers whose `users` row has no name on file.
  *
  * `roleName` is deliberately NOT used as a substitute: it holds "Admin",
  * "Manager", "Staff" or "Volunteer", so greeting someone as "שלום Manager!"
  * would read worse than the neutral fallback.
  */
 function resolveUserName(userContext: UserContext): string {
-  const candidate = (userContext as UserContext & { displayName?: unknown }).displayName;
-  if (typeof candidate === "string" && candidate.trim()) {
-    return candidate.trim();
-  }
-  return FALLBACK_USER_NAME_HE;
+  return userContext.displayName?.trim() || FALLBACK_USER_NAME_HE;
 }
 
 /**
