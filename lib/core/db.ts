@@ -127,6 +127,13 @@ async function withPoolClient<T>(
     return await fn(client);
   } catch (err) {
     logError(event, err);
+    if (isConnectionLostError(err)) {
+      logError(
+        "postgres_connection_lost",
+        new Error("Database connection lost. The pool will open a fresh connection on the next query."),
+        { originalEvent: event }
+      );
+    }
     throw err;
   } finally {
     if (client) {
@@ -202,6 +209,13 @@ export async function query<T extends QueryResultRow = QueryResultRow>(
     return await getPool().query<T>(text, params as never);
   } catch (err) {
     logError("postgres_query_error", err, { sqlPreview: text.slice(0, 120) });
+    if (isConnectionLostError(err)) {
+      logError(
+        "postgres_connection_lost",
+        new Error("Database connection lost. The pool will open a fresh connection on the next query."),
+        { originalEvent: "postgres_query_error" }
+      );
+    }
     throw err;
   }
 }
@@ -210,11 +224,39 @@ export async function query<T extends QueryResultRow = QueryResultRow>(
 interface PostgresErrorShape {
   code?: unknown;
   constraint?: unknown;
+  message?: unknown;
 }
 
 function asPostgresError(err: unknown): PostgresErrorShape | null {
   if (typeof err !== "object" || err === null) return null;
   return err as PostgresErrorShape;
+}
+
+/**
+ * TCP/Postgres codes and messages that mean the connection itself dropped
+ * (network blip, DB restart, admin shutdown) rather than the query being
+ * malformed. Distinguishing the two lets callers emit an actionable
+ * "connection lost" signal instead of one indistinguishable from a SQL bug.
+ */
+const CONNECTION_LOST_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EHOSTUNREACH",
+  "EPIPE",
+  "57P01", // admin_shutdown
+  "57P02", // crash_shutdown
+  "57P03", // cannot_connect_now
+]);
+
+const CONNECTION_LOST_MESSAGE_RE =
+  /connection terminated|connection ended unexpectedly|server closed the connection|timeout expired/i;
+
+function isConnectionLostError(err: unknown): boolean {
+  const shape = asPostgresError(err);
+  if (!shape) return false;
+  if (typeof shape.code === "string" && CONNECTION_LOST_CODES.has(shape.code)) return true;
+  return typeof shape.message === "string" && CONNECTION_LOST_MESSAGE_RE.test(shape.message);
 }
 
 /**

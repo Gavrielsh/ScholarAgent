@@ -89,11 +89,15 @@ const DISTRESS_PATTERNS: RegExp[] = [
   /הורעל/,
   /הרעלה/,
 
-  // פגיעה רגשית חמורה, חרם והשפלה
-  /חרם/,
-  /עושים\s*חרם/,
-  /השפלה/,
-  /משפילים/,
+  // פגיעה רגשית חמורה, סחיטה ואיומים
+  //
+  // Ordinary peer conflict — boycotts ("חרם"), exclusion, and humiliation — is
+  // deliberately NOT in this list. Those are exactly the social-conflict cases
+  // the LLM's Educator Override prompt is meant to handle (mentoring on
+  // boycott prevention, mediating fights); hard-blocking them here diverted the
+  // conversation to a human handoff before the model ever saw the message. They
+  // still score risk via NEGATIVE_TARGETING_PATTERNS below, which can trigger a
+  // privacy-safe rewrite without a mandatory handoff.
   /התעללות/,
   /מתעללים/,
   /סחיטה/,

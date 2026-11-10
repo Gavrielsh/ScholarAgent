@@ -115,6 +115,44 @@ const RTL_MARK = "\u200F";
  */
 export const WHATSAPP_HTTP_TIMEOUT_MS = Number(process.env.WHATSAPP_HTTP_TIMEOUT_MS ?? 15_000);
 
+// -------------------------------------------------------------------------
+// Auth circuit breaker
+// -------------------------------------------------------------------------
+
+/**
+ * How long the breaker stays open after a 401 from the Graph API.
+ *
+ * A 401 means the access token itself is invalid or expired — retrying the
+ * same request cannot fix that, and every queued job hitting the API again
+ * just burns another timeout budget on an identical rejection. The breaker
+ * fails fast for this window so an expired token produces one loud signal
+ * instead of one per queued message; callers still see the same `{ ok:
+ * false, status: 401 }` shape (and jobs still fail/retry per their own
+ * BullMQ policy) as they would from a real 401.
+ */
+const AUTH_CIRCUIT_COOLDOWN_MS = Number(
+  process.env.WHATSAPP_AUTH_CIRCUIT_COOLDOWN_MS ?? 60_000
+);
+
+let authCircuitOpenUntil = 0;
+
+function isAuthCircuitOpen(): boolean {
+  return Date.now() < authCircuitOpenUntil;
+}
+
+/** Opens the breaker and logs once per trip, not once per suppressed call. */
+function tripAuthCircuit(status: number, body: string): void {
+  const alreadyOpen = isAuthCircuitOpen();
+  authCircuitOpenUntil = Date.now() + AUTH_CIRCUIT_COOLDOWN_MS;
+  if (!alreadyOpen) {
+    logError(
+      "whatsapp_token_expired",
+      new Error("WhatsApp Token Expired: Graph API rejected the access token (401)."),
+      { status, bodyPreview: body.slice(0, 300), cooldownMs: AUTH_CIRCUIT_COOLDOWN_MS }
+    );
+  }
+}
+
 function backoffDelayMs(attempt: number, retryAfterHeader: string | null): number {
   if (retryAfterHeader) {
     const seconds = Number.parseInt(retryAfterHeader, 10);
@@ -200,6 +238,14 @@ export async function postGraphMessages(
   const maxAttempts = options.retries === false ? 1 : MAX_ATTEMPTS;
   let lastError: Error | null = null;
 
+  if (isAuthCircuitOpen()) {
+    return {
+      ok: false,
+      status: 401,
+      body: "WhatsApp Token Expired: circuit breaker open, skipping Graph API call.",
+    };
+  }
+
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (options.signal?.aborted) {
       throw new Error("WhatsApp send cancelled before completion.");
@@ -220,6 +266,11 @@ export async function postGraphMessages(
 
       if (response.ok) {
         return { ok: true, status: response.status, body: response.body };
+      }
+
+      if (response.status === 401) {
+        tripAuthCircuit(response.status, response.body);
+        return { ok: false, status: response.status, body: response.body };
       }
 
       const retryable = RETRYABLE_STATUS.has(response.status);
