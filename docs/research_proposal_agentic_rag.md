@@ -75,24 +75,25 @@ sanitization boundary auditable in isolation. Second, HMAC signature
 verification sits in `lib/security/crypto/` rather than in the WhatsApp domain,
 so the gateway's authenticity check is separable from its message-parsing logic.
 
-`lib/security/` currently satisfies the intended direction in full: it depends
-only on `lib/core/` (the database client and the logger) and imports nothing
-from `lib/domain/`. `lib/core/` does **not** yet satisfy it. Four modules retain
-outward dependencies inherited from the pre-refactor layout, which the new
-boundaries make explicit rather than introduce:
+Both boundaries now satisfy the intended direction in full. `lib/security/`
+depends only on `lib/core/` and imports nothing from `lib/domain/`. `lib/core/`
+imports nothing outward at all: its only non-relative imports are the `pg`,
+`bullmq` and `ioredis` drivers, `node:crypto`, and other `lib/core/` modules.
 
-| Module | Outward dependency | Nature |
-|---|---|---|
-| `lib/core/db/pgvector.ts` | `lib/domain/ingestion/processor/` (`chunker`, `chunkMetadata`, `embeddings`), `lib/security/auth/` | The write path embeds and chunks inline, so the vector store owns ingestion logic |
-| `lib/core/metrics/ragas.ts` | `lib/domain/chat/llm/adapter` | LLM-as-judge scoring calls the chat domain's provider adapter |
-| `lib/core/observability/tracing.ts` | `lib/domain/chat/llm/types` | Trace payloads are typed in terms of chat message types |
-| `lib/core/db/client.ts`, `lib/core/metrics/dls.ts` | `lib/security/auth/types` | `PermissionLevel` / `UserContext` are used as RLS and scoring parameters |
+An earlier revision of this section recorded four outward dependencies in
+`lib/core/` inherited from the pre-refactor layout — the vector store owning
+inline chunking and embedding, LLM-as-judge scoring reaching into the chat
+domain's provider adapter, trace payloads typed in terms of chat message types,
+and `PermissionLevel` / `UserContext` crossing in as RLS and scoring parameters.
+All four were resolved by the consolidation that followed, which moved the
+behaviour rather than the files: the embed-and-chunk step left the persistence
+layer for `lib/domain/ingestion/`, and the shared permission type became the
+dependency-free `AccessLevel` contract in `lib/core/db/accessLevel.ts`, which
+both `lib/core/db.ts` and `lib/core/telemetry.ts` consume structurally without
+knowing the role model around it.
 
-Resolving these requires relocating behavior rather than files — extracting the
-embed/chunk step out of the persistence layer, and lifting the shared permission
-and message types into a dependency-free `core` contract. That work is
-deliberately out of scope for the structural refactor described here, which
-preserved all logic unchanged.
+Verified against the codebase at `032b17f` by enumerating every import in
+`lib/core/` and `lib/security/`.
 
 All intra-project imports use the absolute `@/lib/...` path alias; no relative
 cross-module imports exist, so a module's dependencies — and therefore any

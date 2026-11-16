@@ -1,9 +1,22 @@
+# Secrets — never commit
 .env.local
 .env*.local
+google-credentials.json
+
+# Dependencies and build output
 node_modules/
 .next/
-tsconfig.tsbuildinfo
+.swc/
+*.tsbuildinfo
 
+# Local corpus. The ingestion source directory: documents dropped here are the
+# organisation's own material and must not reach a public repository.
 local_data/
 scripts/output/
-google-credentials.json
+
+# Editor and assistant state — machine-local, not project configuration
+.cursor/
+.claude/
+
+# OneDrive sync-conflict copies, which it names after the machine
+*-Gavriel*

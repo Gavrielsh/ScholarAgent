@@ -1,4 +1,44 @@
 services:
+  # Local development and thesis benchmarking database. Runs in the default
+  # profile alongside redis so `docker compose up -d` brings up everything the
+  # test suite, the migration runner and scripts/evaluate_runner.ts need, with
+  # no external network latency in the measurements.
+  #
+  # The image must carry pgvector: 001_initial_schema.sql declares vector(768)
+  # columns and HNSW indexes with vector_cosine_ops. Override POSTGRES_IMAGE if
+  # an existing data volume was initialised under a different major version —
+  # Postgres refuses to start against a data directory from another major.
+  # Check with: docker run --rm -v scholaragent_scholaragent-pgdata:/v alpine cat /v/PG_VERSION
+  postgres:
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg16}
+    container_name: scholaragent-pg
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      # Applied only when the data directory is empty. An existing volume keeps
+      # whatever role it was created with, so these defaults match the volume
+      # already in use rather than inventing new credentials.
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-scholaragent}
+    volumes:
+      # Named rather than a host bind mount. A bind mount is what broke the
+      # previous container: its path pointed into a OneDrive directory that had
+      # moved, and Postgres would not start.
+      #
+      # Deliberately no /docker-entrypoint-initdb.d mount. initdb would apply
+      # 001_initial_schema.sql without inserting the corresponding row into
+      # schema_migrations, so `npm run migrate` would then try to apply it a
+      # second time against a populated database. `npm run migrate` is the one
+      # path that both applies and stamps schema.
+      - scholaragent-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-scholaragent}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     container_name: scholaragent-redis
@@ -62,3 +102,9 @@ services:
       USER_MGMT_DEBUG: ${USER_MGMT_DEBUG:-0}
       WORKER_SHUTDOWN_TIMEOUT_MS: "25000"
       WHATSAPP_JOB_TIMEOUT_MS: "90000"
+
+volumes:
+  # Resolves to scholaragent_scholaragent-pgdata under the default project name,
+  # which is the volume already holding the 001_initial_schema database — so
+  # this adopts the existing data instead of starting empty.
+  scholaragent-pgdata:

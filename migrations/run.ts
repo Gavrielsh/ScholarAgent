@@ -8,9 +8,24 @@
 // 001_initial_schema without re-executing DDL.
 
 import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
+import dotenv from "dotenv";
 import { Pool } from "pg";
+
+// Matches scripts/ingest_directory.ts, scripts/reconcile_documents.ts and
+// scripts/evaluate_runner.ts. Without this, DATABASE_URL had to be exported by
+// hand in the shell even though .env.local already defined it.
+dotenv.config({ path: ".env.local" });
+
+// package.json declares no "type", so Node parses this file as ESM — where
+// __dirname does not exist — while tsx compiles it to CommonJS, where
+// import.meta does not. Resolve under either rather than depending on which
+// loader happens to win. The CommonJS branch is tested first so the ESM branch
+// is never evaluated under a CJS transform that may stub import.meta.
+const SCRIPT_DIR =
+  typeof __dirname === "string" ? __dirname : dirname(fileURLToPath(import.meta.url));
 
 const CANONICAL_VERSION = "001_initial_schema";
 const LEGACY_BASELINE_MARKER = "009_rls_tighten";
@@ -48,8 +63,7 @@ async function main(): Promise<void> {
       );
     }
 
-    const dir = join(__dirname);
-    const files = (await readdir(dir)).filter((f) => f.endsWith(".sql")).sort();
+    const files = (await readdir(SCRIPT_DIR)).filter((f) => f.endsWith(".sql")).sort();
 
     for (const file of files) {
       const version = file.replace(".sql", "");
@@ -58,7 +72,7 @@ async function main(): Promise<void> {
         continue;
       }
 
-      const sql = await readFile(join(dir, file), "utf-8");
+      const sql = await readFile(join(SCRIPT_DIR, file), "utf-8");
       console.log(`[run]  ${file}`);
       await pool.query(sql);
       console.log(`[done] ${file}`);

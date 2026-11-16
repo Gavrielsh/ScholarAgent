@@ -107,29 +107,32 @@ To get a local copy up and running follow these simple steps.
     ```sh
     npm install
     ```
-3.  Set up your `.env` file (see [Environment Variables](#environment-variables)).
+3.  Set up your `.env.local` file (see [Environment Variables](#environment-variables)).
+    Every script loads `.env.local` specifically; a plain `.env` is not read by
+    `migrate`, `evaluate`, `ingest` or `reconcile`.
 4.  Start the infrastructure (PostgreSQL + pgvector, Redis) via Docker:
     ```sh
-    docker-compose up -d
+    docker compose up -d
     ```
 5.  Run database migrations:
     ```sh
-    npm run db:migrate
+    npm run migrate
     ```
 6.  Start the development server and the BullMQ worker concurrently:
     ```sh
     npm run dev
     # In a separate terminal:
-    npm run worker
+    npm run worker:whatsapp
     ```
 
 ### Environment Variables
 
-Copy the `.env.example` file to `.env` and populate the required variables:
+Copy the `.env.example` file to `.env.local` and populate the required variables.
+The filename matters: the Next.js app and all four scripts read `.env.local`.
 
 ```env
 # Database
-DATABASE_URL="postgres://postgres:postgres@localhost:5432/scholaragent"
+DATABASE_URL="postgresql://user:password@localhost:5432/scholaragent"
 
 # Redis (BullMQ)
 REDIS_URL="redis://localhost:6379"
@@ -161,8 +164,39 @@ The system enforces a Four-Tier Role-Based and Row-Level Access Control Model:
 
 Every database transaction explicitly sets the user's role and ID, allowing PostgreSQL RLS policies to dynamically filter chunks during retrieval:
 ```sql
-SET LOCAL app.current_user_role = 'STAFF';
-SET LOCAL app.current_user_id = 'user_uuid';
+-- Set per transaction; the policies compare against this integer tier.
+SELECT set_config('app.user_permission_level', '2', true);
+```
+The policy on `knowledge_base` is `classification_level >= current_setting('app.user_permission_level', true)::integer`, and the table is declared `FORCE ROW LEVEL SECURITY`, so even the table owner is subject to it.
+
+### Project Layout
+
+Domain-driven, with dependencies flowing inward: `domain` may depend on
+`security` and `core`, `security` on `core`, and `core` on nothing above it.
+
+```
+app/api/                  Next.js App Router endpoints (webhook, upload, document-deleted)
+lib/
+  core/                   Technology-facing infrastructure, no business rules
+    db.ts                 PostgreSQL + pgvector: hybrid retrieval, RRF, RLS-scoped queries
+    db/accessLevel.ts     Dependency-free permission-tier contract
+    queue.ts  redis.ts    BullMQ connection and job runtime, Redis client
+    telemetry.ts          Tracing, RAGAS scoring, DLS metrics
+    logger.ts  env.ts  http/
+  security/               Cross-cutting, enforced independently of any domain
+    auth.ts               RBAC, user registry, phone normalisation
+    crypto.ts             HMAC webhook signature verification, timing-safe compare
+    guardrails.ts         Inbound safety signals, PII redaction
+    extractUser.ts        JWT identity extraction
+  domain/
+    chat/                 agent.ts (orchestration), llm.ts (providers), rag.ts, session/
+    ingestion/            pipeline.ts, embeddings.ts, retrieval.ts, worker.ts
+    whatsapp/             client.ts, webhook.ts, worker.ts, types.ts
+    admin/                auditLogs.ts
+scripts/                  Operational entry points (snake_case), run via `node --import tsx`
+migrations/               Canonical SQL baseline plus the runner
+docs/                     Research proposal and architecture notes
+docker/                   App and worker images
 ```
 
 ### Hybrid Search
@@ -197,7 +231,7 @@ The repository includes a comprehensive evaluation suite designed to benchmark t
 
 Run the evaluation:
 ```sh
-npm run eval
+npm run evaluate
 ```
 
 Metrics tracked:
