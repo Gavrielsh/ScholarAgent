@@ -416,55 +416,164 @@ function reciprocalRankFusion(
     .map(({ doc, rrf }) => ({ ...doc, rrfScore: rrf }));
 }
 
+/**
+ * Which retrieval strategy an evaluation arm exercises.
+ *
+ * The benchmark arms differ ONLY by this value: same corpus, same overfetch,
+ * same RLS context, same SQL for each leg. That is what lets a difference
+ * between arms be attributed to the strategy rather than to incidental
+ * differences in how each arm was wired.
+ */
+export type RetrievalStrategy = "sparse" | "dense" | "hybrid_rrf";
+
+/** Dense leg — pgvector cosine distance over the HNSW index. */
+const DENSE_SQL = `
+  SELECT id, content, metadata, classification_level,
+         1 - (embedding <=> $1::vector) AS similarity
+  FROM knowledge_base
+  ORDER BY embedding <=> $1::vector
+  LIMIT $2;
+`;
+
+/**
+ * Lexical leg — PostgreSQL full-text search.
+ *
+ * `ts_rank_cd` is coverage-density ranking, NOT Okapi BM25; PostgreSQL FTS has
+ * no BM25 implementation. Do not describe this arm as BM25.
+ *
+ * The 'simple' configuration performs no stemming, and Hebrew attaches the
+ * prefixes ו/ב/ל/ה/כ/מ/ש directly to the word, so "בפרוטוקול" does not match the
+ * lexeme "פרוטוקול". This structurally caps the lexical arm's recall on Hebrew
+ * text. That is a property of the language and the available dictionaries, not a
+ * defect to patch out, and it is a large part of why fusion helps here.
+ */
+const LEXICAL_SQL = `
+  SELECT id, content, metadata, classification_level,
+         ts_rank_cd(content_tsv, websearch_to_tsquery('simple', $1)) AS similarity
+  FROM knowledge_base
+  WHERE content_tsv @@ websearch_to_tsquery('simple', $1)
+  ORDER BY similarity DESC
+  LIMIT $2;
+`;
+
+/**
+ * The lexical leg distinguishes "matched nothing" from "could not run".
+ *
+ * Hybrid retrieval treats a broken leg as a reason to fall back on dense rows,
+ * which is right for a user-facing request. An evaluation arm must not: a
+ * sparse-only arm that silently returned zero rows after a SQL failure would be
+ * recorded as having found nothing, and the benchmark would attribute a tooling
+ * fault to the retrieval strategy.
+ */
+type LexicalLegResult =
+  | { ok: true; rows: SimilarDocument[] }
+  | { ok: false; error: string };
+
+async function runDenseLeg(
+  client: PoolClient,
+  vectorLiteral: string,
+  limit: number
+): Promise<SimilarDocument[]> {
+  const res = await client.query<RetrievedRow>(DENSE_SQL, [vectorLiteral, limit]);
+  return res.rows.map(mapRow);
+}
+
+async function runLexicalLeg(
+  client: PoolClient,
+  queryText: string,
+  limit: number
+): Promise<LexicalLegResult> {
+  try {
+    const res = await client.query<RetrievedRow>(LEXICAL_SQL, [queryText, limit]);
+    return { ok: true, rows: res.rows.map(mapRow) };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    logWarn("retrieval_lexical_leg_failed", error, {
+      sqlPreview: LEXICAL_SQL.slice(0, 120),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    return { ok: false, error };
+  }
+}
+
+async function executeRetrieval(
+  client: PoolClient,
+  queryText: string,
+  vectorLiteral: string,
+  opts: NormalizedQueryOptions,
+  strategy: RetrievalStrategy
+): Promise<SimilarDocument[]> {
+  const overfetch = opts.overfetch;
+
+  if (strategy === "dense") {
+    const rows = await runDenseLeg(client, vectorLiteral, overfetch);
+    return rows.slice(0, opts.limit);
+  }
+
+  if (strategy === "sparse") {
+    const lexical = await runLexicalLeg(client, queryText, overfetch);
+    if (!lexical.ok) {
+      // Never degrade to dense here — see LexicalLegResult.
+      throw new Error(`Sparse retrieval arm failed: ${lexical.error}`);
+    }
+    return lexical.rows.slice(0, opts.limit);
+  }
+
+  const vectorRows = await runDenseLeg(client, vectorLiteral, overfetch);
+  const lexical = await runLexicalLeg(client, queryText, overfetch);
+
+  if (!lexical.ok || lexical.rows.length === 0) {
+    return vectorRows.slice(0, opts.limit);
+  }
+
+  const merged = reciprocalRankFusion(vectorRows, lexical.rows, opts.rrfK);
+  return merged.slice(0, opts.limit);
+}
+
+/** Preserved name and behaviour for existing hybrid callers. */
 async function executeHybridRetrieval(
   client: PoolClient,
   queryText: string,
   vectorLiteral: string,
   opts: NormalizedQueryOptions
 ): Promise<SimilarDocument[]> {
-  const overfetch = opts.overfetch;
+  return executeRetrieval(client, queryText, vectorLiteral, opts, "hybrid_rrf");
+}
 
-  const vectorSql = `
-    SELECT id, content, metadata, classification_level,
-           1 - (embedding <=> $1::vector) AS similarity
-    FROM knowledge_base
-    ORDER BY embedding <=> $1::vector
-    LIMIT $2;
-  `;
+/**
+ * RLS-scoped retrieval under an explicit strategy, for the evaluation arms.
+ * Shares `executeRetrieval` with the production hybrid path.
+ */
+export async function querySimilarDocumentsByStrategy(
+  queryText: string,
+  queryEmbedding: number[],
+  permissionLevel: AccessLevel,
+  strategy: RetrievalStrategy,
+  options?: number | QuerySimilarOptions
+): Promise<SimilarDocument[]> {
+  const opts = normalizeQueryOptions(options);
+  const vectorLiteral = toVectorLiteral(queryEmbedding);
+  return withRlsTransaction(permissionLevel, (client) =>
+    executeRetrieval(client, queryText, vectorLiteral, opts, strategy)
+  );
+}
 
-  const bm25Sql = `
-    SELECT id, content, metadata, classification_level,
-           ts_rank_cd(content_tsv, websearch_to_tsquery('simple', $1)) AS similarity
-    FROM knowledge_base
-    WHERE content_tsv @@ websearch_to_tsquery('simple', $1)
-    ORDER BY similarity DESC
-    LIMIT $2;
-  `;
-
-  const vecRes = await client.query<RetrievedRow>(vectorSql, [vectorLiteral, overfetch]);
-  const vectorRows = vecRes.rows.map(mapRow);
-
-  let bm25Rows: SimilarDocument[] = [];
-  try {
-    const bmRes = await client.query<RetrievedRow>(bm25Sql, [queryText, overfetch]);
-    bm25Rows = bmRes.rows.map(mapRow);
-  } catch (err) {
-    logWarn(
-      "retrieval_bm25_leg_skipped",
-      err instanceof Error ? err.message : String(err),
-      {
-        sqlPreview: bm25Sql.slice(0, 120),
-        stack: err instanceof Error ? err.stack : undefined,
-      }
-    );
-  }
-
-  if (bm25Rows.length === 0) {
-    return vectorRows.slice(0, opts.limit);
-  }
-
-  const merged = reciprocalRankFusion(vectorRows, bm25Rows, opts.rrfK);
-  return merged.slice(0, opts.limit);
+/**
+ * Unrestricted retrieval under an explicit strategy. Used to build the
+ * annotation candidate pool and as the positive control that proves a seeded
+ * canary is reachable at all. Never call this on a user-facing path.
+ */
+export async function querySimilarDocumentsByStrategyBypassRls(
+  queryText: string,
+  queryEmbedding: number[],
+  strategy: RetrievalStrategy,
+  options?: number | QuerySimilarOptions
+): Promise<SimilarDocument[]> {
+  const opts = normalizeQueryOptions(options);
+  const vectorLiteral = toVectorLiteral(queryEmbedding);
+  return withServiceClient((client) =>
+    executeRetrieval(client, queryText, vectorLiteral, opts, strategy)
+  );
 }
 
 /**
