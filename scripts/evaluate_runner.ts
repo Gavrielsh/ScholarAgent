@@ -29,6 +29,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import chalk from "chalk";
 
 import {
@@ -65,7 +66,17 @@ const RETRIEVAL_OVERFETCH = 50;
 // Fallback to 1 for concurrency and 2000ms delay to prevent LLM API 429 Rate Limits
 const SEMAPHORE_CONCURRENCY = parseInt(process.env.EVAL_CONCURRENCY ?? "1", 10);
 const INTER_QUERY_DELAY_MS = parseInt(process.env.EVAL_INTER_QUERY_DELAY_MS ?? "2000", 10);
-const OUTPUT_DIR = path.join(__dirname, "output");
+// package.json declares no "type", so Node parses this file as ESM — where
+// __dirname does not exist — while tsx compiles it to CommonJS, where
+// import.meta does not. Resolve under either rather than depending on which
+// loader happens to win. The CommonJS branch is tested first so the ESM branch
+// is never evaluated under a CJS transform that may stub import.meta.
+const SCRIPT_DIR =
+  typeof __dirname === "string"
+    ? __dirname
+    : path.dirname(fileURLToPath(import.meta.url));
+
+const OUTPUT_DIR = path.join(SCRIPT_DIR, "output");
 
 type ConfigName = "A" | "B" | "C" | "D";
 
