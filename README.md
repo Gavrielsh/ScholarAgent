@@ -161,8 +161,39 @@ The system enforces a Four-Tier Role-Based and Row-Level Access Control Model:
 
 Every database transaction explicitly sets the user's role and ID, allowing PostgreSQL RLS policies to dynamically filter chunks during retrieval:
 ```sql
-SET LOCAL app.current_user_role = 'STAFF';
-SET LOCAL app.current_user_id = 'user_uuid';
+-- Set per transaction; the policies compare against this integer tier.
+SELECT set_config('app.user_permission_level', '2', true);
+```
+The policy on `knowledge_base` is `classification_level >= current_setting('app.user_permission_level', true)::integer`, and the table is declared `FORCE ROW LEVEL SECURITY`, so even the table owner is subject to it.
+
+### Project Layout
+
+Domain-driven, with dependencies flowing inward: `domain` may depend on
+`security` and `core`, `security` on `core`, and `core` on nothing above it.
+
+```
+app/api/                  Next.js App Router endpoints (webhook, upload, document-deleted)
+lib/
+  core/                   Technology-facing infrastructure, no business rules
+    db.ts                 PostgreSQL + pgvector: hybrid retrieval, RRF, RLS-scoped queries
+    db/accessLevel.ts     Dependency-free permission-tier contract
+    queue.ts  redis.ts    BullMQ connection and job runtime, Redis client
+    telemetry.ts          Tracing, RAGAS scoring, DLS metrics
+    logger.ts  env.ts  http/
+  security/               Cross-cutting, enforced independently of any domain
+    auth.ts               RBAC, user registry, phone normalisation
+    crypto.ts             HMAC webhook signature verification, timing-safe compare
+    guardrails.ts         Inbound safety signals, PII redaction
+    extractUser.ts        JWT identity extraction
+  domain/
+    chat/                 agent.ts (orchestration), llm.ts (providers), rag.ts, session/
+    ingestion/            pipeline.ts, embeddings.ts, retrieval.ts, worker.ts
+    whatsapp/             client.ts, webhook.ts, worker.ts, types.ts
+    admin/                auditLogs.ts
+scripts/                  Operational entry points (snake_case), run via `node --import tsx`
+migrations/               Canonical SQL baseline plus the runner
+docs/                     Research proposal and architecture notes
+docker/                   App and worker images
 ```
 
 ### Hybrid Search
@@ -197,7 +228,7 @@ The repository includes a comprehensive evaluation suite designed to benchmark t
 
 Run the evaluation:
 ```sh
-npm run eval
+npm run evaluate
 ```
 
 Metrics tracked:

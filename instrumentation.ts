@@ -10,7 +10,7 @@
  *  1. docker-compose runs `app` and `whatsapp-worker` side by side, so the queue
  *     had two consumers and real concurrency was 2x the configured value —
  *     silently doubling load on Postgres and the LLM provider.
- *  2. Only scripts/whatsapp-worker.ts installs signal handlers, so the in-process
+ *  2. Only scripts/whatsapp_worker.ts installs signal handlers, so the in-process
  *     worker was SIGKILLed mid-job on every deploy, leaving jobs to stall out.
  *  3. On Vercel this hook runs per lambda instance, spawning a consumer that is
  *     frozen the moment the HTTP response is returned — the job is picked up,

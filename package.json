@@ -8,11 +8,11 @@
     "start": "next start",
     "lint": "next lint",
     "test": "jest",
-    "migrate": "node --require ts-node/register migrations/run.ts",
-    "worker:whatsapp": "node --import tsx scripts/whatsapp-worker.ts",
-    "evaluate": "node --require ts-node/register --require tsconfig-paths/register scripts/evaluate_runner.ts",
-    "ingest": "node --require ts-node/register --require tsconfig-paths/register scripts/ingest_directory.ts",
-    "reconcile": "node --require ts-node/register --require tsconfig-paths/register scripts/reconcile_documents.ts"
+    "migrate": "node --import tsx migrations/run.ts",
+    "worker:whatsapp": "node --import tsx scripts/whatsapp_worker.ts",
+    "evaluate": "node --import tsx scripts/evaluate_runner.ts",
+    "ingest": "node --import tsx scripts/ingest_directory.ts",
+    "reconcile": "node --import tsx scripts/reconcile_documents.ts"
   },
   "dependencies": {
     "bullmq": "^5.78.0",
@@ -26,16 +26,13 @@
     "pdf-parse": "^2.4.5",
     "pg": "^8.20.0",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "ts-node": "^10.9.2",
-    "tsconfig-paths": "^4.2.0"
+    "react-dom": "^18.2.0"
   },
   "devDependencies": {
     "@types/jest": "^29.5.14",
     "@types/node": "^20.11.0",
     "@types/pg": "^8.11.0",
-    "@types/react": "^18.2.0",
-    "@types/react-dom": "^18.2.0",
+    "@types/react": "19.3.0",
     "chalk": "^4.1.2",
     "eslint": "^8.57.1",
     "eslint-config-next": "^14.2.35",
