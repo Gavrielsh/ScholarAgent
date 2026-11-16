@@ -11,6 +11,10 @@ import type {
   WhatsAppWebhookPayload,
 } from "@/lib/domain/whatsapp/types";
 import { processBaselineQuery } from "@/lib/domain/chat/agent";
+import {
+  detectKnowledgeGap,
+  recordKnowledgeGap,
+} from "@/lib/domain/chat/knowledgeGaps";
 import { recordBaselineRagMetrics } from "@/lib/domain/chat/rag";
 import {
   evaluateInboundSafety,
@@ -471,6 +475,30 @@ async function handleInboundMessage(
       });
     } catch (err) {
       logError("baseline_post_send_metrics_failed", err, { senderId });
+    }
+
+    // Knowledge-gap detection (flywheel phase 1). Recorded here rather than
+    // inside the RAG core for two reasons: this is the only place that has the
+    // sender id and the Meta message id the write needs, and `ragMetrics` is
+    // non-null only on the retrieval path, so chat-history and admin turns are
+    // excluded without a second intent check.
+    //
+    // After the send, deliberately. A gap row is observability, not the
+    // product — it must never sit between the volunteer and their answer.
+    const gapSignal = detectKnowledgeGap({
+      answer: processResult.ragMetrics.answer,
+      retrievedChunks: processResult.ragMetrics.retrievedChunks,
+    });
+    if (gapSignal) {
+      await recordKnowledgeGap({
+        signal: gapSignal,
+        // Redacted text, the same string the audit log stores.
+        question: inbound.queryText,
+        askerId: senderId,
+        askerPermissionLevel: userContext.permissionLevel,
+        retrievedChunks: processResult.ragMetrics.retrievedChunks,
+        messageId,
+      });
     }
   }
 
