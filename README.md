@@ -107,29 +107,32 @@ To get a local copy up and running follow these simple steps.
     ```sh
     npm install
     ```
-3.  Set up your `.env` file (see [Environment Variables](#environment-variables)).
+3.  Set up your `.env.local` file (see [Environment Variables](#environment-variables)).
+    Every script loads `.env.local` specifically; a plain `.env` is not read by
+    `migrate`, `evaluate`, `ingest` or `reconcile`.
 4.  Start the infrastructure (PostgreSQL + pgvector, Redis) via Docker:
     ```sh
-    docker-compose up -d
+    docker compose up -d
     ```
 5.  Run database migrations:
     ```sh
-    npm run db:migrate
+    npm run migrate
     ```
 6.  Start the development server and the BullMQ worker concurrently:
     ```sh
     npm run dev
     # In a separate terminal:
-    npm run worker
+    npm run worker:whatsapp
     ```
 
 ### Environment Variables
 
-Copy the `.env.example` file to `.env` and populate the required variables:
+Copy the `.env.example` file to `.env.local` and populate the required variables.
+The filename matters: the Next.js app and all four scripts read `.env.local`.
 
 ```env
 # Database
-DATABASE_URL="postgres://postgres:postgres@localhost:5432/scholaragent"
+DATABASE_URL="postgresql://user:password@localhost:5432/scholaragent"
 
 # Redis (BullMQ)
 REDIS_URL="redis://localhost:6379"
