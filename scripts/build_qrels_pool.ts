@@ -26,7 +26,7 @@ import chalk from "chalk";
 import dotenv from "dotenv";
 
 import { embedQueryOnce, poolCandidates, ARM_IDS } from "@/lib/domain/ingestion/retrievalArms";
-import { GOLDEN_DATASET } from "./data/golden_dataset";
+import { chunkSourcePath, GOLDEN_DATASET } from "./data/golden_dataset";
 import type { QrelCandidate } from "./data/qrels";
 
 dotenv.config({ path: ".env.local" });
@@ -75,8 +75,13 @@ async function main(): Promise<void> {
     throw new Error("DATABASE_URL is not set. Put it in .env.local.");
   }
 
+  const byTier = GOLDEN_DATASET.reduce<Record<string, number>>((acc, r) => {
+    acc[r.golden.user_tier] = (acc[r.golden.user_tier] ?? 0) + 1;
+    return acc;
+  }, {});
+
   console.log(chalk.bold.green("\n  Building qrels annotation pool"));
-  console.log(`  Queries    : ${GOLDEN_DATASET.length}`);
+  console.log(`  Queries    : ${GOLDEN_DATASET.length}  (${Object.entries(byTier).sort().map(([t, n]) => `${t}:${n}`).join("  ")})`);
   console.log(`  Arms       : ${ARM_IDS.join(", ")}`);
   console.log(`  Pool depth : ${depth} per arm (union, RLS bypassed)\n`);
 
@@ -112,16 +117,25 @@ async function main(): Promise<void> {
       permissionLevel: "bypass",
     });
 
+    const expected = new Set(record.golden.expected_doc_filenames);
+
     for (const [chunkId, { doc, ranks }] of pool) {
       const key = `${record.id}\u0000${chunkId}`;
       const prior = existing.get(key);
+      const sourcePath = chunkSourcePath(doc.metadata);
       rows.push({
         queryId: record.id,
         chunkId,
+        // Never pre-filled from the dataset's document-level expectations:
+        // in_expected_doc carries that hint instead, so an automatic guess is
+        // never mistaken for a human judgement.
         grade: prior?.grade ?? null,
         classificationLevel: doc.classificationLevel,
         arms: ranks,
         excerpt: doc.text.slice(0, EXCERPT_CHARS).replace(/\s+/g, " ").trim(),
+        source_path: sourcePath,
+        query_tier: record.golden.user_tier,
+        in_expected_doc: sourcePath !== null && expected.has(sourcePath),
       });
       if (!prior) newCandidates++;
     }
@@ -141,6 +155,16 @@ async function main(): Promise<void> {
   console.log(`  New this run    : ${newCandidates}`);
   console.log(`  Already judged  : ${judged}`);
   console.log(chalk.bold(`  Awaiting grades : ${pending}`));
+
+  const inExpected = rows.filter((r) => r.in_expected_doc).length;
+  const fromCorpus = rows.filter((r) => r.source_path).length;
+  console.log(`  In expected doc : ${inExpected}  (dataset says these documents should be retrieved)`);
+  console.log(`  From corpus     : ${fromCorpus} of ${rows.length}  (rest are seeded canaries or other content)`);
+  const tierCount = rows.reduce<Record<number, number>>((acc, r) => {
+    acc[r.classificationLevel] = (acc[r.classificationLevel] ?? 0) + 1;
+    return acc;
+  }, {});
+  console.log(`  By chunk tier   : ${Object.entries(tierCount).sort().map(([l, n]) => `L${l}:${n}`).join("  ")}`);
   if (unretrievable > 0) {
     console.log(chalk.yellow(`  Queries skipped : ${unretrievable} (no embedding)`));
   }

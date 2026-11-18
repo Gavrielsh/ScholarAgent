@@ -42,6 +42,17 @@ export interface QrelCandidate {
   arms: Partial<Record<ArmId, number>>;
   /** Leading text, so the annotator can judge without a DB query. */
   excerpt: string;
+  /** Corpus-relative path of the source document, when it came from the corpus. */
+  source_path?: string | null;
+  /** Clearance the query was asked under, for reading the row in context. */
+  query_tier?: string;
+  /**
+   * Whether the chunk's document is one the golden dataset expects for this
+   * query. A hint only: the dataset's expectations are document-level, and a
+   * chunk from an expected document can still be the wrong section of it. The
+   * annotator decides; `grade` stays null until they do.
+   */
+  in_expected_doc?: boolean;
 }
 
 export interface QrelsLoadResult {
