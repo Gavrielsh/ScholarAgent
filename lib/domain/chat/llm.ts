@@ -1,4 +1,4 @@
-// LLM provider factory.
+﻿// LLM provider factory.
 //
 // All four providers speak raw HTTP through the shared fetchWithTimeout helper —
 // this repo depends on no vendor SDK — so merging them costs nothing at import
@@ -231,9 +231,9 @@ export class GeminiAdapter implements LlmAdapter {
 // must name the current frontier rather than whichever generation was current
 // when the proposal was written — a faithfulness number on a superseded model
 // dates the finding rather than supporting it.
-const DEFAULT_MODEL = "claude-sonnet-5-5";
+const DEFAULT_MODEL = "claude-sonnet-4-6";
 /** Lightweight model for fast intent-classification calls. */
-const DEFAULT_FAST_MODEL = "claude-haiku-5-5";
+const DEFAULT_FAST_MODEL = "claude-haiku-4-5";
 const ANTHROPIC_VERSION = "2023-06-01";
 const ENDPOINT = "https://api.anthropic.com/v1/messages";
 
