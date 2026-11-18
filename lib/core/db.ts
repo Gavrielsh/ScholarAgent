@@ -146,9 +146,77 @@ export async function withClient<T>(fn: (client: PoolClient) => Promise<T>): Pro
   return withPoolClient(getPool(), "postgres_with_client_error", fn);
 }
 
-/** Service-role client — no RLS session variables; used for unrestricted retrieval (DLS). */
+/**
+ * Service-role client — no RLS session variables and NO role switch, so it
+ * retrieves across every classification level.
+ *
+ * This is the deliberate escape hatch, and the only one. The evaluation
+ * harness's positive control depends on it: proving a seeded canary is
+ * reachable at all is what makes a later 0% leakage result mean anything. Never
+ * reachable from a user-facing path.
+ */
 export async function withServiceClient<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
   return withPoolClient(getServicePool(), "postgres_with_service_client_error", fn);
+}
+
+/**
+ * The unprivileged role RLS policies are evaluated against.
+ *
+ * 001_initial_schema.sql FORCEs row-level security, but its own comment states
+ * the limit: "superuser / BYPASSRLS still bypass". The application was
+ * connecting as a superuser, so no policy was ever evaluated — every tier could
+ * read every tier. Dropping to a NOBYPASSRLS role inside the transaction is
+ * what makes the policies take effect.
+ *
+ * Overridable because a managed database may already provide an equivalent
+ * role under another name. Whatever it is, it must hold neither SUPERUSER nor
+ * BYPASSRLS; migration 003 asserts that for the default and fails if violated.
+ */
+const APP_ROLE = process.env.PG_APP_ROLE ?? "scholaragent_app";
+
+/**
+ * Validates a role name that will be interpolated into SQL.
+ *
+ * `SET LOCAL ROLE` takes an identifier, not a value, so it cannot be bound with
+ * $1. The name therefore reaches the statement by interpolation, and the only
+ * thing standing between PG_APP_ROLE and arbitrary SQL is this check. Accepts
+ * exactly what PostgreSQL accepts as an unquoted identifier: a leading letter
+ * or underscore, then letters, digits, underscores or dollar signs.
+ *
+ * Exported for testing — this is the injection boundary, so it is tested
+ * directly rather than only through a code path that needs a database.
+ */
+export function assertSqlIdentifier(name: string, source: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(name)) {
+    throw new Error(`${source} ${JSON.stringify(name)} is not a plain SQL identifier.`);
+  }
+  return name;
+}
+
+/**
+ * Enters the unprivileged role for the remainder of the transaction.
+ *
+ * SET LOCAL is transaction-scoped: it reverts on COMMIT and on ROLLBACK, so the
+ * role cannot leak onto the next user of a pooled connection.
+ *
+ * This fails closed. If the role does not exist — migration 003 has not been
+ * applied — the transaction aborts rather than proceeding. Continuing would run
+ * the query as the connecting superuser with every policy bypassed, which is
+ * the vulnerability itself, and it would do so silently.
+ */
+async function enterAppRole(client: PoolClient): Promise<void> {
+  try {
+    await client.query(`SET LOCAL ROLE ${assertSqlIdentifier(APP_ROLE, "PG_APP_ROLE")}`);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Could not assume the RLS application role "${APP_ROLE}": ${detail}. ` +
+        "Row-level security would not be enforced without it, so this query was " +
+        "refused rather than run with policies bypassed. Apply " +
+        "migrations/003_enforce_rls_role.sql (npm run migrate), or set PG_APP_ROLE " +
+        "to an existing NOBYPASSRLS role the connection is a member of."
+    );
+  }
 }
 
 export async function withRlsTransaction<T>(
@@ -158,9 +226,13 @@ export async function withRlsTransaction<T>(
   return withClient(async (client) => {
     try {
       await client.query("BEGIN");
+      // GUC first, then the role switch: the session variable is set while the
+      // connecting role is still in effect, so a future tightening of what the
+      // app role may configure cannot break tier propagation.
       await client.query("SELECT set_config('app.user_permission_level', $1, true)", [
         String(permissionLevel),
       ]);
+      await enterAppRole(client);
       const result = await fn(client);
       await client.query("COMMIT");
       return result;
@@ -187,6 +259,10 @@ export async function withSenderTransaction<T>(
     try {
       await client.query("BEGIN");
       await client.query("SELECT set_config('app.sender_id', $1, true)", [senderId]);
+      // chat_history is FORCE RLS with own-history policies, so this path was
+      // bypassed by exactly the same superuser problem: any sender could read
+      // any sender's history. It needs the role switch as much as the tier path.
+      await enterAppRole(client);
       const result = await fn(client);
       await client.query("COMMIT");
       return result;
