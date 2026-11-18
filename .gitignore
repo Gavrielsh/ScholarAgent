@@ -11,7 +11,15 @@ node_modules/
 
 # Local corpus. The ingestion source directory: documents dropped here are the
 # organisation's own material and must not reach a public repository.
-local_data/
+# Real organisational documents never enter the repo. Written as `local_data/*`
+# rather than `local_data/`: a trailing-slash pattern excludes the directory
+# itself, so git never descends into it and a later negation cannot re-include
+# anything inside.
+local_data/*
+# ...except the synthetic evaluation corpus. It contains no real people, and the
+# benchmark's numbers are not reproducible without the exact documents they were
+# measured against, so it belongs under version control.
+!local_data/eval_corpus/
 scripts/output/
 
 # Editor and assistant state — machine-local, not project configuration

@@ -11,6 +11,10 @@
     "migrate": "node --import tsx migrations/run.ts",
     "worker:whatsapp": "node --import tsx scripts/whatsapp_worker.ts",
     "evaluate": "node --import tsx scripts/evaluate_runner.ts",
+    "benchmark": "node --import tsx scripts/benchmark_retrieval.ts",
+    "qrels:pool": "node --import tsx scripts/build_qrels_pool.ts",
+    "grade:qrels": "node --import tsx scripts/grade_qrels.ts",
+    "eval:seed": "node --import tsx scripts/seed_eval_canaries.ts",
     "ingest": "node --import tsx scripts/ingest_directory.ts",
     "reconcile": "node --import tsx scripts/reconcile_documents.ts"
   },

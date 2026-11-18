@@ -146,9 +146,77 @@ export async function withClient<T>(fn: (client: PoolClient) => Promise<T>): Pro
   return withPoolClient(getPool(), "postgres_with_client_error", fn);
 }
 
-/** Service-role client — no RLS session variables; used for unrestricted retrieval (DLS). */
+/**
+ * Service-role client — no RLS session variables and NO role switch, so it
+ * retrieves across every classification level.
+ *
+ * This is the deliberate escape hatch, and the only one. The evaluation
+ * harness's positive control depends on it: proving a seeded canary is
+ * reachable at all is what makes a later 0% leakage result mean anything. Never
+ * reachable from a user-facing path.
+ */
 export async function withServiceClient<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
   return withPoolClient(getServicePool(), "postgres_with_service_client_error", fn);
+}
+
+/**
+ * The unprivileged role RLS policies are evaluated against.
+ *
+ * 001_initial_schema.sql FORCEs row-level security, but its own comment states
+ * the limit: "superuser / BYPASSRLS still bypass". The application was
+ * connecting as a superuser, so no policy was ever evaluated — every tier could
+ * read every tier. Dropping to a NOBYPASSRLS role inside the transaction is
+ * what makes the policies take effect.
+ *
+ * Overridable because a managed database may already provide an equivalent
+ * role under another name. Whatever it is, it must hold neither SUPERUSER nor
+ * BYPASSRLS; migration 003 asserts that for the default and fails if violated.
+ */
+const APP_ROLE = process.env.PG_APP_ROLE ?? "scholaragent_app";
+
+/**
+ * Validates a role name that will be interpolated into SQL.
+ *
+ * `SET LOCAL ROLE` takes an identifier, not a value, so it cannot be bound with
+ * $1. The name therefore reaches the statement by interpolation, and the only
+ * thing standing between PG_APP_ROLE and arbitrary SQL is this check. Accepts
+ * exactly what PostgreSQL accepts as an unquoted identifier: a leading letter
+ * or underscore, then letters, digits, underscores or dollar signs.
+ *
+ * Exported for testing — this is the injection boundary, so it is tested
+ * directly rather than only through a code path that needs a database.
+ */
+export function assertSqlIdentifier(name: string, source: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(name)) {
+    throw new Error(`${source} ${JSON.stringify(name)} is not a plain SQL identifier.`);
+  }
+  return name;
+}
+
+/**
+ * Enters the unprivileged role for the remainder of the transaction.
+ *
+ * SET LOCAL is transaction-scoped: it reverts on COMMIT and on ROLLBACK, so the
+ * role cannot leak onto the next user of a pooled connection.
+ *
+ * This fails closed. If the role does not exist — migration 003 has not been
+ * applied — the transaction aborts rather than proceeding. Continuing would run
+ * the query as the connecting superuser with every policy bypassed, which is
+ * the vulnerability itself, and it would do so silently.
+ */
+async function enterAppRole(client: PoolClient): Promise<void> {
+  try {
+    await client.query(`SET LOCAL ROLE ${assertSqlIdentifier(APP_ROLE, "PG_APP_ROLE")}`);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Could not assume the RLS application role "${APP_ROLE}": ${detail}. ` +
+        "Row-level security would not be enforced without it, so this query was " +
+        "refused rather than run with policies bypassed. Apply " +
+        "migrations/003_enforce_rls_role.sql (npm run migrate), or set PG_APP_ROLE " +
+        "to an existing NOBYPASSRLS role the connection is a member of."
+    );
+  }
 }
 
 export async function withRlsTransaction<T>(
@@ -158,9 +226,13 @@ export async function withRlsTransaction<T>(
   return withClient(async (client) => {
     try {
       await client.query("BEGIN");
+      // GUC first, then the role switch: the session variable is set while the
+      // connecting role is still in effect, so a future tightening of what the
+      // app role may configure cannot break tier propagation.
       await client.query("SELECT set_config('app.user_permission_level', $1, true)", [
         String(permissionLevel),
       ]);
+      await enterAppRole(client);
       const result = await fn(client);
       await client.query("COMMIT");
       return result;
@@ -187,6 +259,10 @@ export async function withSenderTransaction<T>(
     try {
       await client.query("BEGIN");
       await client.query("SELECT set_config('app.sender_id', $1, true)", [senderId]);
+      // chat_history is FORCE RLS with own-history policies, so this path was
+      // bypassed by exactly the same superuser problem: any sender could read
+      // any sender's history. It needs the role switch as much as the tier path.
+      await enterAppRole(client);
       const result = await fn(client);
       await client.query("COMMIT");
       return result;
@@ -416,55 +492,164 @@ function reciprocalRankFusion(
     .map(({ doc, rrf }) => ({ ...doc, rrfScore: rrf }));
 }
 
+/**
+ * Which retrieval strategy an evaluation arm exercises.
+ *
+ * The benchmark arms differ ONLY by this value: same corpus, same overfetch,
+ * same RLS context, same SQL for each leg. That is what lets a difference
+ * between arms be attributed to the strategy rather than to incidental
+ * differences in how each arm was wired.
+ */
+export type RetrievalStrategy = "sparse" | "dense" | "hybrid_rrf";
+
+/** Dense leg — pgvector cosine distance over the HNSW index. */
+const DENSE_SQL = `
+  SELECT id, content, metadata, classification_level,
+         1 - (embedding <=> $1::vector) AS similarity
+  FROM knowledge_base
+  ORDER BY embedding <=> $1::vector
+  LIMIT $2;
+`;
+
+/**
+ * Lexical leg — PostgreSQL full-text search.
+ *
+ * `ts_rank_cd` is coverage-density ranking, NOT Okapi BM25; PostgreSQL FTS has
+ * no BM25 implementation. Do not describe this arm as BM25.
+ *
+ * The 'simple' configuration performs no stemming, and Hebrew attaches the
+ * prefixes ו/ב/ל/ה/כ/מ/ש directly to the word, so "בפרוטוקול" does not match the
+ * lexeme "פרוטוקול". This structurally caps the lexical arm's recall on Hebrew
+ * text. That is a property of the language and the available dictionaries, not a
+ * defect to patch out, and it is a large part of why fusion helps here.
+ */
+const LEXICAL_SQL = `
+  SELECT id, content, metadata, classification_level,
+         ts_rank_cd(content_tsv, websearch_to_tsquery('simple', $1)) AS similarity
+  FROM knowledge_base
+  WHERE content_tsv @@ websearch_to_tsquery('simple', $1)
+  ORDER BY similarity DESC
+  LIMIT $2;
+`;
+
+/**
+ * The lexical leg distinguishes "matched nothing" from "could not run".
+ *
+ * Hybrid retrieval treats a broken leg as a reason to fall back on dense rows,
+ * which is right for a user-facing request. An evaluation arm must not: a
+ * sparse-only arm that silently returned zero rows after a SQL failure would be
+ * recorded as having found nothing, and the benchmark would attribute a tooling
+ * fault to the retrieval strategy.
+ */
+type LexicalLegResult =
+  | { ok: true; rows: SimilarDocument[] }
+  | { ok: false; error: string };
+
+async function runDenseLeg(
+  client: PoolClient,
+  vectorLiteral: string,
+  limit: number
+): Promise<SimilarDocument[]> {
+  const res = await client.query<RetrievedRow>(DENSE_SQL, [vectorLiteral, limit]);
+  return res.rows.map(mapRow);
+}
+
+async function runLexicalLeg(
+  client: PoolClient,
+  queryText: string,
+  limit: number
+): Promise<LexicalLegResult> {
+  try {
+    const res = await client.query<RetrievedRow>(LEXICAL_SQL, [queryText, limit]);
+    return { ok: true, rows: res.rows.map(mapRow) };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    logWarn("retrieval_lexical_leg_failed", error, {
+      sqlPreview: LEXICAL_SQL.slice(0, 120),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    return { ok: false, error };
+  }
+}
+
+async function executeRetrieval(
+  client: PoolClient,
+  queryText: string,
+  vectorLiteral: string,
+  opts: NormalizedQueryOptions,
+  strategy: RetrievalStrategy
+): Promise<SimilarDocument[]> {
+  const overfetch = opts.overfetch;
+
+  if (strategy === "dense") {
+    const rows = await runDenseLeg(client, vectorLiteral, overfetch);
+    return rows.slice(0, opts.limit);
+  }
+
+  if (strategy === "sparse") {
+    const lexical = await runLexicalLeg(client, queryText, overfetch);
+    if (!lexical.ok) {
+      // Never degrade to dense here — see LexicalLegResult.
+      throw new Error(`Sparse retrieval arm failed: ${lexical.error}`);
+    }
+    return lexical.rows.slice(0, opts.limit);
+  }
+
+  const vectorRows = await runDenseLeg(client, vectorLiteral, overfetch);
+  const lexical = await runLexicalLeg(client, queryText, overfetch);
+
+  if (!lexical.ok || lexical.rows.length === 0) {
+    return vectorRows.slice(0, opts.limit);
+  }
+
+  const merged = reciprocalRankFusion(vectorRows, lexical.rows, opts.rrfK);
+  return merged.slice(0, opts.limit);
+}
+
+/** Preserved name and behaviour for existing hybrid callers. */
 async function executeHybridRetrieval(
   client: PoolClient,
   queryText: string,
   vectorLiteral: string,
   opts: NormalizedQueryOptions
 ): Promise<SimilarDocument[]> {
-  const overfetch = opts.overfetch;
+  return executeRetrieval(client, queryText, vectorLiteral, opts, "hybrid_rrf");
+}
 
-  const vectorSql = `
-    SELECT id, content, metadata, classification_level,
-           1 - (embedding <=> $1::vector) AS similarity
-    FROM knowledge_base
-    ORDER BY embedding <=> $1::vector
-    LIMIT $2;
-  `;
+/**
+ * RLS-scoped retrieval under an explicit strategy, for the evaluation arms.
+ * Shares `executeRetrieval` with the production hybrid path.
+ */
+export async function querySimilarDocumentsByStrategy(
+  queryText: string,
+  queryEmbedding: number[],
+  permissionLevel: AccessLevel,
+  strategy: RetrievalStrategy,
+  options?: number | QuerySimilarOptions
+): Promise<SimilarDocument[]> {
+  const opts = normalizeQueryOptions(options);
+  const vectorLiteral = toVectorLiteral(queryEmbedding);
+  return withRlsTransaction(permissionLevel, (client) =>
+    executeRetrieval(client, queryText, vectorLiteral, opts, strategy)
+  );
+}
 
-  const bm25Sql = `
-    SELECT id, content, metadata, classification_level,
-           ts_rank_cd(content_tsv, websearch_to_tsquery('simple', $1)) AS similarity
-    FROM knowledge_base
-    WHERE content_tsv @@ websearch_to_tsquery('simple', $1)
-    ORDER BY similarity DESC
-    LIMIT $2;
-  `;
-
-  const vecRes = await client.query<RetrievedRow>(vectorSql, [vectorLiteral, overfetch]);
-  const vectorRows = vecRes.rows.map(mapRow);
-
-  let bm25Rows: SimilarDocument[] = [];
-  try {
-    const bmRes = await client.query<RetrievedRow>(bm25Sql, [queryText, overfetch]);
-    bm25Rows = bmRes.rows.map(mapRow);
-  } catch (err) {
-    logWarn(
-      "retrieval_bm25_leg_skipped",
-      err instanceof Error ? err.message : String(err),
-      {
-        sqlPreview: bm25Sql.slice(0, 120),
-        stack: err instanceof Error ? err.stack : undefined,
-      }
-    );
-  }
-
-  if (bm25Rows.length === 0) {
-    return vectorRows.slice(0, opts.limit);
-  }
-
-  const merged = reciprocalRankFusion(vectorRows, bm25Rows, opts.rrfK);
-  return merged.slice(0, opts.limit);
+/**
+ * Unrestricted retrieval under an explicit strategy. Used to build the
+ * annotation candidate pool and as the positive control that proves a seeded
+ * canary is reachable at all. Never call this on a user-facing path.
+ */
+export async function querySimilarDocumentsByStrategyBypassRls(
+  queryText: string,
+  queryEmbedding: number[],
+  strategy: RetrievalStrategy,
+  options?: number | QuerySimilarOptions
+): Promise<SimilarDocument[]> {
+  const opts = normalizeQueryOptions(options);
+  const vectorLiteral = toVectorLiteral(queryEmbedding);
+  return withServiceClient((client) =>
+    executeRetrieval(client, queryText, vectorLiteral, opts, strategy)
+  );
 }
 
 /**

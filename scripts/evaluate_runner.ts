@@ -43,10 +43,14 @@ import {
 import { runBaselineRagCore } from "@/lib/domain/chat/rag";
 import { getLlmAdapter, type LlmMessage } from "@/lib/domain/chat/llm";
 import {
+  aggregateTwoStageLeakage,
   computeDls,
+  evaluateGenerationDls,
   evaluateRagas,
   type DlsResult,
+  type GenerationDlsResult,
   type RagasScores,
+  type TwoStageLeakageObservation,
 } from "@/lib/core/telemetry";
 import {
   retrieveSimilarDocuments,
@@ -54,6 +58,7 @@ import {
   type SimilarDocument,
 } from "@/lib/domain/ingestion/retrieval";
 import { GOLDEN_DATASET, type EvalRecord, type QueryCategory } from "./data/golden_dataset";
+import { LEAKAGE_SPECS } from "./data/leakage_specs";
 import dotenv from 'dotenv';
 dotenv.config({ path: '.env.local' });
 
@@ -91,6 +96,14 @@ interface SingleConfigResult {
   /** Wall-clock time from retrieval start to RAGAS evaluation end. */
   latencyMs: number;
   error?: string;
+  /**
+   * Generation-stage leakage, or null when this record has no LeakageSpec.
+   *
+   * null is NOT "clean" — a record with no spec has no defined notion of
+   * disclosure and is excluded from the leakage aggregate rather than counted
+   * as a pass, which would dilute the rate toward zero.
+   */
+  generationDls?: GenerationDlsResult | null;
 }
 
 interface EvalRow {
@@ -112,6 +125,12 @@ interface EvalRow {
   modelAnswer: string;
   /** The reference answer from the golden dataset used for RAGAS scoring. */
   groundTruthAnswer: string;
+  /** "", "leaked" or "clean" — empty when the record has no LeakageSpec. */
+  generationLeaked: string;
+  /** Canary string found verbatim in the answer, if any. */
+  canaryHit: string;
+  /** Whether the canary channel and the LLM judge concurred. */
+  leakageAgreement: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -204,6 +223,31 @@ function buildDirectLlmMessages(
   ];
 }
 
+/**
+ * Scores generation-stage leakage for one record, if it has a spec.
+ *
+ * `retrievalLeaked` conditions the containment gap: P(model disclosed | the
+ * retrieval stage already placed unauthorised material in its context).
+ *
+ * IMPORTANT: a canary can only be hit if it exists in the corpus. Run
+ * `npm run eval:seed` first — it plants the canaries and asserts both a
+ * positive and a negative control. Without that, every canary channel reports
+ * clean because the strings are absent, not because the model refused.
+ */
+async function scoreGenerationLeakage(
+  record: EvalRecord,
+  answer: string,
+  retrievalLeaked: boolean
+): Promise<GenerationDlsResult | null> {
+  const spec = LEAKAGE_SPECS[record.id];
+  if (!spec) return null;
+
+  return evaluateGenerationDls(
+    { question: record.question, answer, spec, retrievalLeaked },
+    getLlmAdapter
+  );
+}
+
 function errorResult(errMsg: string): SingleConfigResult {
   const zeroRagas: RagasScores = {
     contextPrecision: 0,
@@ -218,6 +262,9 @@ function errorResult(errMsg: string): SingleConfigResult {
     answer: "",
     latencyMs: 0,
     error: errMsg,
+    // Not false: a failed run produced no answer to judge, so its leakage is
+    // unknown. Recording a clean verdict here would reward crashing.
+    generationDls: null,
   };
 }
 
@@ -242,6 +289,10 @@ function toEvalRow(
     error: result.error ?? "",
     modelAnswer: result.answer,
     groundTruthAnswer: record.groundTruthAnswer,
+    generationLeaked:
+      result.generationDls == null ? "" : result.generationDls.leaked ? "leaked" : "clean",
+    canaryHit: result.generationDls?.canaryHit ?? "",
+    leakageAgreement: result.generationDls?.agreement ?? "",
   };
 }
 
@@ -276,7 +327,9 @@ async function runConfigA(record: EvalRecord): Promise<SingleConfigResult> {
       groundTruth: record.groundTruthAnswer,
     }, getLlmAdapter);
 
-    return { dls, ragas, answer, latencyMs: Date.now() - started };
+    const generationDls = await scoreGenerationLeakage(record, answer, dls.score > 0);
+
+    return { dls, ragas, answer, latencyMs: Date.now() - started, generationDls };
   } catch (err) {
     return errorResult(err instanceof Error ? err.message : String(err));
   }
@@ -313,7 +366,9 @@ async function runConfigB(record: EvalRecord): Promise<SingleConfigResult> {
       groundTruth: record.groundTruthAnswer,
     }, getLlmAdapter);
 
-    return { dls, ragas, answer, latencyMs: Date.now() - started };
+    const generationDls = await scoreGenerationLeakage(record, answer, dls.score > 0);
+
+    return { dls, ragas, answer, latencyMs: Date.now() - started, generationDls };
   } catch (err) {
     return errorResult(err instanceof Error ? err.message : String(err));
   }
@@ -354,11 +409,18 @@ async function runAgenticConfig(record: EvalRecord): Promise<SingleConfigResult>
       groundTruth: record.groundTruthAnswer,
     }, getLlmAdapter);
 
+    const generationDls = await scoreGenerationLeakage(
+      record,
+      result.answer,
+      result.dls.score > 0
+    );
+
     return {
       dls: result.dls,
       ragas,
       answer: result.answer,
       latencyMs: Date.now() - started,
+      generationDls,
     };
   } catch (err) {
     return errorResult(err instanceof Error ? err.message : String(err));
@@ -546,6 +608,9 @@ async function exportCsv(allRows: EvalRow[], timestamp: string): Promise<string>
     "question",
     "modelAnswer",
     "groundTruthAnswer",
+    "generationLeaked",
+    "canaryHit",
+    "leakageAgreement",
   ];
 
   const headerLine = headers.map(escapeCsvField).join(",");
@@ -559,6 +624,82 @@ async function exportCsv(allRows: EvalRow[], timestamp: string): Promise<string>
   const filePath = path.join(OUTPUT_DIR, `evaluation_results_${timestamp}.csv`);
   await fs.writeFile(filePath, csv, "utf-8");
   return filePath;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Two-stage leakage report
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Separates leakage row-level security can explain from leakage it cannot.
+ *
+ * - **Containment gap** — P(the model disclosed | retrieval already handed it
+ *   unauthorised material). This is what RLS failing looks like downstream.
+ * - **Unconditional leakage** — the model disclosed although retrieval was
+ *   clean. Parametric memory, inference across authorised chunks, or a
+ *   successful injection. RLS cannot prevent any of these, which is the point
+ *   worth making in the thesis.
+ *
+ * Both are NaN when their conditioning set is empty, and are printed as "n/a"
+ * rather than 0 — "0% of nothing" reads as containment that was never tested.
+ */
+function printTwoStageLeakage(rows: EvalRow[], label: string): void {
+  const observations: TwoStageLeakageObservation[] = [];
+
+  for (const row of rows) {
+    const spec = LEAKAGE_SPECS[row.recordId];
+    // No spec means no defined notion of disclosure for this record. Excluded,
+    // not counted as a pass — counting it would dilute the rate toward zero.
+    if (!spec || row.generationLeaked === "" || row.error) continue;
+    observations.push({
+      retrievalLeaked: row.dlsScore > 0,
+      generationLeaked: row.generationLeaked === "leaked",
+      family: spec.family,
+    });
+  }
+
+  if (observations.length === 0) {
+    console.log(chalk.yellow(`  ${label}: no records with a LeakageSpec produced a judgeable answer.`));
+    return;
+  }
+
+  const agg = aggregateTwoStageLeakage(observations);
+  const pct = (v: number) => (Number.isNaN(v) ? chalk.dim("n/a") : `${v.toFixed(1)}%`);
+
+  console.log(chalk.bold(`\n  ${label} — two-stage leakage (n=${agg.n})`));
+  console.log(`    Generation DLS        : ${pct(agg.generationDls)}`);
+  console.log(
+    `    Containment gap       : ${pct(agg.containmentGap)}   ` +
+      chalk.dim(`(of ${agg.nRetrievalLeaked} records where retrieval leaked)`)
+  );
+  console.log(
+    `    Unconditional leakage : ${pct(agg.unconditionalLeakage)}   ` +
+      chalk.dim(`(of ${agg.nRetrievalClean} records where retrieval was clean — RLS cannot prevent these)`)
+  );
+
+  const families = Object.entries(agg.byFamily);
+  if (families.length > 0) {
+    console.log(chalk.dim("    By attack family:"));
+    for (const [family, stats] of families) {
+      console.log(`      ${family.padEnd(26)} n=${String(stats.n).padStart(2)}  ${pct(stats.generationDls)}`);
+    }
+  }
+
+  const disagreements = rows.filter((r) => r.leakageAgreement === "disagree").length;
+  const unavailable = rows.filter((r) => r.leakageAgreement === "judge_unavailable").length;
+  if (disagreements > 0) {
+    console.log(
+      chalk.yellow(
+        `    Channel disagreement  : ${disagreements} record(s) — the canary channel and the judge differed.`
+      )
+    );
+    console.log(
+      chalk.dim("      Sustained disagreement means the judge prompt needs work before its numbers are reportable.")
+    );
+  }
+  if (unavailable > 0) {
+    console.log(chalk.dim(`    Judge unavailable     : ${unavailable} record(s) — canary channel only.`));
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -621,6 +762,23 @@ async function main(): Promise<void> {
     adversarialAgg(rowsC, "C"),
     adversarialAgg(rowsD, "D"),
   ]);
+
+  // ── Two-stage leakage, per configuration ───────────────────────────────────
+  console.log(chalk.bold("\n═══════════════════════════════════════════════════════════════════"));
+  console.log(chalk.bold("  Generation-stage leakage (G-DLS)"));
+  console.log(chalk.bold("═══════════════════════════════════════════════════════════════════"));
+  console.log(
+    chalk.dim(
+      "\n  Canary hits require seeded canaries. If `npm run eval:seed` has not been run,\n" +
+        "  every canary channel reports clean because the strings are absent from the\n" +
+        "  corpus — not because the model refused. Do not report that as containment.\n"
+    )
+  );
+  printTwoStageLeakage(rowsA, "A — Claude, no RLS");
+  printTwoStageLeakage(rowsB, "B — Gemini, no RLS");
+  printTwoStageLeakage(rowsC, "C — Claude, secured agent");
+  printTwoStageLeakage(rowsD, "D — Gemini, secured agent");
+  console.log();
 
   // ── CSV export ─────────────────────────────────────────────────────────────
   const allRows = [...rowsA, ...rowsB, ...rowsC, ...rowsD];

@@ -19,6 +19,14 @@ services:
       # Applied only when the data directory is empty. An existing volume keeps
       # whatever role it was created with, so these defaults match the volume
       # already in use rather than inventing new credentials.
+      #
+      # NOTE: the Postgres entrypoint always creates POSTGRES_USER as a
+      # SUPERUSER, and a superuser bypasses every row-level security policy
+      # regardless of FORCE ROW LEVEL SECURITY. That is why all five seeded
+      # canaries were readable from every tier. It is safe now only because
+      # migrations/003_enforce_rls_role.sql adds a NOBYPASSRLS role and
+      # withRlsTransaction drops into it with SET LOCAL ROLE before querying.
+      # Do not rely on this connection role being unprivileged.
       POSTGRES_USER: ${POSTGRES_USER:-user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
       POSTGRES_DB: ${POSTGRES_DB:-scholaragent}
