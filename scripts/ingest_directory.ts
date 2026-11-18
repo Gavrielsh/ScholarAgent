@@ -17,9 +17,21 @@
  *
  * Files placed directly in the root (not in a subfolder) default to level 3.
  *
+ * A different root can be given with --base, and levels are then inferred from
+ * the top-level folder inside THAT root:
+ *
+ *   npm run ingest -- --base local_data/eval_corpus
+ *     → local_data/eval_corpus/L0/*.md  becomes classificationLevel 0
+ *
+ * Without --base, a corpus living outside local_data/documents is simply never
+ * scanned; and pointing the old hardcoded root at its parent would make the
+ * top-level folder "eval_corpus", which is not in FOLDER_LEVEL_MAP, so every
+ * file would silently default to level 3. That is why the root is a flag rather
+ * than something to edit by hand.
+ *
  * Usage:
  *   npx tsx scripts/ingest_directory.ts
- *   node --require ts-node/register --require tsconfig-paths/register scripts/ingest_directory.ts
+ *   npm run ingest -- --base local_data/eval_corpus
  */
 
 import fs from "fs/promises";
@@ -35,7 +47,32 @@ import type { PermissionLevel } from "@/lib/security/auth";
 // Configuration
 // ---------------------------------------------------------------------------
 
-const BASE_DIRECTORY = path.join(process.cwd(), "local_data", "documents");
+const DEFAULT_BASE = path.join("local_data", "documents");
+
+/**
+ * Ingestion root. Levels are inferred from the top-level folder inside it, so
+ * changing the root changes which folder names carry the classification.
+ *
+ * Resolved against cwd and required to stay inside the project, so a stray
+ * --base cannot walk the filesystem and ingest arbitrary files into the corpus.
+ */
+function resolveBaseDirectory(argv: string[]): string {
+  const i = argv.indexOf("--base");
+  const requested = i === -1 ? DEFAULT_BASE : argv[i + 1];
+
+  if (i !== -1 && (!requested || requested.startsWith("-"))) {
+    throw new Error("--base needs a directory path, e.g. --base local_data/eval_corpus");
+  }
+
+  const root = process.cwd();
+  const resolved = path.resolve(root, requested as string);
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+    throw new Error(`--base must stay inside the project; got ${resolved}`);
+  }
+  return resolved;
+}
+
+const BASE_DIRECTORY = resolveBaseDirectory(process.argv.slice(2));
 
 // ---------------------------------------------------------------------------
 // MIME type resolution
@@ -157,6 +194,26 @@ async function run(): Promise<void> {
   console.log(`\n📂  Starting recursive ingestion from: ${BASE_DIRECTORY}\n`);
 
   try {
+    const stat = await fs.stat(BASE_DIRECTORY).catch(() => null);
+    if (!stat?.isDirectory()) {
+      throw new Error(
+        `Ingestion root does not exist: ${BASE_DIRECTORY}. ` +
+          "Pass --base <dir> to point at the corpus you mean to ingest."
+      );
+    }
+
+    // Levels come from the folder names directly inside the root. Reported up
+    // front because a mis-tiered corpus produces a plausible-looking benchmark
+    // that measures nothing.
+    const top = (await fs.readdir(BASE_DIRECTORY, { withFileTypes: true }))
+      .filter((e) => e.isDirectory())
+      .map((e) => `${e.name} → level ${inferClassificationLevel(e.name)}`);
+    if (top.length > 0) {
+      console.log("   Tier mapping from folder names:");
+      for (const line of top) console.log(`     ${line}`);
+      console.log();
+    }
+
     await processDirectory(BASE_DIRECTORY);
   } catch (err) {
     console.error("Fatal error accessing base directory:", err);
