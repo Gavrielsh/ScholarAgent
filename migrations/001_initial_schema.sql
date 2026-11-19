@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS users (
   permission_level INTEGER NOT NULL DEFAULT 3
                      CONSTRAINT users_permission_level_check
                      CHECK (permission_level BETWEEN 0 AND 3),
-  -- Retained: lib/security/auth/userRegistry.ts SELECTs this column into UserContext.
+  -- Retained: lib/security/auth.ts SELECTs this column into UserContext.
   -- It is optional (no FK); JWT user_metadata may also populate it.
   organization_id  UUID,
   display_name     TEXT,
@@ -148,7 +148,7 @@ CREATE TABLE IF NOT EXISTS ingested_documents (
 -- then dies before sending the WhatsApp confirmation is retried; without this
 -- the same document would be embedded twice. Partial: HTTP upload rows carry
 -- no external_message_id and must not collide with each other.
--- Named `_key` so ON CONFLICT inference in lib/core/db/pgvector.ts resolves.
+-- Named `_key` so ON CONFLICT inference in lib/core/db.ts resolves.
 CREATE UNIQUE INDEX IF NOT EXISTS ingested_documents_external_message_id_key
   ON ingested_documents (external_message_id)
   WHERE external_message_id IS NOT NULL;
