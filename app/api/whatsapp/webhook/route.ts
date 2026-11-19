@@ -52,11 +52,14 @@ function ack(): Response {
 }
 
 /**
- * Sends the "received, queued" confirmation before the route ACKs.
+ * Sends the "received, queued" confirmation. Fired, not awaited — see the
+ * call site.
  *
  * Best effort by construction: the document is already on the queue at this
  * point, so a failed or slow confirmation must not turn into a non-2xx that
- * makes Meta redeliver a document we are about to ingest.
+ * makes Meta redeliver a document we are about to ingest. Every path through
+ * this function resolves (its own try/catch swallows the send error), so
+ * firing it without awaiting can never surface as an unhandled rejection.
  *
  * Note this fires before the sender's role is known — the RBAC gate needs a
  * Postgres round trip and runs in the worker. An unauthorised sender therefore
@@ -226,14 +229,20 @@ export async function POST(request: NextRequest): Promise<Response> {
     return new Response("Service Unavailable", { status: 503 });
   }
 
-  // 4 — Confirm receipt of a document before ACKing.
+  // 4 — Confirm receipt of a document. Fired, not awaited: the job is already
+  // on the queue (step 3), so this notice's own outcome cannot change the ACK,
+  // and awaiting it would add up to RECEIPT_TIMEOUT_MS of pure latency to a
+  // route whose own file header promises "the absolute minimum" before ACKing.
+  // Safe because sendQueuedReceipt never rejects (see its docstring) and this
+  // route runs as a long-lived Node process (`runtime = "nodejs"`, one process
+  // per docker-compose), not on a runtime that can freeze after `return`.
   //
   // Ingestion runs for anywhere between seconds and minutes, so without this the
   // admin has no feedback at all until it finishes. Chat messages skip it: the
   // worker's read receipt and typing indicator already cover that case, and a
   // second message per turn would be noise.
   if (delivery.kind === "document") {
-    await sendQueuedReceipt(senderId, messageId);
+    void sendQueuedReceipt(senderId, messageId);
   }
 
   // 5 — ACK.
