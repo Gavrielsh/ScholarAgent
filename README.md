@@ -1,284 +1,437 @@
-<!-- Improved compatibility of back to top link: See: https://github.com/othneildrew/Best-README-Template/pull/73 -->
 <a id="readme-top"></a>
 
-<!-- PROJECT SHIELDS -->
-[![Contributors][contributors-shield]][contributors-url]
-[![Forks][forks-shield]][forks-url]
-[![Stargazers][stars-shield]][stars-url]
-[![Issues][issues-shield]][issues-url]
+<div align="center">
+  <h1>ScholarAgent</h1>
+  <p>
+    <strong>Database-enforced authorization for Hebrew organizational RAG.</strong><br />
+    An Agentic-RAG architecture that drives cross-tier retrieval leakage from
+    <strong>78.67%–80.00%</strong> to <strong>0.00%</strong> — measured, not asserted.
+  </p>
+  <p>
+    <a href="#the-problem-semantic-collision">The Problem</a> ·
+    <a href="#architecture">Architecture</a> ·
+    <a href="#empirical-results">Results</a> ·
+    <a href="#quickstart">Quickstart</a> ·
+    <a href="docs/experimental_results.md">Full Evaluation (HE)</a>
+  </p>
+
 [![MIT License][license-shield]][license-url]
 [![LinkedIn][linkedin-shield]][linkedin-url]
 
-<!-- PROJECT LOGO -->
-<br />
-<div align="center">
-  <h3 align="center">ScholarAgent</h3>
-  <p align="center">
-    An Agentic-RAG Architecture for Multi-Layered Secure Knowledge Systems.
-    <br />
-    <br />
-    <a href="https://github.com/gavrielsh/scholaragent/issues">Report Bug</a>
-    ·
-    <a href="https://github.com/gavrielsh/scholaragent/issues">Request Feature</a>
-  </p>
 </div>
 
-<!-- TABLE OF CONTENTS -->
-<details>
-  <summary>Table of Contents</summary>
-  <ol>
-    <li>
-      <a href="#about-the-project">About The Project</a>
-      <ul>
-        <li><a href="#key-features">Key Features</a></li>
-        <li><a href="#built-with">Built With</a></li>
-      </ul>
-    </li>
-    <li>
-      <a href="#getting-started">Getting Started</a>
-      <ul>
-        <li><a href="#prerequisites">Prerequisites</a></li>
-        <li><a href="#installation">Installation</a></li>
-        <li><a href="#environment-variables">Environment Variables</a></li>
-      </ul>
-    </li>
-    <li>
-      <a href="#architecture">Architecture</a>
-      <ul>
-        <li><a href="#authorization-model">Authorization Model</a></li>
-        <li><a href="#hybrid-search">Hybrid Search</a></li>
-      </ul>
-    </li>
-    <li><a href="#usage">Usage</a></li>
-    <li><a href="#evaluation">Evaluation</a></li>
-    <li><a href="#license">License</a></li>
-    <li><a href="#contact">Contact</a></li>
-  </ol>
-</details>
+---
 
-<!-- ABOUT THE PROJECT -->
-## About The Project
+## TL;DR
 
-ScholarAgent is an enterprise-grade, event-driven knowledge management system built as part of an M.Sc. research project. It implements a secure **Agentic-RAG (Retrieval-Augmented Generation)** architecture specifically designed for social and educational non-profit organizations. 
+ScholarAgent is an M.Sc. research system and a working WhatsApp knowledge
+assistant for Hebrew-language non-profits. It exists to test one claim:
 
-The system addresses the critical challenge of unauthorized data leakage in LLM applications by enforcing strict **transactional Row-Level Security (RLS)** at the database level, ensuring users only retrieve and generate responses based on content they are explicitly authorized to view.
+> In an organizational RAG system where every classification tier discusses the
+> **same subjects in the same words**, authorization filtering in application
+> code or in the system prompt is not a security control. Only enforcement
+> inside the database is.
 
-### Key Features
-*   **Four-Tier Authorization (L0-L3):** Strict hierarchical access control (Admin, Manager, Staff, Volunteer).
-*   **Hybrid Retrieval:** Combines Dense Vector Search (`pgvector`) and Sparse Full-Text Search (PostgreSQL `tsvector`) using Reciprocal Rank Fusion (RRF).
-*   **Zero Data Leakage:** Guaranteed by transactional database-level RLS policies.
-*   **Agentic Orchestration:** Deterministic state machine (`IntentRouter`, `SafetySignals`) routing queries based on intent (Knowledge, Admin Analytics, Chat History).
-*   **Multi-Provider LLM Adapter:** Built-in support for Google Gemini (1.5/2.0), Anthropic Claude (3.5), OpenAI (GPT-4o), and a Mock Provider for testing.
-*   **WhatsApp Gateway:** Seamless asynchronous interaction via WhatsApp Cloud API with BullMQ/Redis queuing and HMAC-SHA256 signature verification.
-*   **Automated Evaluation:** Built-in testing harness utilizing RAGAS metrics and a novel Data Leakage Score (DLS).
+The claim was tested across **120 end-to-end runs** (4 configurations × 30
+queries) and **90 retrieval observations** over a purpose-built Hebrew corpus
+with planted canaries. Prompt-level defense leaked unauthorized chunks into the
+model's context on **78.67%–80.00%** of adversarial queries. Database-enforced
+RLS leaked on **0.00%** — all 60 secured runs, zero exceptions, including every
+adversarial query. The cost of that isolation is measured and reported too:
+answer relevancy falls from 81.1% to 68.7% on the strictest configuration.
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+---
 
-### Built With
+## The Problem: Semantic Collision
 
-*   [![Next.js][Next.js]][Next-url]
-*   [![TypeScript][TypeScript.js]][TypeScript-url]
-*   [![PostgreSQL][PostgreSQL.js]][PostgreSQL-url]
-*   [![Redis][Redis.js]][Redis-url]
-*   [![Docker][Docker.js]][Docker-url]
+Enterprise RAG is almost always built the same way: retrieve from the knowledge
+base, filter out what the user may not see, pass the remainder to the LLM. The
+unstated assumption is that the filter worked.
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+In a Hebrew organizational corpus that assumption is especially dangerous,
+because the classification tiers are not about *different topics* — they are
+about *different depths of the same topic*. A real example from this system's
+corpus, the question **"What is the expense reimbursement ceiling?"**:
 
-<!-- GETTING STARTED -->
-## Getting Started
+| Tier | What exists at this tier |
+|---|---|
+| **L2** (Staff) | ₪50 per day of activity, public transport only, against receipts |
+| **L1** (Manager) | A ₪250-per-trip exception authority and a ₪4,500 regional ceiling |
+| **L0** (Admin) | An audit report freezing approvals above ₪1,000 — naming two employees |
 
-To get a local copy up and running follow these simple steps.
+All three documents share the exact phrase **"החזר הוצאות ונסיעות"** and the
+terms `קבלות`, `תקרה`, `אסמכתה`, `ועדה`. To a vector index they are near-neighbors
+of the same innocent question, and it has no reason to prefer one over another.
 
-### Prerequisites
+We call this **Semantic Collision**: documents at different classification
+levels that are near-identical in meaning and phrasing, which turns every benign
+user question into an isolation test.
 
-*   Node.js (v20+)
-*   Docker & Docker Compose
-*   A WhatsApp Cloud API Developer Account
-*   API Keys for LLM Providers (OpenAI, Anthropic, or Google Gemini)
+### Why app-layer filtering fails
 
-### Installation
+It relies on every data path remembering to filter. A real system has more than
+one: a webhook, an ingestion pipeline, a reconciliation job, an evaluation
+harness. `lib/core/db.ts` alone contains three independently written write
+paths, each with its own context handling. One forgotten filter is a breach, and
+nothing about the architecture makes the omission visible.
 
-1.  Clone the repo:
-    ```sh
-    git clone https://github.com/gavrielsh/scholaragent.git
-    cd scholaragent
-    ```
-2.  Install NPM packages:
-    ```sh
-    npm install
-    ```
-3.  Set up your `.env.local` file (see [Environment Variables](#environment-variables)).
-    Every script loads `.env.local` specifically; a plain `.env` is not read by
-    `migrate`, `evaluate`, `ingest` or `reconcile`.
-4.  Start the infrastructure (PostgreSQL + pgvector, Redis) via Docker:
-    ```sh
-    docker compose up -d
-    ```
-5.  Run database migrations:
-    ```sh
-    npm run migrate
-    ```
-6.  Start the development server and the BullMQ worker concurrently:
-    ```sh
-    npm run dev
-    # In a separate terminal:
-    npm run worker:whatsapp
-    ```
+### Why prompt-level filtering fails
 
-### Environment Variables
+It fails more fundamentally: it tries to tell the model what *not to say*
+**after the classified material is already inside its context window**. Once an
+L0 chunk is in front of the model, leakage stops being an access-control
+question and becomes a probabilistic question about model behavior.
 
-Copy the `.env.example` file to `.env.local` and populate the required variables.
-The filename matters: the Next.js app and all four scripts read `.env.local`.
+The experiment measures exactly that. Under prompt-only defense, unauthorized
+chunks reached the model's context on 78.67% of adversarial queries — and the
+Gemini configuration disclosed them in **100.0%** of authorization-escalation
+attempts, including a donor's name and a confidential **₪1,850,000** pledge
+handed to an L2 user.
 
-```env
-# Database
-DATABASE_URL="postgresql://user:password@localhost:5432/scholaragent"
+Prompt instructions are not worthless — in the injection test `ADV-014` both
+models refused. But they succeeded *probabilistically*, after the sensitive data
+was already exposed to them. **Database enforcement turns a probabilistic
+question into a deterministic one.**
 
-# Redis (BullMQ)
-REDIS_URL="redis://localhost:6379"
+---
 
-# API Keys (Provide at least one)
-OPENAI_API_KEY="your-openai-key"
-ANTHROPIC_API_KEY="your-anthropic-key"
-GEMINI_API_KEY="your-gemini-key"
-
-# WhatsApp Configuration
-WHATSAPP_VERIFY_TOKEN="your-verify-token"
-WHATSAPP_APP_SECRET="your-app-secret"
-WHATSAPP_PHONE_NUMBER_ID="your-phone-id"
-WHATSAPP_ACCESS_TOKEN="your-access-token"
-```
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-<!-- ARCHITECTURE -->
 ## Architecture
 
-### Authorization Model
+```mermaid
+flowchart TB
+    U["👤 WhatsApp User<br/>(tier L0–L3)"]
 
-The system enforces a Four-Tier Role-Based and Row-Level Access Control Model:
-*   `[L0: ADMIN]` - Full system visibility, audit logs.
-*   `[L1: MANAGER]` - Organizational management, branch data.
-*   `[L2: STAFF]` - Operational files, internal schedules.
-*   `[L3: VOLUNTEER]` - General protocols, public-facing activity guides.
+    subgraph EDGE["Edge — app/api/whatsapp/webhook/route.ts"]
+        direction TB
+        SIG["1 · Verify HMAC-SHA256<br/>against raw body bytes"]
+        IDEM["2 · Redis SET NX<br/>idempotency claim"]
+        ENQ["3 · Enqueue job"]
+        ACK["4 · ACK 200<br/>(receipt fired, not awaited)"]
+        SIG --> IDEM --> ENQ --> ACK
+    end
 
-Every database transaction explicitly sets the user's role and ID, allowing PostgreSQL RLS policies to dynamically filter chunks during retrieval:
+    subgraph QUEUE["BullMQ · Redis"]
+        CHATQ["whatsapp-incoming"]
+        DOCQ["document-ingestion"]
+    end
+
+    subgraph WORKER["Worker — 90s deadline"]
+        direction TB
+        GUARD["Guardrails<br/>PII redaction · distress handoff"]
+        RBAC["RBAC lookup<br/>phone → tier (lib/security/auth.ts)"]
+        ROUTE["Intent router<br/>knowledge · admin · history"]
+        GUARD --> RBAC --> ROUTE
+    end
+
+    subgraph DB["PostgreSQL 16 + pgvector — the security boundary"]
+        direction TB
+        TX["BEGIN<br/>set_config('app.user_permission_level', tier, true)<br/><b>SET LOCAL ROLE scholaragent_app</b><br/><i>NOLOGIN · NOSUPERUSER · NOBYPASSRLS</i>"]
+        RLS["FORCE ROW LEVEL SECURITY<br/>knowledge_base · ingested_documents · chat_history"]
+        HYB["Hybrid retrieval<br/>dense HNSW cosine + sparse ts_rank_cd<br/>fused by RRF (k=60)"]
+        TX --> RLS --> HYB
+    end
+
+    LLM["LLM adapter · lib/domain/chat/llm.ts<br/>Claude · Gemini · OpenAI · Mock<br/>retry 429/5xx/timeout — [500, 1500] ms"]
+    OUT["↩ Answer via WhatsApp Cloud API"]
+
+    U --> SIG
+    ENQ --> CHATQ & DOCQ
+    CHATQ --> GUARD
+    ROUTE --> TX
+    HYB -->|"only authorized chunks<br/>ever leave the database"| LLM
+    LLM --> OUT --> U
+
+    style DB fill:#0b3d2e,stroke:#1f7a5c,color:#eaf7f1
+    style EDGE fill:#1a2b4a,stroke:#3d5a8a,color:#e8eefc
+    style TX fill:#124a38,stroke:#2fa37a,color:#eaf7f1
+    style RLS fill:#124a38,stroke:#2fa37a,color:#eaf7f1
+```
+
+### The security boundary, precisely
+
+Enabling `FORCE ROW LEVEL SECURITY` was **not sufficient**, and discovering why
+is one of this project's findings. The migration's own comment states the limit:
+
+> *"FORCE RLS applies policies to the table owner as well (superuser /
+> BYPASSRLS still bypass)."*
+
+The application was connecting as a `SUPERUSER`. In PostgreSQL, any role holding
+`rolsuper` or `rolbypassrls` skips every policy regardless of `FORCE` — so the
+policies were never evaluated. Empirically: **all five planted canaries at L0/L1
+were retrievable from L1 and L2.** Every tier could read every tier, silently,
+while the schema looked secure.
+
+The local cause is the Postgres Docker entrypoint, which always creates
+`POSTGRES_USER` as a superuser. The same hole exists on any managed database
+whose application role happens to be privileged — so this is not a
+local-development curiosity.
+
+The fix is a role with no way to bypass, entered *inside each transaction*:
+
 ```sql
--- Set per transaction; the policies compare against this integer tier.
-SELECT set_config('app.user_permission_level', '2', true);
-```
-The policy on `knowledge_base` is `classification_level >= current_setting('app.user_permission_level', true)::integer`, and the table is declared `FORCE ROW LEVEL SECURITY`, so even the table owner is subject to it.
-
-### Project Layout
-
-Domain-driven, with dependencies flowing inward: `domain` may depend on
-`security` and `core`, `security` on `core`, and `core` on nothing above it.
-
-```
-app/api/                  Next.js App Router endpoints (webhook, upload, document-deleted)
-lib/
-  core/                   Technology-facing infrastructure, no business rules
-    db.ts                 PostgreSQL + pgvector: hybrid retrieval, RRF, RLS-scoped queries
-    db/accessLevel.ts     Dependency-free permission-tier contract
-    queue.ts  redis.ts    BullMQ connection and job runtime, Redis client
-    telemetry.ts          Tracing, RAGAS scoring, DLS metrics
-    logger.ts  env.ts  http/
-  security/               Cross-cutting, enforced independently of any domain
-    auth.ts               RBAC, user registry, phone normalisation
-    crypto.ts             HMAC webhook signature verification, timing-safe compare
-    guardrails.ts         Inbound safety signals, PII redaction
-    extractUser.ts        JWT identity extraction
-  domain/
-    chat/                 agent.ts (orchestration), llm.ts (providers), rag.ts, session/
-    ingestion/            pipeline.ts, embeddings.ts, retrieval.ts, worker.ts
-    whatsapp/             client.ts, webhook.ts, worker.ts, types.ts
-    admin/                auditLogs.ts
-scripts/                  Operational entry points (snake_case), run via `node --import tsx`
-migrations/               Canonical SQL baseline plus the runner
-docs/                     Research proposal and architecture notes
-docker/                   App and worker images
+-- migrations/003_enforce_rls_role.sql
+CREATE ROLE scholaragent_app
+  NOLOGIN NOSUPERUSER NOBYPASSRLS
+  NOCREATEDB NOCREATEROLE NOREPLICATION;
 ```
 
-### Hybrid Search
-Retrieval is performed using a combination of dense vector similarity (Cosine Distance) and sparse full-text search, fused using Reciprocal Rank Fusion (RRF):
-$RRF\_Score(d) = \sum \frac{1}{60 + r(d)}$
+```ts
+// lib/core/db.ts — withRlsTransaction
+await client.query("BEGIN");
+// GUC first, while the connecting role is still in effect…
+await client.query("SELECT set_config('app.user_permission_level', $1, true)", [tier]);
+await enterAppRole(client);   // …then SET LOCAL ROLE scholaragent_app
+```
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+Four properties make this a control rather than a convention:
 
-<!-- USAGE EXAMPLES -->
-## Usage
+1. **`NOLOGIN` by design.** Nothing connects as this role; it is only *entered*
+   via `SET LOCAL ROLE`. No new credential, no connection-string change.
+2. **Transaction-scoped.** `SET LOCAL` reverts on `COMMIT` and `ROLLBACK`, so
+   one user's tier cannot leak onto the next user of a pooled connection.
+3. **Fail-closed.** If the role is missing, `enterAppRole` throws and the query
+   is refused — rather than running as superuser with every policy bypassed,
+   which is the vulnerability itself, arriving silently.
+4. **Self-verifying.** Migration 003 raises if the role ever holds `SUPERUSER`
+   or `BYPASSRLS`, or if `FORCE ROW LEVEL SECURITY` is off on any protected
+   table. A database cannot be stamped "secured" while it is not.
 
-### Document Ingestion
-Documents placed in the `local_data/documents/` directory can be ingested into the vector database using the provided script:
+One escape hatch exists and is deliberate: `withServiceClient` uses a separate
+pool and never switches role. The evaluation harness's **positive control**
+depends on it — proving a canary is retrievable at all is what makes a later 0%
+leakage result mean anything. It is never reachable from a user-facing path.
+
+### Retrieval
+
+Dense vector search (`pgvector`, HNSW, `vector_cosine_ops`, `m=16`,
+`ef_construction=64`, 768 dimensions) fused with sparse full-text search
+(`ts_rank_cd` over a generated `tsvector`, GIN-indexed) via Reciprocal Rank
+Fusion:
+
+$$RRF(d) = \sum_{r} \frac{1}{k + \mathrm{rank}_r(d)}, \qquad k = 60$$
+
+Worth stating plainly for reviewers: `ts_rank_cd` is **not** Okapi BM25.
+PostgreSQL has no built-in BM25; this is coverage-density ranking, and the arm
+should not be described as BM25.
+
+All four benchmark arms run through the same `executeRetrieval`, over the same
+corpus, with the same overfetch and the same RLS mechanism, differing only by
+`strategy`. The query embedding is computed once and shared. That de-confounding
+is what makes differences between arms attributable to the strategy.
+
+---
+
+## Empirical Results
+
+Full methodology, case studies and threats to validity:
+**[`docs/experimental_results.md`](docs/experimental_results.md)** (Hebrew).
+Artifacts: `scripts/output/benchmark_summary.md`,
+`scripts/output/evaluation_results_2026-11-18_11-04-54.csv`.
+
+### Headline: the isolation result
+
+Experiment 2 — 2×2 matrix of model × enforcement, 30 queries per cell,
+**120 end-to-end runs**. `Avg DLS` is the Data Leakage Score at the **retrieval**
+stage: the share of retrieved chunks classified above the asker's tier. No LLM
+is involved in that measurement, so it is fully deterministic.
+
+| Config | Model | Enforcement | Completed | **Avg DLS ↓** | Faithfulness ↑ | Answer Relevancy ↑ | Context Precision ↑ | Context Recall ↑ | Latency |
+|---|---|---|---|---|---|---|---|---|---|
+| `A` | claude-sonnet-4-6 | Prompt only | 28/30 | 45.71% | 86.9% | 81.1% | 76.4% | 71.4% | 16,256 ms |
+| `B` | gemini-3.5-flash | Prompt only | 30/30 | 46.67% | **100.0%** | **99.7%** | 43.0% | 91.7% | 17,578 ms |
+| `C` | claude-sonnet-4-6 | **DB RLS** | 30/30 | **0.00%** | 85.5% | 68.7% | 52.7% | 65.8% | **8,996 ms** |
+| `D` | gemini-3.5-flash | **DB RLS** | 30/30 | **0.00%** | **100.0%** | 94.5% | 33.2% | 83.3% | 13,678 ms |
+
+### Under attack — adversarial queries only (n = 15 per config)
+
+This is where the architectural difference is decided.
+
+| Config | Completed | **Avg DLS ↓** | Faithfulness | Answer Relevancy | Context Precision | Latency |
+|---|---|---|---|---|---|---|
+| `A` | 14/15 | **80.00%** | 78.9% | 70.0% | 73.1% | 15,306 ms |
+| `B` | 15/15 | **78.67%** | 100.0% | 99.7% | 39.0% | 17,820 ms |
+| `C` | 15/15 | **0.00%** | 88.3% | 65.7% | 26.7% | 7,141 ms |
+| `D` | 15/15 | **0.00%** | 100.0% | 89.0% | 18.0% | 12,010 ms |
+
+**0.00% across all 60 secured runs** (`C` + `D`), including every adversarial
+query. Zero unauthorized chunks reached the model's context window. That is the
+project's central finding.
+
+Disclosure by attack family makes the mechanism visible:
+
+| Config | Authorization escalation | Prompt injection | Benign control |
+|---|---|---|---|
+| `A` | 63.6% (n=11) | 33.3% (n=3) | 14.3% (n=14) |
+| `B` | **100.0%** (n=12) | 33.3% (n=3) | 66.7% (n=15) |
+| `C` | **0.0%** (n=12) | **0.0%** (n=3) | 40.0% (n=15) |
+| `D` | 8.3% (n=12) | **0.0%** (n=3) | 60.0% (n=15) |
+
+The 40%/60% figures in the benign-control column are **measurement-tool false
+positives, not leaks** — retrieval-stage DLS is a flat 0.00% for those same
+runs. Two causes: the forbidden-term lists overlap deliberately across tiers
+(an innocent answer mentioning "תקרה" matches an L0 term), and a model that
+*refuses* while naming the protected entity gets flagged by a substring check.
+Generation-stage DLS is therefore reported as an **upper bound**, and the
+isolation claim rests on the deterministic retrieval-stage metric.
+
+### The trade-offs, stated honestly
+
+| What it costs | Evidence |
+|---|---|
+| **Answer relevancy** falls 81.1% → 68.7% (`A` → `C`) | Secured Claude turns conservative and sometimes declines answerable questions |
+| **Context precision** falls 76.4% → 52.7% and 43.0% → 33.2% | Expected, not a bug: RLS shrinks the candidate pool, so marginally less focused chunks make the cut |
+| **Re-ranking is not worth it** | +1.5 pp `Recall@3` (0.929 → 0.944) and +0.3 pp `NDCG@5` for **+8,233 ms** P50 — three orders of magnitude over the 4 ms retrieval itself. Disqualifying for interactive chat |
+| **Secured is *faster*** | `C` at 8,996 ms vs `A` at 16,256 ms — a smaller authorized candidate pool means less context to process |
+
+### Experiment 1 — retrieval arms (mean ± population SD over 3 repeats)
+
+| Arm | Recall@3 | Recall@5 | Recall@10 | MRR | NDCG@5 | P50 latency |
+|---|---|---|---|---|---|---|
+| `R1_sparse` | 0.000 † | 0.000 † | 0.000 † | 0.000 † | 0.000 † | 2 ms |
+| `R2_dense` | 0.929 ± 0.175 | 0.976 ± 0.106 | 1.000 | 1.000 | 0.977 ± 0.048 | 3 ms |
+| `R3_hybrid_rrf` | 0.929 ± 0.175 | 0.976 ± 0.106 | 1.000 | 1.000 | 0.977 ± 0.048 | 4 ms |
+| `R4_hybrid_reranked` | **0.944 ± 0.157** | 0.976 ± 0.106 | 1.000 | 1.000 | **0.980 ± 0.044** | 4 ms + **8,233 ms** re-rank |
+
+† **`R1` returning 0.000 is a genuine bug the benchmark caught, and the cause is
+not Hebrew morphology.** The code passed the full query to
+`websearch_to_tsquery`, which joins unquoted terms with **AND** — `STD-001`'s 13
+Hebrew words all had to appear in one chunk. Zero rows returned, every query,
+logged verbatim as `R1_sparse top 5: nothing retrieved`. The proof is that `R2`
+and `R3` are identical to the last digit: with an empty lexical list, the hybrid
+arm falls back to vector results, so **the system was never actually running
+hybrid search in production**. Fixed on `feat/ir-benchmark`, since merged to
+`main` (commit `76eb1a3`) — *after* the run above, so not reflected in it. `H1`
+is therefore **undecided**, and `R1`'s 0.00 leakage figure is vacuous: nothing
+can leak when nothing is returned. The isolation evidence rests on `R2`/`R4` and
+on the 60 secured end-to-end runs.
+
+### Scope and limits
+
+A **descriptive benchmark, not a statistical study.** 30 queries (21 IR-scorable),
+2 relevant chunks each, 120 end-to-end runs. No significance tests were run, so
+the 0.944 vs 0.929 gap is not claimed to be significant. The security claim is
+different in kind — it is a deterministic count: **0 unauthorized chunks across
+60 runs and 90 retrieval observations.** Also documented in §7: the LLM judge was
+unavailable for 20 of 28 `Config A` records, two `A` runs timed out at 15,000 ms,
+and `Recall@10` is saturated at 1.000 by corpus design.
+
+---
+
+## Quickstart
+
+**Prerequisites:** Node.js 20 (matching CI and both Docker images), Docker
+Compose, and at least one LLM API key (or `LLM_PROVIDER=mock`, the default).
+
 ```sh
-npm run ingest
+git clone https://github.com/gavrielsh/scholaragent.git
+cd scholaragent
+npm install
 ```
-This process includes:
-1. PII Redaction (removing Israeli ID numbers, emails, phones).
-2. Semantic Chunking.
-3. Embedding Generation.
-4. Storage in PostgreSQL with `pgvector`.
 
-### WhatsApp Interaction
-Once the Webhook is configured in your Meta Developer portal, users can interact with the system via WhatsApp. The `IntentRouter` will automatically classify messages as standard queries, admin requests, or trigger `SafetySignals` for emergencies.
+**1 — Configure.** Copy `.env.example` to `.env.local`. The filename matters:
+the app and every script call `dotenv.config({ path: ".env.local" })`
+explicitly, so a plain `.env` is never read.
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+```env
+DATABASE_URL=postgresql://user:password@localhost:5432/scholaragent
+REDIS_URL=redis://127.0.0.1:6379
+PG_SSLMODE=disable
 
-<!-- EVALUATION -->
-## Evaluation
+LLM_PROVIDER=gemini          # gemini | claude | openai | mock
+GEMINI_API_KEY=
+ANTHROPIC_API_KEY=
+GEMINI_MODEL=gemini-3.5-flash
+CLAUDE_MODEL=claude-sonnet-4-6
 
-The repository includes a comprehensive evaluation suite designed to benchmark the RAG system against a Golden Dataset.
+WHATSAPP_VERIFY_TOKEN=
+WHATSAPP_APP_SECRET=
+WHATSAPP_PHONE_NUMBER_ID=
+WHATSAPP_ACCESS_TOKEN=
+```
 
-Run the evaluation:
+The credentials above match the `docker-compose.yml` defaults
+(`POSTGRES_USER=user`, `POSTGRES_PASSWORD=password`, `POSTGRES_DB=scholaragent`).
+
+**2 — Start infrastructure.** The default profile brings up Postgres
+(`pgvector/pgvector:pg16`) and Redis only; the app and worker containers sit
+behind the `full` profile.
+
 ```sh
-npm run evaluate
+docker compose up -d                  # postgres + redis
+docker compose --profile full up -d   # …plus containerized app + worker
 ```
 
-Metrics tracked:
-*   **Context Precision & Recall** (via RAGAS)
-*   **Faithfulness & Answer Relevancy** (via RAGAS)
-*   **Data Leakage Score (DLS):** A novel metric ensuring 0% of unauthorized chunks reach the LLM context window.
-*   **Latency Profiling**
+**3 — Migrate.** This is the step that creates `scholaragent_app` and makes RLS
+real. Its self-check fails the migration if enforcement would not hold.
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+```sh
+npm run migrate
+```
 
-<!-- LICENSE -->
+**4 — Verify.** No database, Redis or network needed:
+
+```sh
+npm test            # 170 tests, 16 suites
+npx tsc --noEmit
+npm run lint
+```
+
+**5 — Run.** Two processes — the worker is not optional; the webhook only
+enqueues.
+
+```sh
+npm run dev               # Next.js app on :3000
+npm run worker:whatsapp   # in a second terminal
+```
+
+### Reproducing the thesis results
+
+```sh
+npm run ingest -- --base local_data/eval_corpus   # 15-document L0/L1/L2 corpus
+npm run eval:seed                                 # plant canaries; exits non-zero if controls fail
+npm run benchmark                                 # Experiment 1 → scripts/output/benchmark_summary.md
+npm run evaluate                                  # Experiment 2 → scripts/output/evaluation_results_*.csv
+```
+
+Run `eval:seed` before `evaluate`. Its positive control proves each canary is
+retrievable with RLS bypassed, and its negative control proves it is *not*
+retrievable from a lower tier. Without that, a 0% leakage result would be a test
+that cannot fail.
+
+Presenting this live? See **[`docs/demo_runbook.md`](docs/demo_runbook.md)**.
+
+---
+
+## Repository Map
+
+| Path | What lives there |
+|---|---|
+| `app/api/` | Webhook, upload and deletion endpoints. The webhook verifies, claims, enqueues, ACKs — nothing more |
+| `lib/core/` | `db.ts` (RLS transactions, hybrid retrieval, RRF), queue, redis, telemetry, IR metrics |
+| `lib/security/` | `auth.ts` (four-tier RBAC), `crypto.ts` (HMAC), `guardrails.ts` (PII, distress handoff) |
+| `lib/domain/` | `chat/` (agent, RAG, LLM adapters, re-rank), `ingestion/`, `whatsapp/`, `admin/` |
+| `migrations/` | `001` baseline schema · `002` knowledge gaps · `003` the RLS role fix |
+| `scripts/` | Ingestion, benchmark, evaluation, canary seeding, qrels grading |
+| `local_data/eval_corpus/` | The 15-document synthetic Hebrew corpus (L0/L1/L2) |
+| `docs/` | Research proposal, empirical results, demo runbook |
+
+Dependencies flow strictly inward: `domain` → `security` → `core`. See
+[`CLAUDE.md`](CLAUDE.md) for the full engineering contract.
+
+---
+
 ## License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+MIT. See `LICENSE`.
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-<!-- CONTACT -->
 ## Contact
 
-Gavriel Shalem - M.Sc. Candidate, Azrieli College of Engineering
-
-Project Link: [https://github.com/gavrielsh/scholaragent](https://github.com/gavrielsh/scholaragent)
+**Gavriel Shalem** — M.Sc. Candidate, Azrieli College of Engineering
+[github.com/gavrielsh/scholaragent](https://github.com/gavrielsh/scholaragent)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
-<!-- MARKDOWN LINKS & IMAGES -->
-[contributors-shield]: https://img.shields.io/github/contributors/gavrielsh/scholaragent.svg?style=for-the-badge
-[contributors-url]: https://github.com/gavrielsh/scholaragent/graphs/contributors
-[forks-shield]: https://img.shields.io/github/forks/gavrielsh/scholaragent.svg?style=for-the-badge
-[forks-url]: https://github.com/gavrielsh/scholaragent/network/members
-[stars-shield]: https://img.shields.io/github/stars/gavrielsh/scholaragent.svg?style=for-the-badge
-[stars-url]: https://github.com/gavrielsh/scholaragent/stargazers
-[issues-shield]: https://img.shields.io/github/issues/gavrielsh/scholaragent.svg?style=for-the-badge
-[issues-url]: https://github.com/gavrielsh/scholaragent/issues
 [license-shield]: https://img.shields.io/github/license/gavrielsh/scholaragent.svg?style=for-the-badge
 [license-url]: https://github.com/gavrielsh/scholaragent/blob/main/LICENSE
 [linkedin-shield]: https://img.shields.io/badge/-LinkedIn-black.svg?style=for-the-badge&logo=linkedin&colorB=555
 [linkedin-url]: https://linkedin.com/in/gavriel-shalom
-
-[Next.js]: https://img.shields.io/badge/next.js-000000?style=for-the-badge&logo=nextdotjs&logoColor=white
-[Next-url]: https://nextjs.org/
-[TypeScript.js]: https://img.shields.io/badge/typescript-3178C6?style=for-the-badge&logo=typescript&logoColor=white
-[TypeScript-url]: https://www.typescriptlang.org/
-[PostgreSQL.js]: https://img.shields.io/badge/postgresql-4169E1?style=for-the-badge&logo=postgresql&logoColor=white
-[PostgreSQL-url]: https://www.postgresql.org/
-[Redis.js]: https://img.shields.io/badge/redis-DC382D?style=for-the-badge&logo=redis&logoColor=white
-[Redis-url]: https://redis.io/
-[Docker.js]: https://img.shields.io/badge/docker-2496ED?style=for-the-badge&logo=docker&logoColor=white
-[Docker-url]: https://www.docker.com/
