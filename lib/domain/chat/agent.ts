@@ -547,11 +547,17 @@ export interface ParsedDeleteUserInput {
   phone: string;
 }
 
-const ADD_PARSE_ERROR_MESSAGES: Record<ParseAddUserFailureReason, string> = {
-  NOT_ENOUGH_ARGS: ADD_NOT_ENOUGH_ARGS_MESSAGE,
-  INVALID_LEVEL: ADD_INVALID_LEVEL_MESSAGE,
-  MISSING_PHONE: ADD_MISSING_PHONE_MESSAGE,
-  MISSING_NAME: ADD_MISSING_NAME_MESSAGE,
+// Every add-user parse failure leads with the generic ADD_FORMAT_RETRY
+// reminder of the three-field shape, then the field-specific detail — the
+// same header-plus-detail pattern DELETE_FORMAT_RETRY uses alone (delete has
+// only one failure mode). Before parseAddUserInput grew its four granular
+// reasons, ADD_FORMAT_RETRY *was* the whole message; folding it back in here
+// keeps it live instead of leaving it as an orphaned constant nothing sends.
+export const ADD_PARSE_ERROR_MESSAGES: Record<ParseAddUserFailureReason, string> = {
+  NOT_ENOUGH_ARGS: `${ADD_FORMAT_RETRY}\n${ADD_NOT_ENOUGH_ARGS_MESSAGE}`,
+  INVALID_LEVEL: `${ADD_FORMAT_RETRY}\n${ADD_INVALID_LEVEL_MESSAGE}`,
+  MISSING_PHONE: `${ADD_FORMAT_RETRY}\n${ADD_MISSING_PHONE_MESSAGE}`,
+  MISSING_NAME: `${ADD_FORMAT_RETRY}\n${ADD_MISSING_NAME_MESSAGE}`,
 };
 
 /** WhatsApp injects these into RTL number runs; they make /^[0-3]$/ fail. */

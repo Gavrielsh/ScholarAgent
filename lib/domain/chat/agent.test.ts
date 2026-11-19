@@ -1,8 +1,11 @@
 import {
+  ADD_FORMAT_RETRY,
   ADD_INPUT_EXAMPLE,
   ADD_INVALID_LEVEL_MESSAGE,
+  ADD_MISSING_NAME_MESSAGE,
   ADD_MISSING_PHONE_MESSAGE,
   ADD_NOT_ENOUGH_ARGS_MESSAGE,
+  ADD_PARSE_ERROR_MESSAGES,
   ADMIN_ACTION_ADD_USER,
   ADMIN_ACTION_LIST_USERS,
   canManagePermissionLevel,
@@ -134,6 +137,26 @@ describe("parseAddUserInput / parseDeleteUserInput", () => {
     expect(ADD_INVALID_LEVEL_MESSAGE).toContain("0 ל-3");
     expect(ADD_INVALID_LEVEL_MESSAGE).toContain(ADD_INPUT_EXAMPLE);
     expect(ADD_MISSING_PHONE_MESSAGE).toContain(ADD_INPUT_EXAMPLE);
+  });
+
+  it("leads every add-user parse error reply with the generic ADD_FORMAT_RETRY reminder", () => {
+    // ADD_FORMAT_RETRY must actually reach the admin on every one of the four
+    // granular failure reasons — not just exist as an unused constant.
+    expect(ADD_PARSE_ERROR_MESSAGES.NOT_ENOUGH_ARGS).toBe(
+      `${ADD_FORMAT_RETRY}\n${ADD_NOT_ENOUGH_ARGS_MESSAGE}`
+    );
+    expect(ADD_PARSE_ERROR_MESSAGES.INVALID_LEVEL).toBe(
+      `${ADD_FORMAT_RETRY}\n${ADD_INVALID_LEVEL_MESSAGE}`
+    );
+    expect(ADD_PARSE_ERROR_MESSAGES.MISSING_PHONE).toBe(
+      `${ADD_FORMAT_RETRY}\n${ADD_MISSING_PHONE_MESSAGE}`
+    );
+    expect(ADD_PARSE_ERROR_MESSAGES.MISSING_NAME).toBe(
+      `${ADD_FORMAT_RETRY}\n${ADD_MISSING_NAME_MESSAGE}`
+    );
+    for (const message of Object.values(ADD_PARSE_ERROR_MESSAGES)) {
+      expect(message.startsWith(ADD_FORMAT_RETRY)).toBe(true);
+    }
   });
 });
 
