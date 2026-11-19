@@ -40,7 +40,7 @@ export function whatsappIncomingJobId(messageId: string): string {
   return `wa_${messageId.replace(/:/g, "_")}`;
 }
 
-function getIncomingQueue(): Queue<ParsedInboundEvent> {
+export function getWhatsAppIncomingQueue(): Queue<ParsedInboundEvent> {
   if (!incomingQueue) {
     incomingQueue = new Queue<ParsedInboundEvent>(WHATSAPP_INCOMING_QUEUE_NAME, {
       connection: getQueueConnection(),
@@ -58,14 +58,10 @@ function getIncomingQueue(): Queue<ParsedInboundEvent> {
   return incomingQueue;
 }
 
-export function getWhatsAppIncomingQueue(): Queue<ParsedInboundEvent> {
-  return getIncomingQueue();
-}
-
 export async function enqueueWhatsAppIncomingMessage(
   event: ParsedInboundEvent
 ): Promise<string> {
-  const job = await getIncomingQueue().add("process-incoming", event, {
+  const job = await getWhatsAppIncomingQueue().add("process-incoming", event, {
     jobId: event.messageId ? whatsappIncomingJobId(event.messageId) : undefined,
   });
   return job.id ?? String(job.name);

@@ -31,8 +31,29 @@ export class ForbiddenAdminActionError extends Error {
 
 const REPORT_TIMEZONE = process.env.CHAT_REPORT_TIMEZONE ?? "Asia/Jerusalem";
 
-function todayStartParam(): string {
-  return REPORT_TIMEZONE;
+/**
+ * Row shape of the two chat-history reports below. They select the same columns
+ * — one scoped by permission level, one by a single sender — so the projection
+ * and its mapping are declared once.
+ */
+interface StaffChatQueryRow {
+  phone_number: string;
+  display_name: string | null;
+  permission_level: PermissionLevel;
+  role: "user" | "assistant" | "system";
+  content: string;
+  occurred_at: Date;
+}
+
+function toStaffChatRow(row: StaffChatQueryRow): StaffChatRow {
+  return {
+    phoneNumber: row.phone_number,
+    displayName: row.display_name,
+    permissionLevel: row.permission_level,
+    role: row.role,
+    content: row.content,
+    occurredAt: row.occurred_at.toISOString(),
+  };
 }
 
 /**
@@ -58,14 +79,7 @@ async function fetchTodayStaffChatHistories(
 
   try {
     const result = await withRlsTransaction(requesterPermissionLevel, (client) =>
-      client.query<{
-        phone_number: string;
-        display_name: string | null;
-        permission_level: PermissionLevel;
-        role: "user" | "assistant" | "system";
-        content: string;
-        occurred_at: Date;
-      }>(
+      client.query<StaffChatQueryRow>(
         `SELECT u.phone_number, u.display_name, u.permission_level,
                 ch.role, ch.content, ch.occurred_at
            FROM chat_history ch
@@ -73,18 +87,11 @@ async function fetchTodayStaffChatHistories(
           WHERE u.permission_level = ANY($1::int[])
             AND ch.occurred_at >= date_trunc('day', timezone($2, now()))
           ORDER BY u.display_name NULLS LAST, u.phone_number, ch.occurred_at ASC`,
-        [levels, todayStartParam()]
+        [levels, REPORT_TIMEZONE]
       )
     );
 
-    return result.rows.map((row) => ({
-      phoneNumber: row.phone_number,
-      displayName: row.display_name,
-      permissionLevel: row.permission_level,
-      role: row.role,
-      content: row.content,
-      occurredAt: row.occurred_at.toISOString(),
-    }));
+    return result.rows.map(toStaffChatRow);
   } catch (err) {
     logError("admin_history_fetch_staff_failed", err, { requesterPermissionLevel, levels });
     throw err;
@@ -161,14 +168,7 @@ export async function fetchTodayChatHistoryForPhone(
 
   try {
     const result = await withRlsTransaction(requesterPermissionLevel, (client) =>
-      client.query<{
-        phone_number: string;
-        display_name: string | null;
-        permission_level: PermissionLevel;
-        role: "user" | "assistant" | "system";
-        content: string;
-        occurred_at: Date;
-      }>(
+      client.query<StaffChatQueryRow>(
         `SELECT u.phone_number, u.display_name, u.permission_level,
                 ch.role, ch.content, ch.occurred_at
            FROM chat_history ch
@@ -176,18 +176,11 @@ export async function fetchTodayChatHistoryForPhone(
           WHERE ch.sender_id = $1
             AND ch.occurred_at >= date_trunc('day', timezone($2, now()))
           ORDER BY ch.occurred_at ASC`,
-        [phoneNumber, todayStartParam()]
+        [phoneNumber, REPORT_TIMEZONE]
       )
     );
 
-    return result.rows.map((row) => ({
-      phoneNumber: row.phone_number,
-      displayName: row.display_name,
-      permissionLevel: row.permission_level,
-      role: row.role,
-      content: row.content,
-      occurredAt: row.occurred_at.toISOString(),
-    }));
+    return result.rows.map(toStaffChatRow);
   } catch (err) {
     logError("admin_history_fetch_user_day_failed", err, { phoneNumber, requesterPermissionLevel });
     throw err;

@@ -408,6 +408,7 @@ async function handleInboundMessage(
   inbound.queryText = safety.query;
 
   // ── STEP 5: load bounded conversation context ─────────────────────────────
+  // (the turn written in STEP 4 is excluded below)
   let priorMessages: ChatMessage[] = [];
   try {
     const history = await readChatHistory(senderId);
@@ -423,7 +424,7 @@ async function handleInboundMessage(
     logError("chat_history_context_load_failed", err, { senderId });
   }
 
-  // ── STEP 5: retrieval + generation ────────────────────────────────────────
+  // ── STEP 6: retrieval + generation ────────────────────────────────────────
   const processResult = await processBaselineQuery({
     senderPhone: senderId,
     query: inbound.queryText,

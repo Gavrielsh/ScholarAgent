@@ -24,7 +24,7 @@ import {
   CHIT_CHAT_INVARIANT_HE,
   INSUFFICIENT_CONTEXT_REPLY_HE,
   OUT_OF_DOMAIN_REPLY_HE,
-} from "./rag";
+} from "@/lib/domain/chat/rag";
 
 /**
  * Which detector fired. Stored per row rather than collapsed to a boolean
@@ -122,7 +122,7 @@ export interface RecordKnowledgeGapInput {
  * A gap row is observability, not the product. Losing one must never cost the
  * volunteer their answer, so every failure is logged and swallowed rather than
  * propagated into the retry machinery — the same policy chat_history writes
- * follow in lib/whatsapp/incomingMessageProcessor.ts.
+ * follow in lib/domain/whatsapp/webhook.ts.
  */
 export async function recordKnowledgeGap(input: RecordKnowledgeGapInput): Promise<void> {
   try {

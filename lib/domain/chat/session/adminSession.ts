@@ -4,12 +4,20 @@ import {
   setSessionValue,
 } from "@/lib/core/redis";
 
-export type AdminSessionMode =
-  | "awaiting_menu_choice"
-  | "awaiting_user_name"
-  | "AWAITING_USER_MANAGEMENT_CHOICE"
-  | "AWAITING_ADD_USER_DETAILS"
-  | "AWAITING_DELETE_USER_DETAILS";
+/**
+ * Every persisted session mode, in one list: the exported union and the
+ * runtime guard below are both derived from it, so a new mode cannot be added
+ * to the type while `getAdminSession` silently keeps rejecting it as unknown.
+ */
+const ADMIN_SESSION_MODES = [
+  "awaiting_menu_choice",
+  "awaiting_user_name",
+  "AWAITING_USER_MANAGEMENT_CHOICE",
+  "AWAITING_ADD_USER_DETAILS",
+  "AWAITING_DELETE_USER_DETAILS",
+] as const;
+
+export type AdminSessionMode = (typeof ADMIN_SESSION_MODES)[number];
 
 export interface AdminSession {
   mode: AdminSessionMode;
@@ -20,14 +28,6 @@ export interface AdminSession {
 export const MAX_INVALID_ATTEMPTS = 3;
 export const SESSION_ABANDONED_MESSAGE =
   "יצאת מהתפריט עקב כמה בחירות שלא זוהו. אפשר לשלוח שאלה רגילה או לפתוח את התפריט מחדש.";
-
-const ADMIN_SESSION_MODES = new Set<AdminSessionMode>([
-  "awaiting_menu_choice",
-  "awaiting_user_name",
-  "AWAITING_USER_MANAGEMENT_CHOICE",
-  "AWAITING_ADD_USER_DETAILS",
-  "AWAITING_DELETE_USER_DETAILS",
-]);
 
 /**
  * L0/L1 menu and prompt state (chat-history + user management).
@@ -50,7 +50,7 @@ function sessionKey(adminPhone: string): string {
 }
 
 function isAdminSessionMode(value: unknown): value is AdminSessionMode {
-  return typeof value === "string" && ADMIN_SESSION_MODES.has(value as AdminSessionMode);
+  return ADMIN_SESSION_MODES.some((mode) => mode === value);
 }
 
 export function isUserManagementSessionMode(mode: AdminSessionMode): boolean {

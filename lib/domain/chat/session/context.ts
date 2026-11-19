@@ -15,12 +15,16 @@ const MAX_CONTEXT_TOKENS = Number(
   process.env.CHAT_MAX_CONTEXT_TOKENS ?? Math.floor(MAX_CONTEXT_CHARS / CHARS_PER_TOKEN)
 );
 
-const DEFAULT_MAX_TURNS = Number(process.env.CHAT_MAX_HISTORY_TURNS ?? 10);
-export const MAX_HISTORY_TURNS = DEFAULT_MAX_TURNS;
+/** Default turn cap, and the sliding window the RAG prompt replays. */
+export const MAX_HISTORY_TURNS = Number(process.env.CHAT_MAX_HISTORY_TURNS ?? 10);
 
 function estimateTokens(text: string): number {
   if (!text) return 0;
   return Math.ceil(text.length / CHARS_PER_TOKEN);
+}
+
+function sumContentChars(items: readonly { content: string }[]): number {
+  return items.reduce((sum, item) => sum + item.content.length, 0);
 }
 
 function truncateText(text: string, maxChars: number): string {
@@ -41,7 +45,7 @@ export function buildBoundedConversationContext(
   rawEntries: ChatHistoryEntry[],
   options?: { maxTurns?: number; maxChars?: number }
 ): ChatMessage[] {
-  const maxTurns = options?.maxTurns ?? DEFAULT_MAX_TURNS;
+  const maxTurns = options?.maxTurns ?? MAX_HISTORY_TURNS;
   const maxChars = options?.maxChars ?? MAX_CONTEXT_CHARS;
 
   const conversational = rawEntries.filter(
@@ -52,21 +56,18 @@ export function buildBoundedConversationContext(
   const turnCap = Math.max(0, maxTurns) * 2;
   let selected = conversational.slice(-turnCap);
 
-  const toMessages = (entries: typeof selected): ChatMessage[] =>
-    entries.map((e) => ({
-      role: e.role,
-      content: e.content,
-      createdAt: e.timestamp,
-    }));
-
-  let messages = toMessages(selected);
-  let totalChars = messages.reduce((sum, m) => sum + m.content.length, 0);
-
-  while (totalChars > maxChars && selected.length > 2) {
+  // Drop whole turns (a user/assistant pair) from the oldest end until the
+  // budget fits, keeping at least the most recent exchange.
+  while (sumContentChars(selected) > maxChars && selected.length > 2) {
     selected = selected.slice(2);
-    messages = toMessages(selected);
-    totalChars = messages.reduce((sum, m) => sum + m.content.length, 0);
   }
+
+  let messages: ChatMessage[] = selected.map((e) => ({
+    role: e.role,
+    content: e.content,
+    createdAt: e.timestamp,
+  }));
+  const totalChars = sumContentChars(selected);
 
   if (totalChars > maxChars && messages.length > 0) {
     const last = messages[messages.length - 1];

@@ -278,37 +278,64 @@ const L0_UNKNOWN_BUTTON_MESSAGE = "בחירה לא מזוהה. שלח שוב ב�
 export type L0MenuChoice = "daily" | "specific" | "cancel";
 
 /**
+ * One selectable menu entry: the button that produces it and the typed forms
+ * that stand in for a tap.
+ */
+interface MenuOption<TChoice> {
+  choice: TChoice;
+  buttonId: string;
+  /** Matched against the trimmed message text. */
+  patterns: RegExp[];
+}
+
+/** Returns the option whose button id or typed form matches, or null. */
+function matchMenuOption<TChoice>(
+  options: ReadonlyArray<MenuOption<TChoice>>,
+  text: string
+): MenuOption<TChoice> | null {
+  return (
+    options.find(
+      (option) =>
+        text === option.buttonId || option.patterns.some((pattern) => pattern.test(text))
+    ) ?? null
+  );
+}
+
+const L0_MENU_OPTIONS: ReadonlyArray<MenuOption<L0MenuChoice>> = [
+  {
+    choice: "daily",
+    buttonId: L0_BUTTON_DAILY,
+    patterns: [
+      /^\s*1[\.)]?\s*$/,
+      /^\s*1[\.)]?\s*(?:סיכום\s*יומי|daily\s*summary)\s*$/i,
+      /^\s*(?:סיכום\s*יומי|daily\s*summary)\s*$/i,
+    ],
+  },
+  {
+    choice: "specific",
+    buttonId: L0_BUTTON_SPECIFIC,
+    patterns: [
+      /^\s*2[\.)]?\s*$/,
+      /^\s*2[\.)]?\s*(?:משתמש\s*ספציפי|specific\s*user)\s*$/i,
+      /^\s*(?:משתמש\s*ספציפי|specific\s*user)\s*$/i,
+    ],
+  },
+];
+
+/**
  * Maps a button tap OR a typed reply ("1", "2", button title) to a menu action.
  * WhatsApp clients that cannot render reply-buttons show a numbered list; users
  * then type the number instead of tapping. That text must not fall through to RAG.
  */
 export function parseL0MenuChoice(query: string, buttonId?: string): L0MenuChoice | null {
-  if (buttonId === L0_BUTTON_DAILY) return "daily";
-  if (buttonId === L0_BUTTON_SPECIFIC) return "specific";
+  const tapped = L0_MENU_OPTIONS.find((option) => option.buttonId === buttonId);
+  if (tapped) return tapped.choice;
 
   const text = query.trim();
   if (!text) return null;
   if (matchesAdminAnalyticsExitCommand(text)) return "cancel";
 
-  if (
-    /^\s*1[\.)]?\s*$/.test(text) ||
-    /^\s*1[\.)]?\s*(?:סיכום\s*יומי|daily\s*summary)\s*$/i.test(text) ||
-    /^\s*(?:סיכום\s*יומי|daily\s*summary)\s*$/i.test(text) ||
-    text === L0_BUTTON_DAILY
-  ) {
-    return "daily";
-  }
-
-  if (
-    /^\s*2[\.)]?\s*$/.test(text) ||
-    /^\s*2[\.)]?\s*(?:משתמש\s*ספציפי|specific\s*user)\s*$/i.test(text) ||
-    /^\s*(?:משתמש\s*ספציפי|specific\s*user)\s*$/i.test(text) ||
-    text === L0_BUTTON_SPECIFIC
-  ) {
-    return "specific";
-  }
-
-  return null;
+  return matchMenuOption(L0_MENU_OPTIONS, text)?.choice ?? null;
 }
 
 async function summarizeStaffDay(
@@ -622,41 +649,52 @@ function tokenize(raw: string): string[] {
     .filter((token) => token.length > 0);
 }
 
+/**
+ * First token that normalises to a phone number.
+ *
+ * `normalizePhoneNumber` strips every non-digit, so this is the one test that
+ * cannot be fooled by a Hebrew name or an L-prefixed level, and it is immune to
+ * the bidi marks WhatsApp injects around number runs. Shared by both the add-
+ * and delete-user parsers, which identify the phone field the same way.
+ */
+function findPhoneToken(tokens: string[]): { index: number; phone: string } | null {
+  for (let i = 0; i < tokens.length; i++) {
+    const phone = normalizePhoneNumber(tokens[i]);
+    if (phone) return { index: i, phone };
+  }
+  return null;
+}
+
+const USER_MANAGEMENT_MENU_OPTIONS: ReadonlyArray<MenuOption<UserManagementMenuChoice>> = [
+  {
+    choice: "add",
+    buttonId: ADMIN_ACTION_ADD_USER,
+    patterns: [/^\s*1[\.)]?\s*$/, /^\s*(?:הוסף\s*משתמש|add\s*user)\s*$/i],
+  },
+  {
+    choice: "delete",
+    buttonId: ADMIN_ACTION_DELETE_USER,
+    patterns: [/^\s*2[\.)]?\s*$/, /^\s*(?:מחק\s*משתמש|delete\s*user)\s*$/i],
+  },
+  {
+    choice: "list",
+    buttonId: ADMIN_ACTION_LIST_USERS,
+    patterns: [/^\s*3[\.)]?\s*$/, /^\s*(?:טבלת\s*משתמשים|list\s*users)\s*$/i],
+  },
+];
+
 export function parseUserManagementMenuChoice(
   query: string,
   buttonId?: string
 ): UserManagementMenuChoice | null {
-  if (buttonId === ADMIN_ACTION_ADD_USER) return "add";
-  if (buttonId === ADMIN_ACTION_DELETE_USER) return "delete";
-  if (buttonId === ADMIN_ACTION_LIST_USERS) return "list";
+  const tapped = USER_MANAGEMENT_MENU_OPTIONS.find((option) => option.buttonId === buttonId);
+  if (tapped) return tapped.choice;
 
   const text = stripBidiControls(query).trim();
   if (!text) return null;
   if (matchesAdminAnalyticsExitCommand(text)) return "cancel";
 
-  if (
-    /^\s*1[\.)]?\s*$/.test(text) ||
-    /^\s*(?:הוסף\s*משתמש|add\s*user)\s*$/i.test(text) ||
-    text === ADMIN_ACTION_ADD_USER
-  ) {
-    return "add";
-  }
-  if (
-    /^\s*2[\.)]?\s*$/.test(text) ||
-    /^\s*(?:מחק\s*משתמש|delete\s*user)\s*$/i.test(text) ||
-    text === ADMIN_ACTION_DELETE_USER
-  ) {
-    return "delete";
-  }
-  if (
-    /^\s*3[\.)]?\s*$/.test(text) ||
-    /^\s*(?:טבלת\s*משתמשים|list\s*users)\s*$/i.test(text) ||
-    text === ADMIN_ACTION_LIST_USERS
-  ) {
-    return "list";
-  }
-
-  return null;
+  return matchMenuOption(USER_MANAGEMENT_MENU_OPTIONS, text)?.choice ?? null;
 }
 
 /** `0`, `3`, `L1`, `l0` — the level as admins actually type it. */
@@ -701,24 +739,13 @@ export function parseAddUserInput(raw: string): ParseAddUserResult {
     return trace({ success: false, reason: "NOT_ENOUGH_ARGS" }, {});
   }
 
-  // Phone first. `normalizePhoneNumber` strips every non-digit, so this is the
-  // one test that cannot be fooled by a Hebrew name or an L-prefixed level, and
-  // it is immune to the bidi marks WhatsApp injects around number runs.
-  let phoneIndex = -1;
-  let phone: string | null = null;
-  for (let i = 0; i < tokens.length; i++) {
-    const candidate = normalizePhoneNumber(tokens[i]);
-    if (candidate) {
-      phoneIndex = i;
-      phone = candidate;
-      break;
-    }
-  }
-
-  if (phoneIndex === -1 || !phone) {
+  // Phone first — see findPhoneToken for why it is the most reliable field.
+  const found = findPhoneToken(tokens);
+  if (!found) {
     return trace({ success: false, reason: "MISSING_PHONE" }, {});
   }
 
+  const { index: phoneIndex, phone } = found;
   const phoneMeta = { phoneCandidate: tokens[phoneIndex], normalizedPhone: phone };
 
   // Scanned from the end: the canonical format puts the level last, so a bare
@@ -758,25 +785,16 @@ export function parseDeleteUserInput(raw: string): ParsedDeleteUserInput | null 
   const tokens = tokenize(raw);
   if (tokens.length < 2) return null;
 
-  let phoneIndex = -1;
-  let normalizedPhone: string | null = null;
+  const found = findPhoneToken(tokens);
+  if (!found) return null;
 
-  for (let i = 0; i < tokens.length; i++) {
-    const phone = normalizePhoneNumber(tokens[i]);
-    if (phone) {
-      phoneIndex = i;
-      normalizedPhone = phone;
-      break;
-    }
-  }
-
-  if (phoneIndex === -1 || !normalizedPhone) return null;
-
-  const nameTokens = tokens.filter((_, idx) => idx !== phoneIndex);
-  const name = nameTokens.join(" ").trim();
+  const name = tokens
+    .filter((_, index) => index !== found.index)
+    .join(" ")
+    .trim();
   if (!name) return null;
 
-  return { name, phone: normalizedPhone };
+  return { name, phone: found.phone };
 }
 
 async function failInvalid(
@@ -790,25 +808,41 @@ async function failInvalid(
   return { type: "text", answer: retryMessage };
 }
 
+/**
+ * Ends the add/delete prompt and answers in one step. Every terminal outcome of
+ * those flows — success, denial, and "no such user" alike — closes the session,
+ * so clearing it is not conditional on the answer.
+ */
+async function clearSessionAndReply(
+  adminPhone: string,
+  answer: string
+): Promise<UserManagementFlowResult> {
+  await clearAdminSession(adminPhone);
+  return { type: "text", answer };
+}
+
 async function sendUserManagementMenu(
   to: string,
   userLevel: PermissionLevel,
   signal?: AbortSignal | null
 ): Promise<void> {
+  // Buttons and the numbered body text are built together so a client that
+  // cannot render reply-buttons is offered exactly the same options.
   const buttons = [
     { id: ADMIN_ACTION_ADD_USER, title: "הוסף משתמש" },
     { id: ADMIN_ACTION_DELETE_USER, title: "מחק משתמש" },
   ];
+  const bodyLines = ["בחר את הפעולה שברצונך לבצע:", "1. הוסף משתמש", "2. מחק משתמש"];
+
   if (isAdminRole(userLevel)) {
     buttons.push({ id: ADMIN_ACTION_LIST_USERS, title: "טבלת משתמשים" });
+    bodyLines.push("3. טבלת משתמשים");
   }
 
   await setAdminSession(to, "AWAITING_USER_MANAGEMENT_CHOICE");
   await sendWhatsAppInteractiveButtons({
     to,
-    bodyText: isAdminRole(userLevel)
-      ? "בחר את הפעולה שברצונך לבצע:\n1. הוסף משתמש\n2. מחק משתמש\n3. טבלת משתמשים"
-      : "בחר את הפעולה שברצונך לבצע:\n1. הוסף משתמש\n2. מחק משתמש",
+    bodyText: bodyLines.join("\n"),
     buttons,
     signal,
   });
@@ -859,18 +893,15 @@ async function handleAddUserInput(
   const { name, phone, level } = parsed.data;
 
   if (!canManagePermissionLevel(requesterLevel, level)) {
-    await clearAdminSession(adminPhone);
-    return { type: "text", answer: HIERARCHY_DENIED_MESSAGE };
+    return clearSessionAndReply(adminPhone, HIERARCHY_DENIED_MESSAGE);
   }
 
   const inserted = await insertAdminManagedUser(phone, name, level);
   if (!inserted) {
-    await clearAdminSession(adminPhone);
-    return { type: "text", answer: USER_EXISTS_MESSAGE };
+    return clearSessionAndReply(adminPhone, USER_EXISTS_MESSAGE);
   }
 
-  await clearAdminSession(adminPhone);
-  return { type: "text", answer: USER_ADDED_MESSAGE };
+  return clearSessionAndReply(adminPhone, USER_ADDED_MESSAGE);
 }
 
 async function handleDeleteUserInput(
@@ -897,24 +928,20 @@ async function handleDeleteUserInput(
 
   const requesterPhone = normalizePhoneNumber(adminPhone) ?? adminPhone;
   if (parsed.phone === requesterPhone) {
-    await clearAdminSession(adminPhone);
-    return { type: "text", answer: SELF_DELETE_DENIED_MESSAGE };
+    return clearSessionAndReply(adminPhone, SELF_DELETE_DENIED_MESSAGE);
   }
 
   const target = await getUserByPhone(parsed.phone);
   if (target && !canManagePermissionLevel(requesterLevel, target.permission_level)) {
-    await clearAdminSession(adminPhone);
-    return { type: "text", answer: HIERARCHY_DENIED_MESSAGE };
+    return clearSessionAndReply(adminPhone, HIERARCHY_DENIED_MESSAGE);
   }
 
   const deleted = await deleteAdminManagedUser(parsed.phone);
   if (!deleted) {
-    await clearAdminSession(adminPhone);
-    return { type: "text", answer: USER_NOT_FOUND_MESSAGE };
+    return clearSessionAndReply(adminPhone, USER_NOT_FOUND_MESSAGE);
   }
 
-  await clearAdminSession(adminPhone);
-  return { type: "text", answer: USER_DELETED_MESSAGE };
+  return clearSessionAndReply(adminPhone, USER_DELETED_MESSAGE);
 }
 
 async function applyUserManagementChoice(
@@ -922,27 +949,29 @@ async function applyUserManagementChoice(
   choice: UserManagementMenuChoice,
   requesterLevel: PermissionLevel
 ): Promise<UserManagementFlowResult> {
-  if (choice === "cancel") {
-    await clearAdminSession(adminPhone);
-    return { type: "text", answer: USER_MANAGEMENT_CANCELLED_MESSAGE };
-  }
+  switch (choice) {
+    case "cancel":
+      return clearSessionAndReply(adminPhone, USER_MANAGEMENT_CANCELLED_MESSAGE);
 
-  if (choice === "add") {
-    await setAdminSession(adminPhone, "AWAITING_ADD_USER_DETAILS");
-    return { type: "prompt_sent", promptText: ADD_USER_PROMPT };
-  }
+    case "add":
+      await setAdminSession(adminPhone, "AWAITING_ADD_USER_DETAILS");
+      return { type: "prompt_sent", promptText: ADD_USER_PROMPT };
 
-  if (choice === "delete") {
-    await setAdminSession(adminPhone, "AWAITING_DELETE_USER_DETAILS");
-    return { type: "prompt_sent", promptText: DELETE_USER_PROMPT };
-  }
+    case "delete":
+      await setAdminSession(adminPhone, "AWAITING_DELETE_USER_DETAILS");
+      return { type: "prompt_sent", promptText: DELETE_USER_PROMPT };
 
-  if (!isAdminRole(requesterLevel)) {
-    return { type: "text", answer: LIST_USERS_DENIED_MESSAGE };
+    case "list": {
+      // The full directory spans every tier, so only L0 may see it — the menu
+      // omits the button below L0, and this re-checks for a typed "3".
+      if (!isAdminRole(requesterLevel)) {
+        return { type: "text", answer: LIST_USERS_DENIED_MESSAGE };
+      }
+      await clearAdminSession(adminPhone);
+      const users = await getAllManagedUsers();
+      return { type: "text", answer: formatUserTable(users) };
+    }
   }
-  await clearAdminSession(adminPhone);
-  const users = await getAllManagedUsers();
-  return { type: "text", answer: formatUserTable(users) };
 }
 
 export async function resolveUserManagementFlow(input: {

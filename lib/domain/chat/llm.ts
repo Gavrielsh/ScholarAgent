@@ -18,6 +18,7 @@ import {
   type HttpTextResponse,
 } from "@/lib/core/http/fetchWithTimeout";
 import { logWarn } from "@/lib/core/logger";
+import { parsePositiveInt } from "@/lib/core/env";
 
 // -------------------------------------------------------------------------
 // Retry
@@ -314,6 +315,24 @@ const DEFAULT_FAST_MODEL = "claude-haiku-4-5";
 const ANTHROPIC_VERSION = "2023-06-01";
 const ENDPOINT = "https://api.anthropic.com/v1/messages";
 
+/**
+ * Generic aliases used by evaluation runners or configs, plus the superseded
+ * ids. The old ids stay mapped so an older config or a recorded run keeps
+ * resolving instead of failing against the API.
+ *
+ * A Map rather than an object literal: the lookup key is whatever the caller
+ * passed, and an object would resolve "constructor" or "toString" to an
+ * inherited member instead of missing.
+ */
+const MODEL_ALIASES = new Map<string, string>([
+  ["claude", DEFAULT_MODEL],
+  ["claude-3-5-sonnet", DEFAULT_MODEL],
+  ["claude-sonnet-4-6", DEFAULT_MODEL],
+  ["claude-fast", DEFAULT_FAST_MODEL],
+  ["claude-3-haiku", DEFAULT_FAST_MODEL],
+  ["claude-haiku-4-5-20251001", DEFAULT_FAST_MODEL],
+]);
+
 interface AnthropicRequestMessage {
   role: "user" | "assistant";
   content: string;
@@ -355,12 +374,10 @@ function buildAnthropicPayload(
       content: m.content,
     }));
 
-  const maxTokens = parseInt(process.env.CLAUDE_MAX_TOKENS ?? "4096", 10);
-
   const payload: Record<string, unknown> = {
     model,
     messages: conversationMessages,
-    max_tokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : 4096,
+    max_tokens: parsePositiveInt(process.env.CLAUDE_MAX_TOKENS, 4096),
     temperature: input.temperature ?? 0.2,
   };
 
@@ -407,26 +424,9 @@ export class ClaudeAdapter implements LlmAdapter {
     }
 
     // Resolve the incoming model parameter to an official Anthropic model string.
-    let modelRequested =
+    const requested =
       input.model?.trim() ?? process.env.CLAUDE_MODEL?.trim() ?? DEFAULT_MODEL;
-
-    // Normalize generic aliases used by evaluation runners or configs.
-    // The superseded ids stay mapped so an older config or a recorded run
-    // keeps resolving instead of failing against the API.
-    const lower = modelRequested.toLowerCase();
-    if (
-      lower === "claude" ||
-      lower === "claude-3-5-sonnet" ||
-      lower === "claude-sonnet-4-6"
-    ) {
-      modelRequested = DEFAULT_MODEL;
-    } else if (
-      lower === "claude-fast" ||
-      lower === "claude-3-haiku" ||
-      lower === "claude-haiku-4-5-20251001"
-    ) {
-      modelRequested = DEFAULT_FAST_MODEL;
-    }
+    const modelRequested = MODEL_ALIASES.get(requested.toLowerCase()) ?? requested;
 
     const payload = buildAnthropicPayload(input, modelRequested);
 
@@ -456,11 +456,7 @@ export class ClaudeAdapter implements LlmAdapter {
     }
 
     const json = parseJsonBody<AnthropicResponse>(response.body, label);
-
-    const text =
-      json.content?.find((c) => c.type === "text")?.text?.trim() ?? "";
-
-    return text;
+    return json.content?.find((c) => c.type === "text")?.text?.trim() ?? "";
   }
 }
 

@@ -110,8 +110,9 @@ export function chunkText(rawText: string, options: ChunkOptions = {}): Chunk[] 
   const chunkSize = Math.max(200, options.chunkSize ?? DEFAULT_CHUNK_SIZE);
   const overlap = Math.max(0, Math.min(options.overlap ?? DEFAULT_OVERLAP, chunkSize - 1));
 
+  // Non-empty by construction: `text` is trimmed and non-empty above, and
+  // splitIntoSemanticUnits falls back to the whole text when it finds no units.
   const units = splitIntoSemanticUnits(text);
-  const effectiveUnits = units.length > 0 ? units : [text];
 
   const chunks: Chunk[] = [];
   let index = 0;
@@ -131,7 +132,7 @@ export function chunkText(rawText: string, options: ChunkOptions = {}): Chunk[] 
     virtualCursor += Math.max(1, slice.length - overlap);
   };
 
-  for (const unit of effectiveUnits) {
+  for (const unit of units) {
     const candidate = current ? `${current}\n\n${unit}` : unit;
     if (candidate.length <= chunkSize) {
       current = candidate;
@@ -701,7 +702,7 @@ async function handleDocumentIngestion(
 
 /**
  * Failure policy, deliberately identical in shape to the chat pipeline's
- * (see `handleProcessingFailure` in incomingMessageProcessor.ts):
+ * (see `handleProcessingFailure` in lib/domain/whatsapp/webhook.ts):
  *
  *   - user error       → one specific explanation, then resolve. No retry.
  *   - unique violation → an earlier attempt already committed; confirm success.

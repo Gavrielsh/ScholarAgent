@@ -20,7 +20,11 @@ const MIN_UPLOAD_LEVEL: PermissionLevel = 1;
 
 const VALID_CLASSIFICATION_LEVELS: ReadonlySet<number> = new Set([0, 1, 2, 3]);
 
-function jsonError(status: number, message: string, extra?: Record<string, unknown>) {
+function jsonError(
+  status: number,
+  message: string,
+  extra?: Record<string, unknown>
+): NextResponse {
   return NextResponse.json({ ok: false, error: message, ...extra }, { status });
 }
 

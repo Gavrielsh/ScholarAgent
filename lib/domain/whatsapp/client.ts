@@ -166,9 +166,11 @@ function backoffDelayMs(attempt: number, retryAfterHeader: string | null): numbe
 }
 
 function ensureRtl(text: string): string {
-  const nonWhitespaceStart = text.trimStart();
-  if (!nonWhitespaceStart) return text;
-  if (nonWhitespaceStart.startsWith(RTL_MARK)) return text;
+  // Leading whitespace is skipped so an indented body is still recognised as
+  // already marked.
+  const withoutLeadingSpace = text.trimStart();
+  if (!withoutLeadingSpace) return text;
+  if (withoutLeadingSpace.startsWith(RTL_MARK)) return text;
   return `${RTL_MARK}${text}`;
 }
 
@@ -574,7 +576,8 @@ export interface DownloadedMedia {
   sha256: string | null;
 }
 
-function classifyStatus(status: number): boolean {
+/** Throttling and server faults are worth another attempt; a 4xx never is. */
+function isRetryableMediaStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
@@ -632,7 +635,7 @@ async function resolveWhatsAppMediaUrl(
   if (!response.ok) {
     throw new WhatsAppMediaError(
       `Media metadata lookup failed: HTTP ${response.status} ${response.body.slice(0, 300)}`,
-      { status: response.status, retryable: classifyStatus(response.status) }
+      { status: response.status, retryable: isRetryableMediaStatus(response.status) }
     );
   }
 
@@ -689,7 +692,7 @@ export async function downloadWhatsAppMedia(
   if (!response.ok) {
     throw new WhatsAppMediaError(`Media download failed: HTTP ${response.status}`, {
       status: response.status,
-      retryable: classifyStatus(response.status),
+      retryable: isRetryableMediaStatus(response.status),
     });
   }
 
