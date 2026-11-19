@@ -9,7 +9,78 @@
 // adapter.ts already imported all four providers statically, so the module graph
 // is unchanged by the consolidation.
 
-import { fetchTextWithTimeout, parseJsonBody } from "@/lib/core/http/fetchWithTimeout";
+import {
+  abortableSleep,
+  fetchTextWithTimeout,
+  isHttpTimeoutError,
+  parseJsonBody,
+  type FetchWithTimeoutOptions,
+  type HttpTextResponse,
+} from "@/lib/core/http/fetchWithTimeout";
+import { logWarn } from "@/lib/core/logger";
+
+// -------------------------------------------------------------------------
+// Retry
+// -------------------------------------------------------------------------
+
+/**
+ * Short, capped backoff for a provider call — same retry rule
+ * lib/domain/ingestion/embeddings.ts already applies to Gemini embedding
+ * calls (retry 429, 5xx, or our own timeout; never a 4xx, which is
+ * deterministic), scaled down to 2 retries / ≤2s of backoff so a transient
+ * throttle cannot blow the chat job's 90s deadline
+ * (lib/domain/whatsapp/worker.ts). Before this, none of the three adapters
+ * retried at all: a single 429 failed the whole BullMQ attempt and cost its
+ * exponential backoff — up to tens of seconds — for a blip a quick retry
+ * would likely have absorbed in under a second.
+ */
+const LLM_RETRY_DELAYS_MS = [500, 1500] as const;
+
+function isRetryableLlmStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+/**
+ * `fetchTextWithTimeout`, retried on the same transient failures. Returns the
+ * response as-is — including a final non-2xx — once attempts are exhausted or
+ * the failure is not retryable, so every caller keeps its own `!response.ok`
+ * handling and error message exactly as before this retry was added.
+ */
+async function fetchLlmWithRetry(
+  url: string,
+  options: FetchWithTimeoutOptions,
+  label: string
+): Promise<HttpTextResponse> {
+  for (let attempt = 0; ; attempt++) {
+    const moreAttempts = attempt < LLM_RETRY_DELAYS_MS.length;
+    try {
+      const response = await fetchTextWithTimeout(url, { ...options, label });
+      if (
+        !response.ok &&
+        moreAttempts &&
+        isRetryableLlmStatus(response.status) &&
+        !options.signal?.aborted
+      ) {
+        logWarn("llm_call_retry", `HTTP ${response.status}`, {
+          label,
+          attempt: attempt + 1,
+          delayMs: LLM_RETRY_DELAYS_MS[attempt],
+        });
+        await abortableSleep(LLM_RETRY_DELAYS_MS[attempt], options.signal);
+        continue;
+      }
+      return response;
+    } catch (err) {
+      if (!moreAttempts || !isHttpTimeoutError(err) || options.signal?.aborted) throw err;
+      logWarn("llm_call_retry", err instanceof Error ? err.message : String(err), {
+        label,
+        attempt: attempt + 1,
+        delayMs: LLM_RETRY_DELAYS_MS[attempt],
+      });
+      await abortableSleep(LLM_RETRY_DELAYS_MS[attempt], options.signal);
+    }
+  }
+}
 
 // -------------------------------------------------------------------------
 // Shared types
@@ -84,21 +155,24 @@ export class OpenAiAdapter implements LlmAdapter {
     const model = input.model ?? "gpt-4o-mini";
     const label = `OpenAI(${model})`;
 
-    const response = await fetchTextWithTimeout("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
+    const response = await fetchLlmWithRetry(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          messages: input.messages,
+          temperature: input.temperature ?? 0.2,
+        }),
+        signal: input.signal,
+        timeoutMs: input.timeoutMs,
       },
-      body: JSON.stringify({
-        model,
-        messages: input.messages,
-        temperature: input.temperature ?? 0.2,
-      }),
-      signal: input.signal,
-      timeoutMs: input.timeoutMs,
-      label,
-    });
+      label
+    );
 
     if (!response.ok) {
       throw new Error(`OpenAI request failed: ${response.status} ${response.body}`);
@@ -201,14 +275,17 @@ export class GeminiAdapter implements LlmAdapter {
     // the default label would otherwise put a live credential into error strings.
     const label = `Gemini(${model})`;
 
-    const response = await fetchTextWithTimeout(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: input.signal,
-      timeoutMs: input.timeoutMs,
-      label,
-    });
+    const response = await fetchLlmWithRetry(
+      endpoint,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: input.signal,
+        timeoutMs: input.timeoutMs,
+      },
+      label
+    );
 
     if (!response.ok) {
       throw new Error(`Gemini request failed: ${response.status} ${response.body}`);
@@ -355,18 +432,21 @@ export class ClaudeAdapter implements LlmAdapter {
 
     const label = `Anthropic(${modelRequested})`;
 
-    const response = await fetchTextWithTimeout(ENDPOINT, {
-      method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": ANTHROPIC_VERSION,
-        "Content-Type": "application/json",
+    const response = await fetchLlmWithRetry(
+      ENDPOINT,
+      {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": ANTHROPIC_VERSION,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: input.signal,
+        timeoutMs: input.timeoutMs,
       },
-      body: JSON.stringify(payload),
-      signal: input.signal,
-      timeoutMs: input.timeoutMs,
-      label,
-    });
+      label
+    );
 
     if (!response.ok) {
       const detail = parseAnthropicError(response.body);
