@@ -354,6 +354,3 @@ export async function getUserByPhone(
     throw new UserRegistryDbError(err);
   }
 }
-
-export const adminAddUser = insertAdminManagedUser;
-export const adminDeleteUser = deleteAdminManagedUser;

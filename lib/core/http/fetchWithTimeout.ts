@@ -144,28 +144,6 @@ function classifyAbort(
   return err instanceof Error ? err : new Error(String(err));
 }
 
-/**
- * `fetch` with a hard deadline. Prefer {@link fetchTextWithTimeout} — this
- * variant's timer only covers the response *headers*, so the caller becomes
- * responsible for reading the body before the socket can stall again.
- */
-async function fetchWithTimeout(
-  url: string,
-  options: FetchWithTimeoutOptions = {}
-): Promise<Response> {
-  const { timeoutMs = DEFAULT_HTTP_TIMEOUT_MS, signal: external, label, ...init } = options;
-  const target = label ?? redactUrl(url);
-  const deadline = createDeadline(timeoutMs, external);
-
-  try {
-    return await fetch(url, { ...init, signal: deadline.signal });
-  } catch (err) {
-    throw classifyAbort(err, deadline, external, target, timeoutMs);
-  } finally {
-    deadline.dispose();
-  }
-}
-
 export interface HttpTextResponse {
   ok: boolean;
   status: number;

@@ -493,16 +493,6 @@ export interface RagasScores {
   executionCostUsd?: number;
 }
 
-/** Single labelled example in a golden dataset (offline eval). */
-export interface GoldenDatasetRecord {
-  id: string;
-  question: string;
-  /** Authoritative reference answer for recall-oriented checks. */
-  groundTruthAnswer: string;
-  /** Optional: substring hints expected to appear in retrieved contexts. */
-  expectedContextHints?: string[];
-}
-
 function parseJudgeJson(raw: string): Partial<RagasScores> | null {
   const trimmed = raw.trim();
   const jsonText = trimmed.match(/\{[\s\S]*\}/)?.[0] ?? trimmed;
