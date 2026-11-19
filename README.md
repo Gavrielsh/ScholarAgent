@@ -434,4 +434,4 @@ MIT. See `LICENSE`.
 [license-shield]: https://img.shields.io/github/license/gavrielsh/scholaragent.svg?style=for-the-badge
 [license-url]: https://github.com/gavrielsh/scholaragent/blob/main/LICENSE
 [linkedin-shield]: https://img.shields.io/badge/-LinkedIn-black.svg?style=for-the-badge&logo=linkedin&colorB=555
-[linkedin-url]: https://linkedin.com/in/gavriel-shalom
+[linkedin-url]: https://linkedin.com/in/gavriel-shalem
