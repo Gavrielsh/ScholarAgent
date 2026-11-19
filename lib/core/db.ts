@@ -512,6 +512,67 @@ const DENSE_SQL = `
 `;
 
 /**
+ * Builds the lexical leg's search expression from a natural-language question.
+ *
+ * ## Why this exists
+ *
+ * The leg used to pass the raw question to websearch_to_tsquery, which joins
+ * unquoted terms with AND. A 13-word Hebrew question therefore required a chunk
+ * to contain all 13 lexemes, which no chunk does, so the lexical leg returned
+ * zero rows for every real query. Two consequences, both measured:
+ *
+ *   - the sparse arm scored 0.000 on every metric, which looked like poor
+ *     Hebrew recall and was actually an empty result set;
+ *   - hybrid retrieval silently degraded to dense-only, because
+ *     executeRetrieval falls back to the vector rows when the lexical list is
+ *     empty. The two arms produced bit-identical numbers.
+ *
+ * Terms are now joined with OR, so a chunk matching any of them is a candidate
+ * and ts_rank_cd ranks by how densely the matches cluster. That is the normal
+ * shape of a lexical leg in hybrid retrieval: recall comes from the OR, and
+ * precision comes from the ranking and from fusion with the dense leg.
+ *
+ * Returns null when nothing usable survives tokenisation, so the caller skips
+ * the leg instead of issuing a query that cannot match.
+ */
+const MAX_LEXICAL_TERMS = 24;
+
+/** Words websearch_to_tsquery reads as operators rather than as search terms. */
+const TSQUERY_OPERATORS = new Set(["or", "and", "not"]);
+
+/**
+ * Tokeniser: extracts terms rather than splitting on punctuation.
+ *
+ * Splitting broke figures apart. "4,500" became "4" and "500", and "4" was then
+ * dropped as a single character, so the term that actually discriminates
+ * between the L1 monthly cap (4,500), the fast-track ceiling (2,500) and the
+ * per-trip limit (250) was destroyed — precisely the queries where a lexical
+ * arm should beat a dense one.
+ *
+ * A number keeps its internal separators, so "4,500", "03-5550199" and
+ * "2026-11-18" survive as single terms. Separators are only kept BETWEEN
+ * digits, so a leading dash can never reach websearch_to_tsquery, where it
+ * would negate the term.
+ */
+const TERM_PATTERN = /\p{N}+(?:[.,\-/]\p{N}+)*|\p{L}+/gu;
+
+export function buildLexicalSearchExpression(queryText: string): string | null {
+  const terms: string[] = [];
+  for (const match of queryText.matchAll(TERM_PATTERN)) {
+    const term = match[0];
+    // A single letter matches almost everything and adds no signal. A single
+    // digit is kept only when it is part of a longer figure, which the pattern
+    // already guarantees.
+    if (term.length < 2) continue;
+    if (TSQUERY_OPERATORS.has(term.toLowerCase())) continue;
+    terms.push(term);
+  }
+
+  const unique = [...new Set(terms)].slice(0, MAX_LEXICAL_TERMS);
+  return unique.length === 0 ? null : unique.join(" OR ");
+}
+
+/**
  * Lexical leg — PostgreSQL full-text search.
  *
  * `ts_rank_cd` is coverage-density ranking, NOT Okapi BM25; PostgreSQL FTS has
@@ -559,8 +620,15 @@ async function runLexicalLeg(
   queryText: string,
   limit: number
 ): Promise<LexicalLegResult> {
+  const expression = buildLexicalSearchExpression(queryText);
+  if (expression === null) {
+    // Nothing searchable in the query. Not a failure: an empty result is the
+    // correct answer, and the hybrid path will use the dense leg alone.
+    return { ok: true, rows: [] };
+  }
+
   try {
-    const res = await client.query<RetrievedRow>(LEXICAL_SQL, [queryText, limit]);
+    const res = await client.query<RetrievedRow>(LEXICAL_SQL, [expression, limit]);
     return { ok: true, rows: res.rows.map(mapRow) };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
