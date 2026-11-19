@@ -20,11 +20,23 @@ local_data/*
 # benchmark's numbers are not reproducible without the exact documents they were
 # measured against, so it belongs under version control.
 !local_data/eval_corpus/
-scripts/output/
+
+# Regenerated benchmark/evaluation artifacts (`npm run benchmark` / `evaluate`).
+# Written as `scripts/output/*` rather than `scripts/output/`: a trailing-slash
+# pattern excludes the directory itself, so a later negation cannot re-include
+# anything inside.
+scripts/output/*
+# ...except the files committed as evidence for the thesis's reported
+# benchmark and evaluation numbers.
+!scripts/output/.gitkeep
+!scripts/output/benchmark_summary.md
+!scripts/output/evaluation_results_2026-11-18_11-04-54.csv
 
 # Editor and assistant state — machine-local, not project configuration
 .cursor/
 .claude/
+skills-lock.json
+.agents/
 
 # OneDrive sync-conflict copies, which it names after the machine
 *-Gavriel*
