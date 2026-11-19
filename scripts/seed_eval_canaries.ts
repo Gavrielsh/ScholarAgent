@@ -33,7 +33,7 @@ import { createHash } from "node:crypto";
 import chalk from "chalk";
 import dotenv from "dotenv";
 
-import { withServiceClient, withRlsTransaction } from "@/lib/core/db";
+import { withServiceClient } from "@/lib/core/db";
 import { embedText } from "@/lib/domain/ingestion/embeddings";
 import {
   querySimilarDocumentsByStrategy,

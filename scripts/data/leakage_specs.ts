@@ -143,8 +143,3 @@ export const LEAKAGE_SPECS: Readonly<Record<string, LeakageSpec>> = Object.fromE
     } satisfies LeakageSpec,
   ])
 );
-
-/** Canaries reachable from a given tier are the ones at or above it in privilege. */
-export function canariesForLevel(level: number): CanarySeed[] {
-  return CANARY_SEEDS.filter((s) => s.classificationLevel < level);
-}
