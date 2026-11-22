@@ -63,6 +63,100 @@ jobs:
         if: ${{ !cancelled() }}
         run: npm test
 
+  # The claim this project rests on is that authorization is enforced inside
+  # PostgreSQL, not in application code. `npm test` cannot check that: it runs
+  # without a database by design, so every RLS policy is unexercised there.
+  #
+  # This job is the only place the claim is actually tested. It stands up a real
+  # Postgres, applies the migrations, ingests the L0/L1/L2 evaluation corpus and
+  # runs `eval:seed`, which plants canaries and asserts both controls:
+  #
+  #   - positive: with RLS bypassed, each canary IS retrievable (proves the
+  #     material is there at all, so a later 0% leakage figure means something);
+  #   - negative: from a tier below the canary's classification, it is NOT.
+  #
+  # The script exits non-zero if either fails, so a regression that re-opens the
+  # superuser/BYPASSRLS hole described in migrations/003 breaks the build
+  # instead of quietly invalidating the results.
+  security-eval-gate:
+    needs: test-and-lint
+    runs-on: ubuntu-latest
+
+    services:
+      # pgvector, not plain postgres: migration 001 does CREATE EXTENSION vector
+      # and knowledge_base.embedding is vector(768). pg16 matches the image in
+      # docker-compose.yml.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scholaragent
+        ports:
+          - 5432:5432
+        # Without the health gate the first migration races container startup.
+        options: >-
+          --health-cmd "pg_isready -U postgres -d scholaragent"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/scholaragent
+      # The service container terminates plain TCP. lib/core/db.ts otherwise
+      # requests TLS with rejectUnauthorized, and every connection fails.
+      PG_SSLMODE: disable
+      REDIS_URL: redis://localhost:6379
+      # Deterministic and offline. `mock` here swaps the chat adapter; the
+      # embedding provider below is separate, because LLM_PROVIDER never
+      # governed embeddings (see lib/domain/ingestion/embeddings.ts).
+      LLM_PROVIDER: mock
+      # Hermetic embeddings: no GEMINI_API_KEY in CI, and none needed. The
+      # canary probe embeds each canary's own text, so the query vector equals
+      # the stored one and the positive control holds under any deterministic
+      # embedder. Never set outside CI.
+      EMBEDDING_PROVIDER: mock
+      # DATABASE_SERVICE_URL is deliberately unset: withServiceClient then
+      # falls back to DATABASE_URL, which in CI connects as a superuser that
+      # bypasses RLS — exactly what the positive control requires.
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      # Applies 001 → 005 in filename order. 003 creates the NOBYPASSRLS role
+      # and self-checks that FORCE RLS is active; 004 and 005 do the same for
+      # their own tables. A failure here means the schema cannot be stamped
+      # "secured", and the job stops.
+      - name: Apply Migrations
+        run: npm run migrate
+
+      - name: Ingest Evaluation Corpus
+        run: npm run ingest -- --base local_data/eval_corpus
+
+      # The gate itself. Non-zero exit on a failed control fails the build.
+      - name: RLS Canary Leakage Gate
+        run: npm run eval:seed
+
   build-containers:
     # Runs only after test-and-lint job succeeds
     needs: test-and-lint

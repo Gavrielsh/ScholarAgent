@@ -30,7 +30,8 @@
     "pdf-parse": "^2.4.5",
     "pg": "^8.20.0",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/jest": "^29.5.14",

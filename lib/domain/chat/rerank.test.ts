@@ -160,3 +160,69 @@ describe("rerankCandidates — fallback paths must be visible", () => {
     expect(out.fellBack).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Strict schema validation of the judge's reply
+// ---------------------------------------------------------------------------
+
+/**
+ * parseScores is private, so these drive it through rerankCandidates with a
+ * stub judge, the same way the suite above does. The contract being pinned is
+ * that a malformed reply falls back to the stage-1 fused order rather than
+ * being coerced into bogus scores.
+ */
+describe("rerankCandidates — judge reply fails schema validation", () => {
+  const candidates = [cand("a", 0.9), cand("b", 0.5), cand("c", 0.1)];
+
+  it("falls back when the reply is not JSON at all", async () => {
+    const judge = stubJudge("I think candidate c is best, actually.");
+    const out = await rerankCandidates({ query: "q", candidates }, judge.factory);
+
+    expect(out.fellBack).toBe(true);
+    expect(out.scored.map((c) => c.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("falls back when `scores` is not an array", async () => {
+    const judge = stubJudge('{"scores":{"a":5}}');
+    const out = await rerankCandidates({ query: "q", candidates }, judge.factory);
+
+    expect(out.fellBack).toBe(true);
+  });
+
+  it("falls back when the envelope has no `scores` key", async () => {
+    const judge = stubJudge('{"results":[{"id":"a","score":5}]}');
+    const out = await rerankCandidates({ query: "q", candidates }, judge.factory);
+
+    expect(out.fellBack).toBe(true);
+  });
+
+  it("skips individual malformed entries but keeps the valid ones", async () => {
+    // One bad row must not discard the whole response — the judge still told
+    // us something usable about b and c.
+    const judge = stubJudge(
+      '{"scores":[{"id":"a","score":"high"},{"id":"b","score":5},{"id":"c","score":9}]}'
+    );
+    const out = await rerankCandidates({ query: "q", candidates }, judge.factory);
+
+    expect(out.fellBack).toBe(false);
+    // c (9) outranks b (5); a was unscored.
+    expect(out.scored.map((c) => c.id).slice(0, 2)).toEqual(["c", "b"]);
+  });
+
+  it("rejects a non-finite score rather than ranking on NaN", async () => {
+    // JSON has no Infinity literal, so a judge expresses it as 1e999, which
+    // JSON.parse turns into Infinity.
+    const judge = stubJudge('{"scores":[{"id":"a","score":1e999},{"id":"b","score":5}]}');
+    const out = await rerankCandidates({ query: "q", candidates }, judge.factory);
+
+    const a = out.scored.find((c) => c.id === "a")!;
+    expect(Number.isFinite(a.rerankScore) ? a.rerankScore : null).not.toBe(Infinity);
+  });
+
+  it("falls back when every entry is malformed", async () => {
+    const judge = stubJudge('{"scores":[{"id":1,"score":"x"},{"nope":true}]}');
+    const out = await rerankCandidates({ query: "q", candidates }, judge.factory);
+
+    expect(out.fellBack).toBe(true);
+  });
+});

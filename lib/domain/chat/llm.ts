@@ -464,6 +464,35 @@ export class ClaudeAdapter implements LlmAdapter {
 export const CLAUDE_FAST_MODEL =
   process.env.CLAUDE_FAST_MODEL?.trim() ?? DEFAULT_FAST_MODEL;
 
+/**
+ * Cheap/fast model tier, used by the L0/L1 chat-history summarisers and by the
+ * rolling-memory worker.
+ *
+ * Lives here rather than in agent.ts because agent.ts imports from
+ * lib/domain/chat/session/*, so a session module reaching back for this would
+ * close an `agent -> session -> agent` cycle — the same hazard that keeps
+ * ChatMessage in its own leaf module (see CLAUDE.md). llm.ts already owns every
+ * other model-name decision and imports nothing from agent or session.
+ *
+ * Re-exported from agent.ts so existing call sites keep working.
+ */
+export function resolveFastModel(): string {
+  const provider = (process.env.LLM_PROVIDER ?? "mock").toLowerCase();
+  const explicit = process.env.LLM_FAST_MODEL?.trim();
+  if (explicit) return explicit;
+
+  switch (provider) {
+    case "openai":
+      return "gpt-4o-mini";
+    case "gemini":
+      return process.env.GEMINI_FAST_MODEL ?? "gemini-3.5-flash";
+    case "claude":
+      return CLAUDE_FAST_MODEL;
+    default:
+      return "mock-fast";
+  }
+}
+
 // -------------------------------------------------------------------------
 // Factory
 // -------------------------------------------------------------------------

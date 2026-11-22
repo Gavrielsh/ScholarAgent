@@ -1,14 +1,16 @@
 /**
- * Sole consumer of the `whatsapp-incoming` and `document-ingestion` queues.
+ * Sole consumer of the `whatsapp-incoming`, `document-ingestion` and
+ * `memory-summarization` queues.
  *
  * Next.js is a producer only (see instrumentation.ts). Run this as its own
  * process/container: `npm run worker:whatsapp`.
  *
- * The two queues share this process but not their settings: chat jobs are short
- * and highly concurrent, ingestion jobs are long, memory-heavy, and rate limited
- * against the embedding quota. Keeping them in separate BullMQ queues is what
- * stops one uploaded PDF from occupying the concurrency slots that conversations
- * need.
+ * The three queues share this process but not their settings: chat jobs are
+ * short and highly concurrent, ingestion jobs are long, memory-heavy, and rate
+ * limited against the embedding quota, and summarisation jobs are cheap
+ * background work nobody waits on. Keeping them in separate BullMQ queues is
+ * what stops one uploaded PDF from occupying the concurrency slots that
+ * conversations need.
  */
 
 import type { Worker } from "bullmq";
@@ -24,6 +26,10 @@ import {
   createWhatsAppIncomingWorker,
   getWhatsAppIncomingQueue,
 } from "@/lib/domain/whatsapp/worker";
+import {
+  closeMemorySummarizationQueue,
+  createMemorySummarizationWorker,
+} from "@/lib/domain/chat/session/memoryWorker";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
 
 if (!process.env.WHATSAPP_ACCESS_TOKEN?.trim() || !process.env.WHATSAPP_PHONE_NUMBER_ID?.trim()) {
@@ -49,9 +55,12 @@ const FORCE_EXIT_TIMEOUT_MS = SHUTDOWN_TIMEOUT_MS + 5_000;
 
 const chatWorker: Worker = createWhatsAppIncomingWorker();
 const documentWorker: Worker = createDocumentIngestionWorker();
+// Rolling conversation memory. Cheap and low concurrency: one fast-model call
+// per job, with nobody waiting on the result.
+const memoryWorker: Worker = createMemorySummarizationWorker();
 
 logInfo("whatsapp_worker_started", "WhatsApp queue consumers are running.", {
-  queues: [chatWorker.name, documentWorker.name],
+  queues: [chatWorker.name, documentWorker.name, memoryWorker.name],
   pid: process.pid,
   shutdownTimeoutMs: SHUTDOWN_TIMEOUT_MS,
 });
@@ -146,16 +155,17 @@ async function shutdown(signal: string): Promise<void> {
   //
   // Drained in parallel: run sequentially, a long ingestion job could consume
   // the entire grace period and leave the chat worker to be SIGKILLed mid-turn.
-  const [chatDrained, documentsDrained] = await Promise.all([
+  const [chatDrained, documentsDrained, memoryDrained] = await Promise.all([
     closeQuietly("bullmq_worker_chat", () => chatWorker.close()),
     closeQuietly("bullmq_worker_documents", () => documentWorker.close()),
+    closeQuietly("bullmq_worker_memory", () => memoryWorker.close()),
   ]);
-  const drained = chatDrained && documentsDrained;
+  const drained = chatDrained && documentsDrained && memoryDrained;
   if (!drained) {
     logWarn(
       "whatsapp_worker_drain_incomplete",
       "Active jobs did not finish in time; they will be retried after their lock expires.",
-      { chatDrained, documentsDrained }
+      { chatDrained, documentsDrained, memoryDrained }
     );
   }
 
@@ -165,6 +175,7 @@ async function shutdown(signal: string): Promise<void> {
   const results = [
     await closeQuietly("bullmq_queue_chat", closeWhatsAppIncomingQueue),
     await closeQuietly("bullmq_queue_documents", closeDocumentIngestionQueue),
+    await closeQuietly("bullmq_queue_memory", closeMemorySummarizationQueue),
     await closeQuietly("redis", closeRedisClient),
     await closeQuietly("postgres", closePool),
   ];

@@ -51,6 +51,12 @@ export interface Chunk {
   text: string;
   charStart: number;
   charEnd: number;
+  /**
+   * Nearest section heading at or above this chunk, when the document has
+   * detectable structure. Feeds the contextual header — see
+   * `buildContextualHeader`.
+   */
+  section?: string | null;
 }
 
 export interface ChunkOptions {
@@ -62,6 +68,85 @@ export interface ChunkOptions {
 
 const DEFAULT_CHUNK_SIZE = 1500;
 const DEFAULT_OVERLAP = 200;
+
+/**
+ * Parent/child ("small-to-big") chunk budgets.
+ *
+ * Children are embedded and searched: small enough that one embedding describes
+ * one idea, which is what makes the dense leg precise. Parents are what the LLM
+ * actually reads, so they carry enough surrounding text to be coherent. See
+ * migrations/004_parent_child_chunks.sql.
+ */
+const PARENT_CHUNK_SIZE = 1400;
+const PARENT_OVERLAP = 0;
+const CHILD_CHUNK_SIZE = 400;
+const CHILD_OVERLAP = 60;
+
+// -------------------------------------------------------------------------
+// Section headings and the contextual header
+// -------------------------------------------------------------------------
+
+/** Hebrew structural words that introduce a numbered division. */
+const HE_SECTION_WORDS = "סעיף|פרק|נספח|תת-סעיף|חלק|פרק משנה";
+
+const MARKDOWN_HEADING = /^#{1,6}\s+(.+?)\s*#*$/u;
+const BOLD_ONLY_HEADING = /^(?:\*\*|__)(.+?)(?:\*\*|__)$/u;
+const NUMBERED_HEADING = /^\d+(?:\.\d+)*[.)]?\s+\S/u;
+const HE_WORD_HEADING = new RegExp(`^(?:${HE_SECTION_WORDS})\\s`, "u");
+const ENDS_SENTENCE = /[.!?:;,׀־]$/u;
+
+const MAX_HEADING_LENGTH = 120;
+
+/**
+ * Best-effort section-heading detector for a single line.
+ *
+ * Deliberately conservative: a false positive mislabels a chunk's section in
+ * the contextual header, which is noise in the embedding, so a line has to look
+ * structural rather than merely short. Returns the heading text, or null.
+ *
+ * Exported for the test that pins which shapes count.
+ */
+export function detectSectionHeading(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.length > MAX_HEADING_LENGTH) return null;
+
+  const md = trimmed.match(MARKDOWN_HEADING);
+  if (md?.[1]) return md[1].trim();
+
+  const bold = trimmed.match(BOLD_ONLY_HEADING);
+  if (bold?.[1] && !ENDS_SENTENCE.test(bold[1].trim())) return bold[1].trim();
+
+  // "3.2 תקרת החזר" / "4) Travel budget" — a numbered division label.
+  if (NUMBERED_HEADING.test(trimmed) && !ENDS_SENTENCE.test(trimmed)) return trimmed;
+
+  // "סעיף 5 — נהלי דיווח"
+  if (HE_WORD_HEADING.test(trimmed) && !ENDS_SENTENCE.test(trimmed)) return trimmed;
+
+  return null;
+}
+
+/**
+ * The contextual header prepended to every stored chunk body.
+ *
+ * It is part of `content`, not just of the embedding input, for two reasons:
+ * `content_tsv` is a GENERATED column over `content` (migration 001), so the
+ * lexical leg only sees the header if it is stored; and a retrieved chunk then
+ * carries its own provenance into the LLM context instead of arriving as an
+ * anonymous fragment.
+ *
+ * Hebrew is the user-facing language, so the header is Hebrew (see CLAUDE.md).
+ */
+export function buildContextualHeader(input: {
+  filename: string;
+  classificationLevel: PermissionLevel;
+  section?: string | null;
+}): string {
+  const section = input.section?.trim();
+  return (
+    `[מסמך: ${input.filename} | רמת סיווג: L${input.classificationLevel}` +
+    `${section ? ` | סעיף: ${section}` : ""}]\n`
+  );
+}
 
 // Hebrew end punctuation + Latin sentence ends.
 const SENTENCE_SPLIT = /(?<=[.!?\u05C0\u05BE])\s+/u;
@@ -84,19 +169,56 @@ function mergeAbbreviationFragments(parts: string[]): string[] {
   return out;
 }
 
-function splitIntoSemanticUnits(text: string): string[] {
+/** A sentence-like unit tagged with the section heading in force above it. */
+interface SemanticUnit {
+  text: string;
+  section: string | null;
+}
+
+function splitIntoSemanticUnits(text: string): SemanticUnit[] {
   const paragraphs = text
     .replace(/\r\n/g, "\n")
     .split(/\n{2,}/)
     .map((p) => p.trim())
     .filter(Boolean);
 
-  const units: string[] = [];
+  const units: SemanticUnit[] = [];
+  let currentSection: string | null = null;
+
+  // Body lines are rejoined with "\n" exactly as they arrived, so a document
+  // with no detectable headings splits identically to before this change.
+  const flushBody = (lines: string[]) => {
+    const body = lines.join("\n").trim();
+    if (!body) return;
+    const rawParts = body.split(SENTENCE_SPLIT).map((s) => s.trim()).filter(Boolean);
+    for (const part of mergeAbbreviationFragments(rawParts)) {
+      units.push({ text: part, section: currentSection });
+    }
+  };
+
   for (const para of paragraphs) {
-    const rawParts = para.split(SENTENCE_SPLIT).map((s) => s.trim()).filter(Boolean);
-    units.push(...mergeAbbreviationFragments(rawParts));
+    let buffer: string[] = [];
+    for (const line of para.split("\n")) {
+      const heading = detectSectionHeading(line);
+      if (heading === null) {
+        buffer.push(line);
+        continue;
+      }
+      // Everything buffered belongs to the PREVIOUS section, so flush before
+      // the heading takes effect.
+      flushBody(buffer);
+      buffer = [];
+      currentSection = heading;
+      // The heading line stays in the corpus as content — dropping it would
+      // lose text that is often the most searchable part of the document.
+      units.push({ text: line.trim(), section: currentSection });
+    }
+    flushBody(buffer);
   }
-  return units.length > 0 ? units : [text.trim()].filter(Boolean);
+
+  if (units.length > 0) return units;
+  const whole = text.trim();
+  return whole ? [{ text: whole, section: null }] : [];
 }
 
 /**
@@ -118,8 +240,11 @@ export function chunkText(rawText: string, options: ChunkOptions = {}): Chunk[] 
   let index = 0;
   let virtualCursor = 0;
   let current = "";
+  // The section of the first unit packed into `current` — a chunk is labelled
+  // by where it starts, not by a heading it happens to run into.
+  let currentSection: string | null = null;
 
-  const pushChunk = (body: string) => {
+  const pushChunk = (body: string, section: string | null) => {
     const slice = body.trim();
     if (!slice) return;
     chunks.push({
@@ -127,37 +252,106 @@ export function chunkText(rawText: string, options: ChunkOptions = {}): Chunk[] 
       text: slice,
       charStart: virtualCursor,
       charEnd: virtualCursor + slice.length,
+      section,
     });
     index += 1;
     virtualCursor += Math.max(1, slice.length - overlap);
   };
 
   for (const unit of units) {
-    const candidate = current ? `${current}\n\n${unit}` : unit;
+    const candidate = current ? `${current}\n\n${unit.text}` : unit.text;
     if (candidate.length <= chunkSize) {
+      if (!current) currentSection = unit.section;
       current = candidate;
       continue;
     }
 
     if (current.trim()) {
-      pushChunk(current);
-      current = unit;
+      pushChunk(current, currentSection);
+      current = unit.text;
+      currentSection = unit.section;
       continue;
     }
 
     // Single unit larger than budget — hard window with overlap on raw characters.
-    for (let o = 0; o < unit.length; o += Math.max(1, chunkSize - overlap)) {
-      const part = unit.slice(o, o + chunkSize);
-      pushChunk(part);
+    for (let o = 0; o < unit.text.length; o += Math.max(1, chunkSize - overlap)) {
+      const part = unit.text.slice(o, o + chunkSize);
+      pushChunk(part, unit.section);
     }
     current = "";
+    currentSection = null;
   }
 
   if (current.trim()) {
-    pushChunk(current);
+    pushChunk(current, currentSection);
   }
 
   return chunks;
+}
+
+// -------------------------------------------------------------------------
+// Parent / child chunking
+// -------------------------------------------------------------------------
+
+/** A child chunk plus the index of the parent whose text contains it. */
+export interface ChildChunk extends Chunk {
+  parentIndex: number;
+}
+
+export interface ParentChildChunks {
+  /** ~1,400 chars. Stored with is_parent = true and embedding = NULL. */
+  parents: Chunk[];
+  /** ~400 chars. Embedded and searched; each links to parents[parentIndex]. */
+  children: ChildChunk[];
+}
+
+/**
+ * Splits text into large parent chunks and the small child chunks that index
+ * them ("small-to-big" retrieval).
+ *
+ * Both levels come from the same `chunkText` so the Hebrew/Latin sentence logic
+ * and the heading detection are not duplicated, and a child inherits its
+ * parent's section when its own slice contains no heading.
+ *
+ * A parent with exactly one child is normal for short documents; the retrieval
+ * path handles it without a special case.
+ */
+export function chunkTextParentChild(
+  rawText: string,
+  options: ChunkOptions = {}
+): ParentChildChunks {
+  const parents = chunkText(rawText, {
+    chunkSize: options.chunkSize ?? PARENT_CHUNK_SIZE,
+    overlap: options.overlap ?? PARENT_OVERLAP,
+  });
+
+  const children: ChildChunk[] = [];
+  let childIndex = 0;
+
+  parents.forEach((parent, parentIndex) => {
+    // Re-chunking the parent's own text keeps every child a substring-by-content
+    // of exactly one parent, which is what makes parent resolution unambiguous.
+    const slices = chunkText(parent.text, {
+      chunkSize: CHILD_CHUNK_SIZE,
+      overlap: CHILD_OVERLAP,
+    });
+
+    // chunkText redacts and trims; a parent whose body survives as a single
+    // short slice still yields one child, never zero.
+    const effective = slices.length > 0 ? slices : [parent];
+
+    for (const slice of effective) {
+      children.push({
+        ...slice,
+        index: childIndex,
+        section: slice.section ?? parent.section ?? null,
+        parentIndex,
+      });
+      childIndex += 1;
+    }
+  });
+
+  return { parents, children };
 }
 
 // -------------------------------------------------------------------------
@@ -184,12 +378,15 @@ export interface ChunkMetadataInput {
   mimeType: string;
   uploadedByUserId: string;
   classificationLevel: PermissionLevel;
-  chunk: Pick<Chunk, "index" | "charStart" | "charEnd">;
+  chunk: Pick<Chunk, "index" | "charStart" | "charEnd"> & { section?: string | null };
   /** Channel-specific extras (media id, sender phone, original byte size…). */
   extra?: Record<string, unknown>;
+  /** True for the large parent row (is_parent = true, embedding NULL). */
+  isParent?: boolean;
 }
 
 export function buildChunkMetadata(input: ChunkMetadataInput): Record<string, unknown> {
+  const section = input.chunk.section?.trim();
   return {
     ...(input.extra ?? {}),
     document_id: input.documentId,
@@ -201,6 +398,11 @@ export function buildChunkMetadata(input: ChunkMetadataInput): Record<string, un
     chunk_index: input.chunk.index,
     char_start: input.chunk.charStart,
     char_end: input.chunk.charEnd,
+    // Both keys are added only when they apply, so the metadata of a document
+    // ingested without sections or parents keeps the exact shape it had before
+    // parent/child chunking existed.
+    ...(section ? { section } : {}),
+    ...(input.isParent ? { is_parent: true } : {}),
   };
 }
 
@@ -268,17 +470,34 @@ export async function ingestDocument(input: UploadDocumentInput): Promise<Upload
 
   const documentId = randomUUID();
   const sanitized = redactPii(input.text);
-  const chunks = chunkText(sanitized, input.chunkOptions).filter((chunk) => chunk.text.trim());
 
-  if (chunks.length === 0) {
+  // Small-to-big: children are embedded and searched, parents are what the LLM
+  // reads back. Both carry the contextual header, because `content_tsv` is
+  // generated from `content` and the lexical leg must see it too.
+  const { parents, children } = chunkTextParentChild(sanitized, input.chunkOptions);
+
+  const withHeader = (chunk: Chunk): string =>
+    buildContextualHeader({
+      filename: input.filename,
+      classificationLevel: input.classificationLevel,
+      section: chunk.section,
+    }) + chunk.text;
+
+  const parentTexts = parents.map(withHeader);
+  const childTexts = children.map(withHeader);
+
+  if (children.length === 0) {
     return { documentId, chunkCount: 0, insertedChunkIds: [], failures: [] };
   }
 
-  const vectors = await embedTextBatch(chunks.map((c) => c.text));
+  // Only the children are embedded; parents are stored with embedding = NULL.
+  // The header is part of the embedded string, which is the point of contextual
+  // enrichment — the vector encodes the document and section, not just the slice.
+  const vectors = await embedTextBatch(childTexts);
 
-  if (vectors.length !== chunks.length) {
+  if (vectors.length !== children.length) {
     throw new Error(
-      `Embedding count mismatch: got ${vectors.length}, expected ${chunks.length}.`
+      `Embedding count mismatch: got ${vectors.length}, expected ${children.length}.`
     );
   }
 
@@ -301,28 +520,59 @@ export async function ingestDocument(input: UploadDocumentInput): Promise<Upload
     classificationLevel: input.classificationLevel,
     writePermissionLevel: input.uploadedByPermissionLevel,
     documentMetadata: input.extraMetadata ?? {},
-    chunks: chunks.map((chunk, i) => ({
-      text: chunk.text,
-      chunkIndex: chunk.index,
-      metadata: buildChunkMetadata({
-        documentId,
-        filename: input.filename,
-        mimeType: input.mimeType,
-        uploadedByUserId: input.uploadedByUserId,
-        classificationLevel: input.classificationLevel,
-        chunk,
-        extra: {
-          source: input.source ?? "upload_api",
-          ...(input.extraMetadata ?? {}),
-        },
-      }),
-      embedding: vectors[i],
-    })),
+    // Parents first: the self-referencing FK requires a parent to be inserted
+    // before any child that points at it, and parentIndex is an index into this
+    // same array. insertDocumentWithChunks asserts the ordering.
+    chunks: [
+      ...parents.map((chunk, i) => ({
+        text: parentTexts[i]!,
+        chunkIndex: chunk.index,
+        metadata: buildChunkMetadata({
+          documentId,
+          filename: input.filename,
+          mimeType: input.mimeType,
+          uploadedByUserId: input.uploadedByUserId,
+          classificationLevel: input.classificationLevel,
+          chunk,
+          isParent: true,
+          extra: {
+            source: input.source ?? "upload_api",
+            ...(input.extraMetadata ?? {}),
+          },
+        }),
+        embedding: null,
+        isParent: true,
+      })),
+      ...children.map((chunk, i) => ({
+        text: childTexts[i]!,
+        chunkIndex: chunk.index,
+        metadata: buildChunkMetadata({
+          documentId,
+          filename: input.filename,
+          mimeType: input.mimeType,
+          uploadedByUserId: input.uploadedByUserId,
+          classificationLevel: input.classificationLevel,
+          chunk,
+          extra: {
+            source: input.source ?? "upload_api",
+            ...(input.extraMetadata ?? {}),
+          },
+        }),
+        embedding: vectors[i]!,
+        isParent: false,
+        // parents occupy [0, parents.length), so a parent's position in this
+        // array is exactly its index in `parents`.
+        parentIndex: chunk.parentIndex,
+      })),
+    ],
   });
 
   return {
     documentId: result.documentId,
-    chunkCount: chunks.length,
+    // The searchable chunk count, which is what every caller reports and what
+    // ingested_documents.chunk_count has always meant. Parents are storage for
+    // the generation step, not corpus entries in their own right.
+    chunkCount: children.length,
     insertedChunkIds: result.insertedChunkIds,
     failures: [],
   };
@@ -484,19 +734,19 @@ export function resolveClassificationLevel(
  * vector attaches the wrong embedding to the wrong text and silently poisons
  * retrieval for the life of the row.
  */
-async function embedChunksInBatches(chunks: Chunk[], signal: AbortSignal): Promise<number[][]> {
+async function embedChunksInBatches(texts: string[], signal: AbortSignal): Promise<number[][]> {
   const vectors: number[][] = [];
 
-  for (let start = 0; start < chunks.length; start += EMBED_BATCH_SIZE) {
+  for (let start = 0; start < texts.length; start += EMBED_BATCH_SIZE) {
     if (signal.aborted) {
       throw new Error("Document ingestion cancelled before embedding finished.");
     }
 
-    const slice = chunks.slice(start, start + EMBED_BATCH_SIZE);
-    const batch = await embedTextBatch(
-      slice.map((c) => c.text),
-      signal
-    );
+    // Takes finished strings, not Chunks: the contextual header is part of what
+    // gets embedded, and building it needs the filename and classification
+    // level that only the caller has.
+    const slice = texts.slice(start, start + EMBED_BATCH_SIZE);
+    const batch = await embedTextBatch(slice, signal);
 
     if (batch.length !== slice.length) {
       throw new Error(
@@ -506,7 +756,7 @@ async function embedChunksInBatches(chunks: Chunk[], signal: AbortSignal): Promi
 
     vectors.push(...batch);
 
-    const hasMore = start + EMBED_BATCH_SIZE < chunks.length;
+    const hasMore = start + EMBED_BATCH_SIZE < texts.length;
     if (hasMore && EMBED_BATCH_PAUSE_MS > 0) {
       await abortableSleep(EMBED_BATCH_PAUSE_MS, signal);
     }
@@ -561,7 +811,12 @@ async function authorizeSender(
 async function extractChunks(
   event: ParsedInboundDocumentEvent,
   ctx: DocumentIngestionContext
-): Promise<{ chunks: Chunk[]; sizeBytes: number; sha256: string | null }> {
+): Promise<{
+  parents: Chunk[];
+  children: ChildChunk[];
+  sizeBytes: number;
+  sha256: string | null;
+}> {
   let media;
   try {
     media = await downloadWhatsAppMedia(event.mediaId, { signal: ctx.signal });
@@ -598,24 +853,34 @@ async function extractChunks(
   // means the length/emptiness checks below run on already-masked text.
   const redacted = redactPii(rawText);
 
-  // REUSE: the Hebrew/Latin-aware semantic chunker.
-  const chunks = chunkText(redacted).filter((chunk) => chunk.text.trim().length > 0);
+  // REUSE: the Hebrew/Latin-aware semantic chunker, in small-to-big mode.
+  const { parents, children } = chunkTextParentChild(redacted);
 
-  if (chunks.length === 0) {
+  if (children.length === 0) {
     throw new DocumentIngestionUserError(
       NO_TEXT_MESSAGE,
       `Chunking produced nothing usable for ${event.filename}.`
     );
   }
 
-  if (chunks.length > MAX_CHUNKS_PER_DOCUMENT) {
+  // The ceiling counts SEARCHABLE chunks, so it keeps its original meaning
+  // after parent/child chunking. Children are ~400 chars against the previous
+  // ~1500, so a document near the old limit now yields roughly 3.5x as many —
+  // the cap is applied to children deliberately, as that is what drives
+  // embedding cost and index size.
+  if (children.length > MAX_CHUNKS_PER_DOCUMENT) {
     throw new DocumentIngestionUserError(
       TOO_LARGE_MESSAGE,
-      `${chunks.length} chunks exceeds the ${MAX_CHUNKS_PER_DOCUMENT}-chunk ceiling.`
+      `${children.length} chunks exceeds the ${MAX_CHUNKS_PER_DOCUMENT}-chunk ceiling.`
     );
   }
 
-  return { chunks, sizeBytes: media.sizeBytes, sha256: media.sha256 ?? event.sha256 };
+  return {
+    parents,
+    children,
+    sizeBytes: media.sizeBytes,
+    sha256: media.sha256 ?? event.sha256,
+  };
 }
 
 /** Happy path. Throws on any failure; `processDocumentIngestion` owns the policy. */
@@ -630,10 +895,23 @@ async function handleDocumentIngestion(
   const classificationLevel = resolveClassificationLevel(event.caption, user.permissionLevel);
 
   // ── STEP 2: download, parse, redact, chunk ────────────────────────────────
-  const { chunks, sizeBytes, sha256 } = await extractChunks(event, ctx);
+  const { parents, children, sizeBytes, sha256 } = await extractChunks(event, ctx);
+
+  // Contextual header, applied before embedding and stored as part of `content`
+  // so the generated `content_tsv` carries it into the lexical leg too.
+  const header = (chunk: Chunk): string =>
+    buildContextualHeader({
+      filename: event.filename,
+      classificationLevel,
+      section: chunk.section,
+    }) + chunk.text;
+
+  const parentTexts = parents.map(header);
+  const childTexts = children.map(header);
 
   // ── STEP 3: embed in rate-limit-friendly batches ──────────────────────────
-  const vectors = await embedChunksInBatches(chunks, ctx.signal);
+  // Children only — parent rows are stored with embedding = NULL.
+  const vectors = await embedChunksInBatches(childTexts, ctx.signal);
 
   // Generated up front: every chunk's metadata embeds it, and the document row
   // and its chunks must agree on the same id.
@@ -647,20 +925,42 @@ async function handleDocumentIngestion(
     original_size_bytes: sizeBytes,
   };
 
-  const records: DocumentChunkRecord[] = chunks.map((chunk, i) => ({
-    text: chunk.text,
-    chunkIndex: chunk.index,
-    metadata: buildChunkMetadata({
-      documentId,
-      filename: event.filename,
-      mimeType: event.mimeType,
-      uploadedByUserId: user.userId,
-      classificationLevel,
-      chunk,
-      extra: chunkMetadata,
-    }),
-    embedding: vectors[i],
-  }));
+  // Parents first — the FK needs them inserted before their children, and
+  // parentIndex indexes into this array.
+  const records: DocumentChunkRecord[] = [
+    ...parents.map((chunk, i) => ({
+      text: parentTexts[i]!,
+      chunkIndex: chunk.index,
+      metadata: buildChunkMetadata({
+        documentId,
+        filename: event.filename,
+        mimeType: event.mimeType,
+        uploadedByUserId: user.userId,
+        classificationLevel,
+        chunk,
+        isParent: true,
+        extra: chunkMetadata,
+      }),
+      embedding: null,
+      isParent: true,
+    })),
+    ...children.map((chunk, i) => ({
+      text: childTexts[i]!,
+      chunkIndex: chunk.index,
+      metadata: buildChunkMetadata({
+        documentId,
+        filename: event.filename,
+        mimeType: event.mimeType,
+        uploadedByUserId: user.userId,
+        classificationLevel,
+        chunk,
+        extra: chunkMetadata,
+      }),
+      embedding: vectors[i]!,
+      isParent: false,
+      parentIndex: chunk.parentIndex,
+    })),
+  ];
 
   // ── STEP 4: single transaction — document row + every chunk ───────────────
   const result = await insertDocumentWithChunks({
@@ -691,7 +991,7 @@ async function handleDocumentIngestion(
     filename: event.filename,
     mimeType: event.mimeType,
     classificationLevel,
-    chunkCount: chunks.length,
+    chunkCount: children.length,
     insertedChunks: result.insertedChunkIds.length,
     alreadyIngested: result.alreadyIngested,
   });

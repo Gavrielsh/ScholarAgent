@@ -40,3 +40,7 @@ skills-lock.json
 
 # OneDrive sync-conflict copies, which it names after the machine
 *-Gavriel*
+
+# Graphify
+.graphify/
+graphify-out/
