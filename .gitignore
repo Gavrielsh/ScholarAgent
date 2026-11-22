@@ -44,3 +44,5 @@ skills-lock.json
 # Graphify
 .graphify/
 graphify-out/
+
+scholaragent_context.txt
