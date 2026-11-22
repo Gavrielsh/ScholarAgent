@@ -21,6 +21,7 @@
  *   run can randomise presentation order and quantify this.
  */
 
+import { z } from "zod";
 import type { RagasJudge, RagasJudgeFactory } from "@/lib/core/telemetry";
 import { adaptiveThreshold } from "@/lib/core/irMetrics";
 
@@ -100,25 +101,47 @@ function buildRerankPrompt(query: string, candidates: readonly RerankCandidate[]
   ].join("\n");
 }
 
+/**
+ * The judge's reply envelope. `scores` is validated as a list of unknowns and
+ * each entry is checked separately, because a single malformed entry must not
+ * discard the whole response — see parseScores.
+ */
+const RerankEnvelopeSchema = z.object({
+  scores: z.array(z.unknown()),
+});
+
+/**
+ * One scored candidate. `refine(Number.isFinite)` is explicit rather than
+ * relying on whether the installed zod major rejects NaN/Infinity by default.
+ */
+const RerankScoreEntrySchema = z.object({
+  id: z.string(),
+  score: z.number().refine((n) => Number.isFinite(n)),
+});
+
 function parseScores(raw: string): Map<string, number> | null {
   const match = raw.match(/\{[\s\S]*\}/);
   if (!match) return null;
 
+  let json: unknown;
   try {
-    const parsed = JSON.parse(match[0]) as { scores?: Array<{ id?: unknown; score?: unknown }> };
-    if (!Array.isArray(parsed.scores)) return null;
-
-    const out = new Map<string, number>();
-    for (const entry of parsed.scores) {
-      if (typeof entry?.id !== "string" || typeof entry?.score !== "number") continue;
-      if (!Number.isFinite(entry.score)) continue;
-      // Clamp rather than reject: a judge returning 11 meant "maximally relevant".
-      out.set(entry.id, Math.min(SCORE_MAX, Math.max(SCORE_MIN, entry.score)));
-    }
-    return out.size > 0 ? out : null;
+    json = JSON.parse(match[0]);
   } catch {
     return null;
   }
+
+  const envelope = RerankEnvelopeSchema.safeParse(json);
+  if (!envelope.success) return null;
+
+  const out = new Map<string, number>();
+  for (const candidate of envelope.data.scores) {
+    // Per-entry validation: one bad row is skipped, the rest still count.
+    const entry = RerankScoreEntrySchema.safeParse(candidate);
+    if (!entry.success) continue;
+    // Clamp rather than reject: a judge returning 11 meant "maximally relevant".
+    out.set(entry.data.id, Math.min(SCORE_MAX, Math.max(SCORE_MIN, entry.data.score)));
+  }
+  return out.size > 0 ? out : null;
 }
 
 function fallback(

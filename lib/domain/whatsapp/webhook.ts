@@ -16,6 +16,7 @@ import {
   recordKnowledgeGap,
 } from "@/lib/domain/chat/knowledgeGaps";
 import { recordBaselineRagMetrics } from "@/lib/domain/chat/rag";
+import { maybeEnqueueMemorySummarization } from "@/lib/domain/chat/session/memoryWorker";
 import {
   evaluateInboundSafety,
   redactPii,
@@ -512,6 +513,16 @@ async function handleInboundMessage(
     },
     "chat_history_outbound_persist_failed"
   );
+
+  // Rolling memory refresh — last, and only once the reply is sent and both
+  // turns are stored, so the count it checks includes this exchange.
+  //
+  // Awaited rather than fired bare so an unhandled rejection cannot escape,
+  // but maybeEnqueueMemorySummarization swallows every error internally and
+  // resolves false instead of throwing: the user already has their answer, and
+  // a Redis blip here must not fail a completed job into a BullMQ retry (which
+  // would re-send the reply). Same reasoning as knowledge-gap recording above.
+  await maybeEnqueueMemorySummarization({ senderId, messageId });
 }
 
 /**

@@ -394,6 +394,18 @@ export interface SimilarDocument {
   similarity: number;
   /** Fused RRF score when hybrid retrieval runs. */
   rrfScore?: number;
+  /**
+   * The parent chunk this row was indexed under, or null for a flat chunk.
+   *
+   * On a result that has been through parent resolution this is null and `id`
+   * is already the parent's id — see resolveParentChunks.
+   */
+  parentId?: string | null;
+  /**
+   * The child chunk that actually matched, when `text` was widened to its
+   * parent. Kept so a retrieval trace can still say which small chunk scored.
+   */
+  matchedChildId?: string;
 }
 
 export interface QuerySimilarOptions {
@@ -431,17 +443,37 @@ function toVectorLiteral(vector: number[]): string {
   return `[${vector.join(",")}]`;
 }
 
+/**
+ * Bulk chunk upsert.
+ *
+ * `is_parent` and `parent_id` arrive as arrays alongside the rest (migration
+ * 004). Parents and children go in one statement so a child can never be
+ * committed without the parent its FK points at, and both inherit the single
+ * `classification_level` the document was ingested under — which is what keeps
+ * parent resolution inside the RLS policy rather than around it.
+ *
+ * Ordering note: parents must sort before their children within the arrays, so
+ * the self-referencing FK resolves. insertDocumentWithChunks relies on the
+ * caller supplying them that way and asserts it below.
+ */
 const BULK_UPSERT_SQL = `
-  INSERT INTO knowledge_base (id, content, metadata, classification_level, embedding)
-  SELECT u.id, u.content, u.metadata::jsonb, u.classification_level, u.embedding::vector
-  FROM UNNEST($1::uuid[], $2::text[], $3::text[], $4::int[], $5::text[]) AS u(
-    id, content, metadata, classification_level, embedding
+  INSERT INTO knowledge_base (
+    id, content, metadata, classification_level, embedding, is_parent, parent_id
+  )
+  SELECT u.id, u.content, u.metadata::jsonb, u.classification_level,
+         u.embedding::vector, u.is_parent, u.parent_id
+  FROM UNNEST(
+    $1::uuid[], $2::text[], $3::text[], $4::int[], $5::text[], $6::boolean[], $7::uuid[]
+  ) AS u(
+    id, content, metadata, classification_level, embedding, is_parent, parent_id
   )
   ON CONFLICT (id) DO UPDATE
     SET content = EXCLUDED.content,
         metadata = EXCLUDED.metadata,
         classification_level = EXCLUDED.classification_level,
-        embedding = EXCLUDED.embedding
+        embedding = EXCLUDED.embedding,
+        is_parent = EXCLUDED.is_parent,
+        parent_id = EXCLUDED.parent_id
   RETURNING id;
 `;
 
@@ -451,6 +483,8 @@ type RetrievedRow = {
   metadata: Record<string, unknown> | null;
   classification_level: AccessLevel;
   similarity: number;
+  /** Null for a flat chunk (every row written before migration 004). */
+  parent_id?: string | null;
 };
 
 function mapRow(row: RetrievedRow): SimilarDocument {
@@ -460,6 +494,7 @@ function mapRow(row: RetrievedRow): SimilarDocument {
     metadata: row.metadata,
     classificationLevel: row.classification_level,
     similarity: Number(row.similarity),
+    parentId: row.parent_id ?? null,
   };
 }
 
@@ -502,11 +537,21 @@ function reciprocalRankFusion(
  */
 export type RetrievalStrategy = "sparse" | "dense" | "hybrid_rrf";
 
-/** Dense leg — pgvector cosine distance over the HNSW index. */
+/**
+ * Dense leg — pgvector cosine distance over the HNSW index.
+ *
+ * `is_parent = false` restricts the search to child chunks (migration 004).
+ * Parent rows carry embedding = NULL and would sort last anyway, but excluding
+ * them explicitly keeps the predicate the same on both legs and lets the
+ * partial index do the work. Pre-004 rows default to is_parent = false, so the
+ * existing corpus is unaffected.
+ */
 const DENSE_SQL = `
-  SELECT id, content, metadata, classification_level,
+  SELECT id, content, metadata, classification_level, parent_id,
          1 - (embedding <=> $1::vector) AS similarity
   FROM knowledge_base
+  WHERE is_parent = false
+    AND embedding IS NOT NULL
   ORDER BY embedding <=> $1::vector
   LIMIT $2;
 `;
@@ -585,10 +630,11 @@ export function buildLexicalSearchExpression(queryText: string): string | null {
  * defect to patch out, and it is a large part of why fusion helps here.
  */
 const LEXICAL_SQL = `
-  SELECT id, content, metadata, classification_level,
+  SELECT id, content, metadata, classification_level, parent_id,
          ts_rank_cd(content_tsv, websearch_to_tsquery('simple', $1)) AS similarity
   FROM knowledge_base
   WHERE content_tsv @@ websearch_to_tsquery('simple', $1)
+    AND is_parent = false
   ORDER BY similarity DESC
   LIMIT $2;
 `;
@@ -640,6 +686,97 @@ async function runLexicalLeg(
   }
 }
 
+const PARENT_FETCH_SQL = `
+  SELECT id, content, metadata, classification_level, parent_id, 0 AS similarity
+  FROM knowledge_base
+  WHERE id = ANY($1::uuid[])
+    AND is_parent = true;
+`;
+
+/**
+ * Widens each matched child chunk to its parent's text, then deduplicates.
+ *
+ * ## Why this runs on the caller's client
+ *
+ * `client` is the one already inside `withRlsTransaction`, so this SELECT is
+ * evaluated as `scholaragent_app` under `app.user_permission_level` exactly
+ * like the child search was. A parent is written with the SAME
+ * classification_level as its children (migration 004), so the policy
+ *
+ *     classification_level >= current_setting('app.user_permission_level')::int
+ *
+ * admits the parent precisely when it admitted the child. Resolving parents on
+ * a service client instead would read across every tier and silently convert
+ * every retrieval into a leak — that is why this takes a client rather than
+ * opening its own.
+ *
+ * Ordering is preserved: the first (best-ranked) child to name a parent decides
+ * that parent's position and keeps its `rrfScore` / `similarity` /
+ * `classificationLevel`. Later children of the same parent are dropped, which
+ * is the deduplication — several children of one passage would otherwise spend
+ * the whole context budget on one document.
+ *
+ * Fails safe: a child whose parent is missing (or filtered) keeps its own text.
+ *
+ * Exported so the widening and dedup rules can be tested against a fake client
+ * without a database, for the same reason `assertSqlIdentifier` is exported.
+ */
+export async function resolveParentChunks(
+  client: Pick<PoolClient, "query">,
+  rows: SimilarDocument[]
+): Promise<SimilarDocument[]> {
+  const parentIds = [...new Set(rows.map((r) => r.parentId).filter((id): id is string => !!id))];
+
+  // Flat corpus (everything written before migration 004): nothing to widen, so
+  // no second round trip is spent.
+  if (parentIds.length === 0) {
+    return dedupeById(rows);
+  }
+
+  const res = await client.query<RetrievedRow>(PARENT_FETCH_SQL, [parentIds]);
+  const parents = new Map(res.rows.map((row) => [row.id, row]));
+
+  const widened = rows.map((row) => {
+    if (!row.parentId) return row;
+    const parent = parents.get(row.parentId);
+    if (!parent) {
+      // The parent row did not come back. Keep the child verbatim rather than
+      // dropping the hit: returning less text is a degradation, returning
+      // someone else's text would be a leak.
+      logWarn("retrieval_parent_unresolved", "Parent chunk not returned; using child text", {
+        childId: row.id,
+        parentId: row.parentId,
+      });
+      return row;
+    }
+    return {
+      ...row,
+      id: parent.id,
+      text: parent.content,
+      metadata: parent.metadata,
+      // Taken from the parent row the policy actually returned, not copied from
+      // the child, so the value always describes the text being returned.
+      classificationLevel: parent.classification_level,
+      parentId: null,
+      matchedChildId: row.id,
+    };
+  });
+
+  return dedupeById(widened);
+}
+
+/** Keeps the first occurrence of each id, preserving rank order. */
+function dedupeById(rows: SimilarDocument[]): SimilarDocument[] {
+  const seen = new Set<string>();
+  const out: SimilarDocument[] = [];
+  for (const row of rows) {
+    if (seen.has(row.id)) continue;
+    seen.add(row.id);
+    out.push(row);
+  }
+  return out;
+}
+
 async function executeRetrieval(
   client: PoolClient,
   queryText: string,
@@ -649,29 +786,33 @@ async function executeRetrieval(
 ): Promise<SimilarDocument[]> {
   const overfetch = opts.overfetch;
 
-  if (strategy === "dense") {
-    const rows = await runDenseLeg(client, vectorLiteral, overfetch);
-    return rows.slice(0, opts.limit);
-  }
+  // Each branch produces its ranked CHILD rows. Parent resolution, dedup and
+  // the final truncation happen once, below, so all four arms stay on the one
+  // code path that makes the benchmark comparable (see CLAUDE.md) and so the
+  // limit counts distinct parents rather than pre-dedup children.
+  let ranked: SimilarDocument[];
 
-  if (strategy === "sparse") {
+  if (strategy === "dense") {
+    ranked = await runDenseLeg(client, vectorLiteral, overfetch);
+  } else if (strategy === "sparse") {
     const lexical = await runLexicalLeg(client, queryText, overfetch);
     if (!lexical.ok) {
       // Never degrade to dense here — see LexicalLegResult.
       throw new Error(`Sparse retrieval arm failed: ${lexical.error}`);
     }
-    return lexical.rows.slice(0, opts.limit);
+    ranked = lexical.rows;
+  } else {
+    const vectorRows = await runDenseLeg(client, vectorLiteral, overfetch);
+    const lexical = await runLexicalLeg(client, queryText, overfetch);
+
+    ranked =
+      !lexical.ok || lexical.rows.length === 0
+        ? vectorRows
+        : reciprocalRankFusion(vectorRows, lexical.rows, opts.rrfK);
   }
 
-  const vectorRows = await runDenseLeg(client, vectorLiteral, overfetch);
-  const lexical = await runLexicalLeg(client, queryText, overfetch);
-
-  if (!lexical.ok || lexical.rows.length === 0) {
-    return vectorRows.slice(0, opts.limit);
-  }
-
-  const merged = reciprocalRankFusion(vectorRows, lexical.rows, opts.rrfK);
-  return merged.slice(0, opts.limit);
+  const resolved = await resolveParentChunks(client, ranked);
+  return resolved.slice(0, opts.limit);
 }
 
 /** Preserved name and behaviour for existing hybrid callers. */
@@ -773,8 +914,27 @@ export interface DocumentChunkRecord {
    * reporting paths filter on, so exactly one module gets to spell them.
    */
   metadata: Record<string, unknown>;
-  /** Pre-computed. Embedding inside the transaction would hold it open for minutes. */
-  embedding: number[];
+  /**
+   * Pre-computed. Embedding inside the transaction would hold it open for
+   * minutes.
+   *
+   * NULL for a parent row: parents are never searched directly, so the project
+   * pays no embedding cost for them (migration 004).
+   */
+  embedding: number[] | null;
+  /**
+   * True for a large parent row. Retrieval searches `is_parent = false` only.
+   * Omitted means false, so an existing caller keeps writing searchable rows.
+   */
+  isParent?: boolean;
+  /**
+   * Index into the same `chunks` array identifying this row's parent, resolved
+   * to the parent's generated UUID inside the transaction.
+   *
+   * An index rather than an id because ids are generated here, not by the
+   * caller. Omitted means no parent (a flat chunk, as before migration 004).
+   */
+  parentIndex?: number | null;
 }
 
 export interface IngestedDocumentRecord {
@@ -842,9 +1002,37 @@ export async function insertDocumentWithChunks(
   const texts = input.chunks.map((c) => c.text);
   const levels = input.chunks.map(() => input.classificationLevel);
   // Serialised before BEGIN so a dimension mismatch aborts before a connection
-  // is ever put into a transaction.
-  const embeddings = input.chunks.map((c) => toVectorLiteral(c.embedding));
+  // is ever put into a transaction. A parent row carries no embedding.
+  const embeddings = input.chunks.map((c) =>
+    c.embedding === null ? null : toVectorLiteral(c.embedding)
+  );
   const metadata = input.chunks.map((c) => JSON.stringify(c.metadata));
+  const isParentFlags = input.chunks.map((c) => c.isParent === true);
+
+  // parentIndex -> the parent's generated UUID. Validated before BEGIN: a
+  // forward or out-of-range reference would otherwise surface as an opaque FK
+  // violation mid-transaction, and a self-reference would insert a row that
+  // points at itself.
+  const parentIds = input.chunks.map((c, i) => {
+    const pi = c.parentIndex;
+    if (pi === undefined || pi === null) return null;
+    if (!Number.isInteger(pi) || pi < 0 || pi >= input.chunks.length) {
+      throw new Error(`Chunk ${i} has out-of-range parentIndex ${pi}.`);
+    }
+    if (pi === i) {
+      throw new Error(`Chunk ${i} lists itself as its own parent.`);
+    }
+    if (pi > i) {
+      throw new Error(
+        `Chunk ${i} references parentIndex ${pi}, which is inserted later; ` +
+          "parents must precede their children."
+      );
+    }
+    if (input.chunks[pi]?.isParent !== true) {
+      throw new Error(`Chunk ${i} points at index ${pi}, which is not a parent row.`);
+    }
+    return chunkIds[pi] ?? null;
+  });
 
   return withClient(async (client) => {
     try {
@@ -891,6 +1079,8 @@ export async function insertDocumentWithChunks(
         metadata,
         levels,
         embeddings,
+        isParentFlags,
+        parentIds,
       ]);
 
       // A short count means UNNEST silently dropped rows (mismatched array
@@ -1125,8 +1315,16 @@ export async function backfillDocumentChunks(
   const levels = input.chunks.map(() => input.classificationLevel);
   // Serialised before BEGIN so a dimension mismatch fails before a connection is
   // ever put into a transaction.
-  const embeddings = input.chunks.map((c) => toVectorLiteral(c.embedding));
+  const embeddings = input.chunks.map((c) =>
+    c.embedding === null ? null : toVectorLiteral(c.embedding)
+  );
   const metadata = input.chunks.map((c) => JSON.stringify(c.metadata));
+  // Reconciliation re-ingests a document as flat searchable chunks, exactly as
+  // it did before migration 004. It does not reconstruct a parent/child tree:
+  // the rows it repairs were written flat, and inventing parents for them here
+  // would change what the retrieval path returns for already-graded documents.
+  const isParentFlags = input.chunks.map((c) => c.isParent === true);
+  const parentIds = input.chunks.map(() => null);
 
   return withClient(async (client) => {
     try {
@@ -1162,6 +1360,8 @@ export async function backfillDocumentChunks(
         metadata,
         levels,
         embeddings,
+        isParentFlags,
+        parentIds,
       ]);
 
       // A short count means UNNEST dropped rows (mismatched array lengths).

@@ -1,4 +1,10 @@
-import { buildChunkMetadata, resolveClassificationLevel } from "@/lib/domain/ingestion/pipeline";
+import {
+  buildChunkMetadata,
+  buildContextualHeader,
+  chunkTextParentChild,
+  detectSectionHeading,
+  resolveClassificationLevel,
+} from "@/lib/domain/ingestion/pipeline";
 
 // The persistence layer serialises this payload verbatim, and the delete path
 // (`metadata->>'document_id'`) plus the admin reports (`uploaded_by`) filter on
@@ -63,5 +69,125 @@ describe("resolveClassificationLevel", () => {
     // An L1 Manager asking for the admin-only tier is clamped back to L1.
     expect(resolveClassificationLevel("#L0", 1)).toBe(1);
     expect(resolveClassificationLevel(null, 1)).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Contextual chunk enrichment + parent/child chunking (migration 004)
+// ---------------------------------------------------------------------------
+
+describe("detectSectionHeading", () => {
+  it("recognises markdown headings and returns the text without the hashes", () => {
+    expect(detectSectionHeading("## נהלי החזר הוצאות")).toBe("נהלי החזר הוצאות");
+    expect(detectSectionHeading("# Travel Policy")).toBe("Travel Policy");
+  });
+
+  it("recognises a numbered division label", () => {
+    expect(detectSectionHeading("3.2 תקרת החזר יומית")).toBe("3.2 תקרת החזר יומית");
+    expect(detectSectionHeading("4) Travel budget")).toBe("4) Travel budget");
+  });
+
+  it("recognises the Hebrew structural words", () => {
+    expect(detectSectionHeading("סעיף 5 — נהלי דיווח")).toBe("סעיף 5 — נהלי דיווח");
+    expect(detectSectionHeading("נספח א הגדרות")).toBe("נספח א הגדרות");
+  });
+
+  it("recognises a bold-only line", () => {
+    expect(detectSectionHeading("**הגדרות**")).toBe("הגדרות");
+  });
+
+  it("does not mistake an ordinary sentence for a heading", () => {
+    // A false positive mislabels the section in the header, which is noise in
+    // the embedding — so the detector has to stay conservative.
+    expect(detectSectionHeading("המתנדב יגיש את הבקשה בתוך שבועיים.")).toBeNull();
+    expect(detectSectionHeading("3.2 תקרת החזר יומית היא 50 ש\"ח.")).toBeNull();
+    expect(detectSectionHeading("")).toBeNull();
+  });
+
+  it("rejects a line too long to be a heading", () => {
+    expect(detectSectionHeading("1. " + "א".repeat(200))).toBeNull();
+  });
+});
+
+describe("buildContextualHeader", () => {
+  it("carries the filename and the classification tier", () => {
+    expect(buildContextualHeader({ filename: "handbook.pdf", classificationLevel: 2 })).toBe(
+      "[מסמך: handbook.pdf | רמת סיווג: L2]\n"
+    );
+  });
+
+  it("adds the section only when there is one", () => {
+    expect(
+      buildContextualHeader({
+        filename: "handbook.pdf",
+        classificationLevel: 1,
+        section: "נהלי החזר",
+      })
+    ).toBe("[מסמך: handbook.pdf | רמת סיווג: L1 | סעיף: נהלי החזר]\n");
+
+    // A blank section must not leave a dangling separator.
+    expect(
+      buildContextualHeader({ filename: "f.txt", classificationLevel: 3, section: "   " })
+    ).toBe("[מסמך: f.txt | רמת סיווג: L3]\n");
+  });
+});
+
+describe("chunkTextParentChild", () => {
+  // Long enough to produce several parents at the ~1,400-char budget.
+  const section = (heading: string, n: number) =>
+    `${heading}\n\n` +
+    Array.from({ length: n }, (_, i) => `זו פסקה מספר ${i} בתוך ${heading} עם תוכן ממשי להדגמה.`)
+      .join(" ");
+
+  const doc = [section("## נהלי החזר הוצאות", 40), section("## בטיחות בפעילות", 40)].join("\n\n");
+
+  it("produces children that are smaller than their parents", () => {
+    const { parents, children } = chunkTextParentChild(doc);
+
+    expect(parents.length).toBeGreaterThan(1);
+    expect(children.length).toBeGreaterThan(parents.length);
+
+    const maxParent = Math.max(...parents.map((p) => p.text.length));
+    const maxChild = Math.max(...children.map((c) => c.text.length));
+    expect(maxChild).toBeLessThan(maxParent);
+    expect(maxChild).toBeLessThanOrEqual(400);
+  });
+
+  it("links every child to a parent that exists", () => {
+    const { parents, children } = chunkTextParentChild(doc);
+
+    for (const child of children) {
+      expect(child.parentIndex).toBeGreaterThanOrEqual(0);
+      expect(child.parentIndex).toBeLessThan(parents.length);
+    }
+  });
+
+  it("numbers children contiguously from zero across all parents", () => {
+    // chunk_index is part of the corpus metadata contract and the backfill
+    // path derives a deterministic id from it, so it must not restart per parent.
+    const { children } = chunkTextParentChild(doc);
+    expect(children.map((c) => c.index)).toEqual(children.map((_, i) => i));
+  });
+
+  it("gives a child its parent's section when its own slice has no heading", () => {
+    const { children } = chunkTextParentChild(doc);
+    const labelled = children.filter((c) => typeof c.section === "string" && c.section.length > 0);
+
+    expect(labelled.length).toBeGreaterThan(0);
+    expect(
+      labelled.some((c) => c.section === "נהלי החזר הוצאות" || c.section === "בטיחות בפעילות")
+    ).toBe(true);
+  });
+
+  it("still yields one parent and one child for a short document", () => {
+    const { parents, children } = chunkTextParentChild("שורה אחת קצרה בלבד.");
+
+    expect(parents).toHaveLength(1);
+    expect(children).toHaveLength(1);
+    expect(children[0]!.parentIndex).toBe(0);
+  });
+
+  it("returns nothing for empty input rather than an empty-text chunk", () => {
+    expect(chunkTextParentChild("   ")).toEqual({ parents: [], children: [] });
   });
 });

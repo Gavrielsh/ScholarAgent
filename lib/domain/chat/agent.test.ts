@@ -12,6 +12,7 @@ import {
   isUserManagementButtonId,
   matchesUserManagementHeuristic,
   parseAddUserInput,
+  parseAnalyticalClassification,
   parseDeleteUserInput,
   parseL0MenuChoice,
   parseUserManagementMenuChoice,
@@ -298,5 +299,34 @@ describe("parseL0MenuChoice", () => {
     expect(parseL0MenuChoice("חזור")).toBe("cancel");
     expect(parseL0MenuChoice("מה מזג האוויר")).toBeNull();
     expect(parseL0MenuChoice("12")).toBeNull();
+  });
+});
+
+describe("parseAnalyticalClassification", () => {
+  it("accepts a well-formed classification in both directions", () => {
+    expect(parseAnalyticalClassification('{"isAnalytical": true}')).toBe(true);
+    expect(parseAnalyticalClassification('{"isAnalytical": false}')).toBe(false);
+  });
+
+  it("tolerates the prose a model wraps around its JSON", () => {
+    expect(parseAnalyticalClassification('Sure!\n{"isAnalytical": true}\nHope that helps.')).toBe(
+      true
+    );
+  });
+
+  it("returns null for a malformed reply so the caller can fail open", () => {
+    expect(parseAnalyticalClassification("not json")).toBeNull();
+    expect(parseAnalyticalClassification('{"isAnalytical":')).toBeNull();
+  });
+
+  it("returns null rather than silently reading a missing field as false", () => {
+    // This is the case the old `Boolean(parsed.isAnalytical)` cast got wrong: a
+    // reply that parsed but carried no usable field became `false`, which sent
+    // the message back to RAG document search — the exact reversion the
+    // analytics handler exists to prevent. It must now reach the fail-open.
+    expect(parseAnalyticalClassification("{}")).toBeNull();
+    expect(parseAnalyticalClassification('{"isAnalytical": "yes"}')).toBeNull();
+    expect(parseAnalyticalClassification('{"isAnalytical": 1}')).toBeNull();
+    expect(parseAnalyticalClassification('{"analytical": true}')).toBeNull();
   });
 });

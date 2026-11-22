@@ -8,7 +8,8 @@
 // merged in. Folding lib/domain/chat/state.ts into this file would have created
 // an agent -> rag -> agent cycle, so ChatMessage stays a standalone leaf.
 
-import { CLAUDE_FAST_MODEL, getLlmAdapter } from "@/lib/domain/chat/llm";
+import { z } from "zod";
+import { CLAUDE_FAST_MODEL, getLlmAdapter, resolveFastModel } from "@/lib/domain/chat/llm";
 import {
   deleteAdminManagedUser,
   getAllManagedUsers,
@@ -112,23 +113,12 @@ export function matchesAdminAnalyticsExitCommand(query: string): boolean {
   return ANALYTICS_EXIT_HEURISTICS.some((pattern) => pattern.test(query.trim()));
 }
 
-/** Cheap/fast model tier, used by the L0/L1 chat-history summarisers. */
-export function resolveFastModel(): string {
-  const provider = (process.env.LLM_PROVIDER ?? "mock").toLowerCase();
-  const explicit = process.env.LLM_FAST_MODEL?.trim();
-  if (explicit) return explicit;
-
-  switch (provider) {
-    case "openai":
-      return "gpt-4o-mini";
-    case "gemini":
-      return process.env.GEMINI_FAST_MODEL ?? "gemini-3.5-flash";
-    case "claude":
-      return CLAUDE_FAST_MODEL;
-    default:
-      return "mock-fast";
-  }
-}
+/**
+ * Re-exported from llm.ts, which now owns it: lib/domain/chat/session/* needs
+ * it too, and importing agent.ts from a session module would close an
+ * `agent -> session -> agent` cycle.
+ */
+export { resolveFastModel };
 
 // -------------------------------------------------------------------------
 // Admin analytics handler
@@ -141,6 +131,37 @@ const CLASSIFIER_PROMPT =
   "דוח היסטוריית שיחות. קבע אם ההודעה הבאה היא שאלת המשך הקשורה לנתוני השיחות/דוחות/" +
   'משתמשים שהתקבלו, לעומת נושא לא קשור כלל (למשל תמיכה טכנית אישית, איפוס סיסמה וכו). ' +
   'החזר JSON תקני בלבד בפורמט: {"isAnalytical": true} או {"isAnalytical": false}, ללא טקסט נוסף.';
+
+/**
+ * The classifier's reply contract, mirroring the `responseSchema` sent with the
+ * request. Strict: an extra or missing key is a validation failure, not a
+ * silently-false classification.
+ */
+const AnalyticalClassificationSchema = z.object({
+  isAnalytical: z.boolean(),
+});
+
+/**
+ * Validates the classifier's raw reply.
+ *
+ * Returns the classification, or null when the reply is not valid JSON or does
+ * not satisfy the schema. The caller turns null into the documented fail-open.
+ *
+ * Exported purely so the validation can be tested directly, without mocking an
+ * LLM adapter — the same reason `assertSqlIdentifier` is exported in
+ * lib/core/db.ts.
+ */
+export function parseAnalyticalClassification(raw: string): boolean | null {
+  const jsonText = raw.trim().match(/\{[\s\S]*\}/)?.[0] ?? raw;
+  let json: unknown;
+  try {
+    json = JSON.parse(jsonText);
+  } catch {
+    return null;
+  }
+  const parsed = AnalyticalClassificationSchema.safeParse(json);
+  return parsed.success ? parsed.data.isAnalytical : null;
+}
 
 /**
  * LLM-based ambiguity check: is this free-text message actually a follow-up about
@@ -165,9 +186,16 @@ async function isAnalyticalQuery(query: string, signal?: AbortSignal | null): Pr
         required: ["isAnalytical"],
       },
     });
-    const jsonText = raw.trim().match(/\{[\s\S]*\}/)?.[0] ?? raw;
-    const parsed = JSON.parse(jsonText) as { isAnalytical?: unknown };
-    return Boolean(parsed.isAnalytical);
+    const classification = parseAnalyticalClassification(raw);
+    if (classification === null) {
+      // Thrown, not returned, so a schema miss takes the SAME documented
+      // fail-open path below as a malformed-JSON miss. Previously a reply that
+      // was valid JSON but had no usable `isAnalytical` field fell through
+      // `Boolean(undefined)` to false, i.e. it reverted to RAG — the exact
+      // behaviour the catch block exists to prevent.
+      throw new Error("Classifier reply failed schema validation.");
+    }
+    return classification;
   } catch (err) {
     // Fail open toward the safe, DB-grounded analytics handler rather than silently
     // reverting to RAG document search on a transient LLM/parse failure - that
@@ -1280,6 +1308,10 @@ export async function processBaselineQuery(
     userContext,
     priorMessages,
     signal,
+    // Enables the rolling memory lookup. Null for callers with no phone number
+    // (scripts/evaluate_runner.ts), which keeps the evaluation prompt identical
+    // to the one behind the recorded results.
+    senderId: senderPhone ?? null,
   });
 
   return {

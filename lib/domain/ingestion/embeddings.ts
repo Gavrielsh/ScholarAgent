@@ -70,6 +70,85 @@ function cacheSet(key: string, value: number[]): void {
   }
 }
 
+// -------------------------------------------------------------------------
+// Deterministic offline provider
+// -------------------------------------------------------------------------
+
+/**
+ * Opt-in offline embedding provider, for CI.
+ *
+ * `LLM_PROVIDER=mock` only swaps the *chat* adapter in lib/domain/chat/llm.ts;
+ * embeddings still went to Google, so `npm run ingest` and `npm run eval:seed`
+ * could not run without `GEMINI_API_KEY`. The CI security gate needs them to
+ * run hermetically, hence this.
+ *
+ * ## Why a mock does not weaken the RLS gate
+ *
+ * `scripts/seed_eval_canaries.ts` probes each canary with `embedText` over the
+ * canary's OWN content, so the query vector is bit-identical to the stored one:
+ * cosine distance 0, rank 1, for any embedding function that is deterministic.
+ * The positive control therefore still proves reachability, and the negative
+ * control is a pure policy question that never involved the vector at all.
+ *
+ * It is NOT a substitute for real embeddings in the thesis experiments —
+ * semantic neighbourhoods here are meaningless, so recall/NDCG measured under
+ * it would be noise. Read at call time, never cached at module scope, and
+ * defaults off, so no production path can reach it without being told to.
+ */
+function embeddingProvider(): string {
+  return (process.env.EMBEDDING_PROVIDER ?? "gemini").trim().toLowerCase();
+}
+
+export function isMockEmbeddingProvider(): boolean {
+  return embeddingProvider() === "mock";
+}
+
+/** FNV-1a — a small, well-defined string hash. Not cryptographic by design. */
+function fnv1a(text: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+/**
+ * Deterministic unit vector derived from the text.
+ *
+ * Same text in, same vector out, across processes and runs — that is the only
+ * property the eval gate depends on. L2-normalised and seeded away from zero so
+ * it is always a legal pgvector cosine operand.
+ *
+ * Exported for the test that pins determinism and dimension.
+ */
+export function mockEmbedding(text: string): number[] {
+  // xorshift32 seeded from the text; `|| 1` because a zero seed is a fixed
+  // point of xorshift and would emit an all-zero vector.
+  let state = fnv1a(text.trim()) || 1;
+  const out = new Array<number>(EMBEDDING_DIMENSION);
+  let sumSquares = 0;
+
+  for (let i = 0; i < EMBEDDING_DIMENSION; i++) {
+    state ^= state << 13;
+    state >>>= 0;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    state >>>= 0;
+    // Map to [-1, 1).
+    const value = state / 0x80000000 - 1;
+    out[i] = value;
+    sumSquares += value * value;
+  }
+
+  const norm = Math.sqrt(sumSquares);
+  if (norm === 0) {
+    // Unreachable with a non-zero seed; a uniform unit vector is still legal.
+    return new Array<number>(EMBEDDING_DIMENSION).fill(1 / Math.sqrt(EMBEDDING_DIMENSION));
+  }
+  return out.map((v) => v / norm);
+}
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -100,6 +179,10 @@ export async function embedText(text: string, signal?: AbortSignal): Promise<num
   if (signal?.aborted) {
     throw new Error("Embedding cancelled before completion.");
   }
+
+  // Before the cache: deterministic, so there is nothing to amortise, and this
+  // keeps the mock out of the cache the real provider shares.
+  if (isMockEmbeddingProvider()) return mockEmbedding(trimmed);
 
   const cached = cacheGet(trimmed);
   if (cached) return cached;
@@ -181,6 +264,10 @@ export async function embedTextBatch(
         "filter empty chunks before embedding to keep vectors index-aligned."
     );
   }
+
+  // After the blank check, so the mock enforces the same index-alignment
+  // contract the real provider does rather than hiding a caller's bug in CI.
+  if (isMockEmbeddingProvider()) return normalized.map((t) => mockEmbedding(t));
 
   // De-duplicate before hitting the API: repeated boilerplate (headers, footers)
   // is common across chunks of the same document.
