@@ -70,7 +70,11 @@ export interface MemorySummarizationJob {
 
 let memoryQueue: Queue<MemorySummarizationJob> | null = null;
 
-/** BullMQ rejects custom job ids containing a colon — mirrors the other queues. */
+/**
+ * Per-sender coalescing key, passed to BullMQ as the deduplication id.
+ *
+ * Colons are stripped to stay consistent with the other queues' ids.
+ */
 export function memorySummarizationJobId(senderId: string): string {
   return `mem_${senderId.replace(/:/g, "_")}`;
 }
@@ -82,8 +86,13 @@ export function getMemorySummarizationQueue(): Queue<MemorySummarizationJob> {
       defaultJobOptions: {
         attempts: parsePositiveInt(process.env.MEMORY_JOB_ATTEMPTS, DEFAULT_JOB_ATTEMPTS),
         backoff: { type: "exponential", delay: DEFAULT_BACKOFF_MS },
-        removeOnComplete: { count: 200 },
-        removeOnFail: { count: 1_000 },
+        // Completed jobs are not kept. With a retained completed job, a custom
+        // jobId makes every later add() for the same sender a silent no-op, so a
+        // sender's memory would be refreshed exactly once. (Coalescing now uses
+        // `deduplication`, which ends when the job does — see
+        // maybeEnqueueMemorySummarization — so nothing here relies on retention.)
+        removeOnComplete: true,
+        removeOnFail: { count: 100 },
       },
     });
   }
@@ -122,9 +131,12 @@ async function countStoredTurns(senderId: string): Promise<number> {
  * turn a delivered reply into a retried job. Fire-and-forget by the same
  * reasoning as the webhook route's queued receipt.
  *
- * `jobId` is derived from the sender, not the message, so a sender who sends
- * five messages in a row while a job is still queued coalesces into one
- * summarisation rather than five.
+ * The deduplication id is derived from the sender, not the message, so a sender
+ * who sends five messages in a row while a job is still queued or running
+ * coalesces into one summarisation rather than five. Unlike a custom `jobId`,
+ * a deduplication id is released when the job completes or fails, so the next
+ * message past the threshold can enqueue again — a fixed `jobId` would have
+ * been refused for as long as the finished job stayed in Redis.
  */
 export async function maybeEnqueueMemorySummarization(input: {
   senderId: string;
@@ -140,7 +152,7 @@ export async function maybeEnqueueMemorySummarization(input: {
     await getMemorySummarizationQueue().add(
       "summarize",
       { senderId, messageId: messageId ?? null },
-      { jobId: memorySummarizationJobId(senderId) }
+      { deduplication: { id: memorySummarizationJobId(senderId) } }
     );
 
     logInfo("memory_summarization_enqueued", "Rolling memory refresh queued.", {

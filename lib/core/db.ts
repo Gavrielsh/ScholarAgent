@@ -1041,6 +1041,10 @@ export async function insertDocumentWithChunks(
       await client.query("SELECT set_config('app.user_permission_level', $1, true)", [
         String(input.writePermissionLevel),
       ]);
+      // GUC first, then the role switch (see withRlsTransaction). Without it
+      // this write runs as the connecting owner/superuser and every INSERT
+      // policy on ingested_documents and knowledge_base is skipped.
+      await enterAppRole(client);
 
       const documentRes = await client.query<{ id: string }>(INSERT_INGESTED_DOCUMENT_SQL, [
         input.documentId,
@@ -1115,19 +1119,51 @@ export async function insertDocumentWithChunks(
   });
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
- * Hard-delete every chunk belonging to a logical source document (metadata.document_id).
- * Call from a trusted webhook after upstream CMS deletion or full re-ingest.
+ * Deletes a document's chunks and its registry row on one client.
  *
- * Since migration 008 the reverse direction is automatic: deleting the
- * ingested_documents row cascades to these chunks via trigger.
+ * Both halves matter. Removing only the chunks leaves an `ingested_documents`
+ * row with no chunks, which is exactly what `findDocumentsMissingChunks` selects
+ * — so `npm run reconcile` would re-embed a document that was deleted or
+ * redacted on purpose. The registry row therefore goes too, in the same
+ * transaction as the chunks.
+ *
+ * Chunks are deleted first so the returned count is the number of chunks
+ * retracted; the registry delete then fires `trg_ingested_documents_cascade_chunks`
+ * over what is already gone (a no-op). Exported so the statement order can be
+ * pinned without a database.
+ */
+export async function deleteDocumentAndChunks(
+  client: Pick<PoolClient, "query">,
+  documentId: string
+): Promise<number> {
+  const chunks = await client.query(
+    `DELETE FROM knowledge_base WHERE metadata->>'document_id' = $1`,
+    [documentId]
+  );
+
+  // `id` is a uuid column; a non-UUID string would raise instead of matching
+  // nothing, and a non-UUID id cannot be a registry row anyway.
+  if (UUID_PATTERN.test(documentId)) {
+    await client.query(`DELETE FROM ingested_documents WHERE id = $1::uuid`, [documentId]);
+  }
+
+  return chunks.rowCount ?? 0;
+}
+
+/**
+ * Hard-delete a logical source document: every chunk tagged with
+ * metadata.document_id AND its `ingested_documents` registry row, atomically.
+ * Call from a trusted webhook after upstream CMS deletion or full redaction.
+ *
+ * Returns the number of chunks removed.
  */
 export async function hardDeleteKnowledgeChunksByDocumentId(documentId: string): Promise<number> {
-  if (!documentId.trim()) return 0;
-  const res = await withRlsTransaction(MAX_PRIVILEGE_LEVEL, (client) =>
-    client.query(`DELETE FROM knowledge_base WHERE metadata->>'document_id' = $1`, [documentId])
-  );
-  return res.rowCount ?? 0;
+  const id = documentId.trim();
+  if (!id) return 0;
+  return withRlsTransaction(MAX_PRIVILEGE_LEVEL, (client) => deleteDocumentAndChunks(client, id));
 }
 
 // ---------------------------------------------------------------------------
@@ -1335,6 +1371,9 @@ export async function backfillDocumentChunks(
       await client.query("SELECT set_config('app.user_permission_level', $1, true)", [
         String(MAX_PRIVILEGE_LEVEL),
       ]);
+      // Admin tier, but still under the unprivileged role: the policies must
+      // evaluate even for the reconciler, or the admin level means nothing.
+      await enterAppRole(client);
 
       const locked = await client.query<{ id: string }>(
         "SELECT id FROM ingested_documents WHERE id = $1 FOR UPDATE;",

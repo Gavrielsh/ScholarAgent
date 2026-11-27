@@ -122,7 +122,13 @@ export async function runWithDeadline(
     // and on the failure path it cancels any still-in-flight fetch.
     clearTimeout(timer);
     controller.abort();
-    await work.catch((err) => {
+    // Deliberately NOT awaited. An await inside `finally` holds the rejection
+    // from the race above until `work` settles, so a handler that ignores the
+    // AbortSignal (a wedged socket, a parser mid-file) would stop the deadline
+    // from ever propagating and pin the worker slot for good. The catch still
+    // runs, so a late rejection is logged and never becomes an
+    // `unhandledRejection`.
+    void work.catch((err) => {
       logWarn(
         "job_orphaned_after_deadline",
         err instanceof Error ? err.message : String(err),

@@ -375,6 +375,20 @@ $$;
 -- Unset / empty GUCs no longer open SELECT or write. Callers must set the
 -- relevant GUC (withRlsTransaction, withSenderTransaction, or an explicit
 -- set_config in the ingestion transaction).
+--
+-- GUC CASTS. Once a custom GUC has been set on a pooled backend with
+-- set_config(..., true), it reads back as '' (empty string) — NOT NULL — after
+-- that transaction ends. `''::integer` raises SQLSTATE 22P02, which inside a
+-- policy turns "no tier was set" into a query error instead of a denial. Every
+-- integer read of app.user_permission_level therefore goes through
+-- nullif(current_setting(...), '')::integer, so both NULL and '' evaluate to
+-- NULL, every comparison is NULL, and the row is denied.
+--
+-- WRITE POLICIES bind the written row's classification as well as the writer's
+-- tier: a writer may only create or move rows at or below their own privilege
+-- (classification_level >= tier; lower number = more privileged). Without it an
+-- L1 Manager could insert an L0 (admin-only) chunk that they themselves could
+-- never read back.
 
 -- ── knowledge_base ──────────────────────────────────────────────────────────
 
@@ -387,36 +401,35 @@ DROP POLICY IF EXISTS rls_knowledge_access ON knowledge_base;
 CREATE POLICY rls_knowledge_access ON knowledge_base
   FOR SELECT
   USING (
-    classification_level >= current_setting('app.user_permission_level', true)::integer
+    classification_level >= nullif(current_setting('app.user_permission_level', true), '')::integer
   );
 
--- Corpus writes require L0 (Admin) or L1 (Manager).
+-- Corpus writes require L0 (Admin) or L1 (Manager), and the written row's
+-- classification may not be more privileged than the writer.
 DROP POLICY IF EXISTS rls_knowledge_base_insert ON knowledge_base;
 CREATE POLICY rls_knowledge_base_insert ON knowledge_base
   FOR INSERT
   WITH CHECK (
-    current_setting('app.user_permission_level', true) IS NOT NULL
-    AND current_setting('app.user_permission_level', true)::integer IN (0, 1)
+    nullif(current_setting('app.user_permission_level', true), '')::integer IN (0, 1)
+    AND classification_level >= nullif(current_setting('app.user_permission_level', true), '')::integer
   );
 
 DROP POLICY IF EXISTS rls_knowledge_base_update ON knowledge_base;
 CREATE POLICY rls_knowledge_base_update ON knowledge_base
   FOR UPDATE
   USING (
-    current_setting('app.user_permission_level', true) IS NOT NULL
-    AND current_setting('app.user_permission_level', true)::integer IN (0, 1)
+    nullif(current_setting('app.user_permission_level', true), '')::integer IN (0, 1)
   )
   WITH CHECK (
-    current_setting('app.user_permission_level', true) IS NOT NULL
-    AND current_setting('app.user_permission_level', true)::integer IN (0, 1)
+    nullif(current_setting('app.user_permission_level', true), '')::integer IN (0, 1)
+    AND classification_level >= nullif(current_setting('app.user_permission_level', true), '')::integer
   );
 
 DROP POLICY IF EXISTS rls_knowledge_base_delete ON knowledge_base;
 CREATE POLICY rls_knowledge_base_delete ON knowledge_base
   FOR DELETE
   USING (
-    current_setting('app.user_permission_level', true) IS NOT NULL
-    AND current_setting('app.user_permission_level', true)::integer IN (0, 1)
+    nullif(current_setting('app.user_permission_level', true), '')::integer IN (0, 1)
   );
 
 -- ── ingested_documents ──────────────────────────────────────────────────────
@@ -428,37 +441,33 @@ DROP POLICY IF EXISTS rls_ingested_documents_select ON ingested_documents;
 CREATE POLICY rls_ingested_documents_select ON ingested_documents
   FOR SELECT
   USING (
-    current_setting('app.user_permission_level', true) IS NOT NULL
-    AND current_setting('app.user_permission_level', true) <> ''
-    AND classification_level >= current_setting('app.user_permission_level', true)::integer
+    classification_level >= nullif(current_setting('app.user_permission_level', true), '')::integer
   );
 
 DROP POLICY IF EXISTS rls_ingested_documents_insert ON ingested_documents;
 CREATE POLICY rls_ingested_documents_insert ON ingested_documents
   FOR INSERT
   WITH CHECK (
-    current_setting('app.user_permission_level', true) IS NOT NULL
-    AND current_setting('app.user_permission_level', true)::integer IN (0, 1)
+    nullif(current_setting('app.user_permission_level', true), '')::integer IN (0, 1)
+    AND classification_level >= nullif(current_setting('app.user_permission_level', true), '')::integer
   );
 
 DROP POLICY IF EXISTS rls_ingested_documents_update ON ingested_documents;
 CREATE POLICY rls_ingested_documents_update ON ingested_documents
   FOR UPDATE
   USING (
-    current_setting('app.user_permission_level', true) IS NOT NULL
-    AND current_setting('app.user_permission_level', true)::integer IN (0, 1)
+    nullif(current_setting('app.user_permission_level', true), '')::integer IN (0, 1)
   )
   WITH CHECK (
-    current_setting('app.user_permission_level', true) IS NOT NULL
-    AND current_setting('app.user_permission_level', true)::integer IN (0, 1)
+    nullif(current_setting('app.user_permission_level', true), '')::integer IN (0, 1)
+    AND classification_level >= nullif(current_setting('app.user_permission_level', true), '')::integer
   );
 
 DROP POLICY IF EXISTS rls_ingested_documents_delete ON ingested_documents;
 CREATE POLICY rls_ingested_documents_delete ON ingested_documents
   FOR DELETE
   USING (
-    current_setting('app.user_permission_level', true) IS NOT NULL
-    AND current_setting('app.user_permission_level', true)::integer IN (0, 1)
+    nullif(current_setting('app.user_permission_level', true), '')::integer IN (0, 1)
   );
 
 -- ── chat_history ────────────────────────────────────────────────────────────

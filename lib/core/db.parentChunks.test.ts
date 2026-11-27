@@ -1,4 +1,5 @@
 import {
+  deleteDocumentAndChunks,
   insertDocumentWithChunks,
   resolveParentChunks,
   type DocumentChunkRecord,
@@ -236,5 +237,51 @@ describe("insertDocumentWithChunks — parent/child shape validation", () => {
         chunks: [chunk(), chunk({ parentIndex: 0 })],
       })
     ).rejects.toThrow(/not a parent row/i);
+  });
+});
+
+/**
+ * Deleting a document must remove its registry row as well as its chunks.
+ * Otherwise `ingested_documents` keeps a row with no chunks — precisely what
+ * `npm run reconcile` selects — and a deleted or redacted document is re-embedded.
+ */
+describe("deleteDocumentAndChunks", () => {
+  const DOC_ID = "6f5b1c9e-8f3a-4d5e-9c2b-1a7d0e4f6b83";
+
+  function recordingClient(chunkRowCount: number) {
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    const client = {
+      query: async (sql: string, params: unknown[]) => {
+        calls.push({ sql, params });
+        return { rows: [], rowCount: sql.includes("knowledge_base") ? chunkRowCount : 1 };
+      },
+    };
+    return {
+      client: client as unknown as Parameters<typeof deleteDocumentAndChunks>[0],
+      calls,
+    };
+  }
+
+  it("deletes the chunks first, then the registry row, and reports the chunk count", async () => {
+    const { client, calls } = recordingClient(7);
+
+    const deleted = await deleteDocumentAndChunks(client, DOC_ID);
+
+    expect(deleted).toBe(7);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.sql).toContain("DELETE FROM knowledge_base");
+    expect(calls[0]!.params).toEqual([DOC_ID]);
+    expect(calls[1]!.sql).toContain("DELETE FROM ingested_documents");
+    expect(calls[1]!.sql).toContain("id = $1");
+    expect(calls[1]!.params).toEqual([DOC_ID]);
+  });
+
+  it("skips the registry delete for a non-UUID id instead of letting the uuid cast raise", async () => {
+    const { client, calls } = recordingClient(0);
+
+    await deleteDocumentAndChunks(client, "not-a-uuid");
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.sql).toContain("DELETE FROM knowledge_base");
   });
 });

@@ -41,4 +41,20 @@ describe("runWithDeadline", () => {
       process.off("unhandledRejection", onUnhandled);
     }
   });
+
+  it("rejects with JobTimeoutError on schedule even when the handler ignores the abort signal", async () => {
+    // A promise that never settles and never listens to `signal` — the shape of
+    // a wedged socket or a parser stuck mid-file. If the deadline path awaited
+    // the work, this test would hang until Jest's own timeout instead.
+    const started = Date.now();
+
+    await expect(runWithDeadline("job-hung", 40, () => new Promise<void>(() => {}))).rejects.toBeInstanceOf(
+      JobTimeoutError
+    );
+
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(35);
+    // Generous ceiling: the point is "about the deadline", not "never later".
+    expect(elapsed).toBeLessThan(1_000);
+  });
 });
