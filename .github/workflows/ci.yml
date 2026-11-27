@@ -76,7 +76,7 @@ jobs:
   #   - negative: from a tier below the canary's classification, it is NOT.
   #
   # The script exits non-zero if either fails, so a regression that re-opens the
-  # superuser/BYPASSRLS hole described in migrations/003 breaks the build
+  # superuser/BYPASSRLS bypass guarded against in migrations/001 breaks the build
   # instead of quietly invalidating the results.
   security-eval-gate:
     needs: test-and-lint
@@ -143,7 +143,7 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
-      # Applies 001 → 005 in filename order. 003 creates the NOBYPASSRLS role
+      # Applies 001 → 005 in filename order. 001 creates the NOBYPASSRLS role
       # and self-checks that FORCE RLS is active; 004 and 005 do the same for
       # their own tables. A failure here means the schema cannot be stamped
       # "secured", and the job stops.

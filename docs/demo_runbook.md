@@ -147,43 +147,42 @@ into a deterministic one.** That sentence is the thesis.
 Have both files open in split panes before you start. Navigate by line number;
 do not scroll looking for things.
 
-### Pane 1 — `migrations/003_enforce_rls_role.sql` (204 lines)
+### Pane 1 — `migrations/001_initial_schema.sql` (§8–§10)
 
 | Lines | What to show | What to say |
 |---|---|---|
-| **20–21** | The quoted comment from `001`: *"FORCE RLS applies policies to the table owner as well (superuser / BYPASSRLS still bypass)"* | "Migration 001 already warned us. We read it and still missed it." |
-| **23–27** | The superuser bypass and the empirical consequence | "All five planted canaries at L0/L1 were readable from L1 and L2. Every tier could read every tier." |
-| **29–33** | The Docker entrypoint cause | "`POSTGRES_USER` is always created a superuser — and the same hole exists on any managed DB with a privileged app role. Not a local-dev curiosity." |
-| **65–85** | The `DO` block that creates the role | — |
-| **68–74** | `CREATE ROLE scholaragent_app NOLOGIN NOSUPERUSER NOBYPASSRLS …` | "`NOLOGIN` is deliberate. Nothing connects as this role — we only *enter* it. No new secret, no connection-string change." |
-| **76–82** | The `ALTER` on the `ELSE` branch | "Not redundant: a pre-existing role of this name carrying `BYPASSRLS` would silently reinstate the exact bug." |
-| **99–107** | `GRANT USAGE` + table/sequence grants | "RLS restricts *which rows* are visible; it does not grant table access. Without these the role is denied outright rather than filtered." |
-| **124** | `REVOKE INSERT, UPDATE, DELETE ON schema_migrations` | Least privilege — migration bookkeeping belongs to the runner. |
-| **129–133** | `GRANT scholaragent_app TO current_user` | "`SET ROLE` requires membership. Idempotent." |
-| **150–157** | `ENABLE` + `FORCE ROW LEVEL SECURITY` on the three tables | The protected set: `knowledge_base`, `ingested_documents`, `chat_history`. |
-| **167–193** | **The self-check `DO` block** | *Linger here.* |
-| **177–180** | Raises if the role holds `SUPERUSER` or `BYPASSRLS` | — |
-| **189–191** | Raises if `FORCE RLS` is off on any protected table | "The migration refuses to stamp a database that is not actually secured. `run.ts` applies each file as one transaction, so this rolls everything back." |
-| **203–204** | The self-stamp | — |
+| **25–36** | The "Security model (defense in depth)" header | "Two identities, separated by design. The owner/migrator may be a superuser — the Docker image makes it one — so it never serves a request. Every request runs as `scholaragent_app`." |
+| **37–38** | The section order | "Tables → role → grants → ENABLE + FORCE → policies → self-check. Dependency-safe, in one file." |
+| **290–310** | The `DO` block that creates the role | — |
+| **292–299** | `CREATE ROLE scholaragent_app NOLOGIN NOSUPERUSER NOBYPASSRLS …` | "`NOLOGIN` is deliberate. Nothing connects as this role — we only *enter* it. No new secret, no connection-string change." |
+| **300–307** | The `ALTER` on the `ELSE` branch | "Not redundant: a pre-existing role of this name carrying `BYPASSRLS` would silently disable every policy." |
+| **320–340** | `GRANT USAGE` + table/sequence grants | "RLS restricts *which rows* are visible; it does not grant table access. Without these the role is denied outright rather than filtered." |
+| **345** | `REVOKE INSERT, UPDATE, DELETE ON schema_migrations` | Least privilege — migration bookkeeping belongs to the runner. |
+| **350–353** | `GRANT scholaragent_app TO current_user` | "`SET ROLE` requires membership. Idempotent." |
+| **381–382, 424–425, 469–470** | `ENABLE` + `FORCE ROW LEVEL SECURITY` on the three tables | The protected set: `knowledge_base`, `ingested_documents`, `chat_history`. Policies follow each pair. |
+| **502–535** | **The self-check `DO` block** | *Linger here.* |
+| **514–521** | Raises if the role holds `SUPERUSER` or `BYPASSRLS` | — |
+| **523–533** | Raises if `FORCE RLS` is off on any protected table | "The migration refuses to stamp a database that is not actually secured. `run.ts` applies each file as one transaction, so this rolls everything back." |
+| **544–545** | The self-stamp | — |
 
 ### Pane 2 — `lib/core/db.ts` (1,230 lines)
 
 | Lines | What to show | What to say |
 |---|---|---|
-| **175** | `const APP_ROLE = process.env.PG_APP_ROLE ?? "scholaragent_app"` | Overridable for managed databases with an equivalent role. |
-| **189–194** | `assertSqlIdentifier` | "`SET LOCAL ROLE` takes an identifier, not a value — it cannot be bound with `$1`. So the name is interpolated, and **this regex is the entire injection boundary**. That is why it is exported: it is tested directly in `lib/core/db.identifier.test.ts`." |
-| **207–220** | **`enterAppRole` — the fail-closed path** | *The single most important function in the repository.* |
-| **209** | `SET LOCAL ROLE ${assertSqlIdentifier(...)}` | One line. That is the control. |
-| **212–218** | The thrown error | "If migration 003 was never applied, we **refuse the query**. We do not fall back. Falling back would run it as superuser with every policy bypassed — the vulnerability itself, arriving silently." |
-| **222–248** | `withRlsTransaction` | The main read path. |
-| **228** | `BEGIN` | — |
-| **229–231** | The ordering comment | — |
-| **232–234** | `set_config('app.user_permission_level', $1, true)` | "GUC **first**, while still in the connecting role." |
-| **235** | `await enterAppRole(client)` | "**Then** drop privileges. Order is not stylistic." |
-| **237** | `COMMIT` | "`SET LOCAL` reverts on `COMMIT` *and* `ROLLBACK` — so one user's tier can never leak onto the next user of a pooled connection." |
-| **254–278** | `withSenderTransaction` | "Same treatment for `chat_history` via `app.sender_id` (line **261**, role switch at **265**). Same superuser bug meant any sender could read any sender's history." |
+| **176** | `const APP_ROLE = process.env.PG_APP_ROLE ?? "scholaragent_app"` | Overridable for managed databases with an equivalent role. |
+| **190–195** | `assertSqlIdentifier` | "`SET LOCAL ROLE` takes an identifier, not a value — it cannot be bound with `$1`. So the name is interpolated, and **this regex is the entire injection boundary**. That is why it is exported: it is tested directly in `lib/core/db.identifier.test.ts`." |
+| **208–221** | **`enterAppRole` — the fail-closed path** | *The single most important function in the repository.* |
+| **210** | `SET LOCAL ROLE ${assertSqlIdentifier(...)}` | One line. That is the control. |
+| **213–219** | The thrown error | "If migration 001 was never applied, we **refuse the query**. We do not fall back. Falling back would run it as superuser with every policy bypassed — the whole control, silently disabled." |
+| **223–249** | `withRlsTransaction` | The main read path. |
+| **229** | `BEGIN` | — |
+| **230–232** | The ordering comment | — |
+| **233–235** | `set_config('app.user_permission_level', $1, true)` | "GUC **first**, while still in the connecting role." |
+| **236** | `await enterAppRole(client)` | "**Then** drop privileges. Order is not stylistic." |
+| **238** | `COMMIT` | "`SET LOCAL` reverts on `COMMIT` *and* `ROLLBACK` — so one user's tier can never leak onto the next user of a pooled connection." |
+| **255–279** | `withSenderTransaction` | "Same treatment for `chat_history` via `app.sender_id` (line **262**, role switch at **266**). Without the role switch, any sender could read any sender's history." |
 | **149–160** | **`withServiceClient` — the escape hatch** | "One bypass exists, deliberately. Separate pool, never switches role. The evaluation harness's **positive control** needs it: proving a canary is reachable at all is what makes 0% leakage mean anything. Never reachable from a user-facing path." |
-| **691–700** vs **748–756** | `querySimilarDocumentsByStrategy` (→ `withRlsTransaction`) vs `querySimilarDocumentsBypassRls` (→ `withServiceClient`) | "The secured and unsecured experiment arms, side by side. Same retrieval SQL, different transaction wrapper. That is the entire independent variable." |
+| **692–701** vs **749–757** | `querySimilarDocumentsByStrategy` (→ `withRlsTransaction`) vs `querySimilarDocumentsBypassRls` (→ `withServiceClient`) | "The secured and unsecured experiment arms, side by side. Same retrieval SQL, different transaction wrapper. That is the entire independent variable." |
 
 ### Optional pane 3 — `app/api/whatsapp/webhook/route.ts` (250 lines)
 

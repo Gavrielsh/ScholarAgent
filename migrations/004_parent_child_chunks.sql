@@ -62,10 +62,10 @@ CREATE INDEX IF NOT EXISTS knowledge_base_is_parent_idx
 -- -----------------------------------------------------------------------------
 -- 3. Privileges
 -- -----------------------------------------------------------------------------
--- Re-asserted per the rule in CLAUDE.md: 003's GRANT and ALTER DEFAULT
+-- Re-asserted per the rule in CLAUDE.md: 001's GRANT and ALTER DEFAULT
 -- PRIVILEGES only cover objects created by the role that ran them. Column
 -- additions inherit the table's existing grants, so this is belt-and-braces —
--- but a migration applied by a different role than 003 would otherwise leave
+-- but a migration applied by a different role than 001 would otherwise leave
 -- the app role without access, and that failure is silent until a query runs.
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON knowledge_base TO scholaragent_app;
@@ -73,7 +73,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON knowledge_base TO scholaragent_app;
 -- -----------------------------------------------------------------------------
 -- 4. Self-check
 -- -----------------------------------------------------------------------------
--- Same contract as 003: the database must not be stamped with this migration
+-- Same contract as 001 §10: the database must not be stamped with this migration
 -- while the guarantee the comment above depends on is absent. Fails the whole
 -- transaction (and the stamp) if RLS is not still forced on knowledge_base, or
 -- if the app role has regained a privilege that bypasses policies.
@@ -111,7 +111,7 @@ $$;
 -- 5. Stamp
 -- -----------------------------------------------------------------------------
 -- run.ts does not record a version after applying a file; each migration stamps
--- itself, as 001 and 003 do. Without this the file re-applies on every
+-- itself, as 001 does. Without this the file re-applies on every
 -- `npm run migrate`.
 
 INSERT INTO schema_migrations (version) VALUES ('004_parent_child_chunks')

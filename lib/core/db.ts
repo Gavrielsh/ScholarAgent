@@ -162,15 +162,16 @@ export async function withServiceClient<T>(fn: (client: PoolClient) => Promise<T
 /**
  * The unprivileged role RLS policies are evaluated against.
  *
- * 001_initial_schema.sql FORCEs row-level security, but its own comment states
- * the limit: "superuser / BYPASSRLS still bypass". The application was
- * connecting as a superuser, so no policy was ever evaluated — every tier could
- * read every tier. Dropping to a NOBYPASSRLS role inside the transaction is
- * what makes the policies take effect.
+ * 001_initial_schema.sql FORCEs row-level security, but a superuser or a role
+ * holding BYPASSRLS skips every policy regardless. The connecting (owner) role
+ * is often exactly that — the Postgres Docker image always creates it as a
+ * superuser — so the owner connection is kept out of the request path:
+ * dropping to this NOBYPASSRLS role inside each transaction is what makes the
+ * policies take effect (defense in depth).
  *
  * Overridable because a managed database may already provide an equivalent
  * role under another name. Whatever it is, it must hold neither SUPERUSER nor
- * BYPASSRLS; migration 003 asserts that for the default and fails if violated.
+ * BYPASSRLS; migration 001 asserts that for the default and fails if violated.
  */
 const APP_ROLE = process.env.PG_APP_ROLE ?? "scholaragent_app";
 
@@ -199,7 +200,7 @@ export function assertSqlIdentifier(name: string, source: string): string {
  * SET LOCAL is transaction-scoped: it reverts on COMMIT and on ROLLBACK, so the
  * role cannot leak onto the next user of a pooled connection.
  *
- * This fails closed. If the role does not exist — migration 003 has not been
+ * This fails closed. If the role does not exist — migration 001 has not been
  * applied — the transaction aborts rather than proceeding. Continuing would run
  * the query as the connecting superuser with every policy bypassed, which is
  * the vulnerability itself, and it would do so silently.
@@ -213,7 +214,7 @@ async function enterAppRole(client: PoolClient): Promise<void> {
       `Could not assume the RLS application role "${APP_ROLE}": ${detail}. ` +
         "Row-level security would not be enforced without it, so this query was " +
         "refused rather than run with policies bypassed. Apply " +
-        "migrations/003_enforce_rls_role.sql (npm run migrate), or set PG_APP_ROLE " +
+        "migrations/001_initial_schema.sql (npm run migrate), or set PG_APP_ROLE " +
         "to an existing NOBYPASSRLS role the connection is a member of."
     );
   }

@@ -149,27 +149,27 @@ flowchart TB
 
 ### The security boundary, precisely
 
-Enabling `FORCE ROW LEVEL SECURITY` was **not sufficient**, and discovering why
-is one of this project's findings. The migration's own comment states the limit:
+`FORCE ROW LEVEL SECURITY` alone is **not sufficient**, and the architecture is
+designed around that from the first migration. In PostgreSQL, any role holding
+`rolsuper` or `rolbypassrls` skips every policy regardless of `FORCE`, and the
+connecting role is routinely exactly that: the Postgres Docker entrypoint always
+creates `POSTGRES_USER` as a superuser, and the same is true of any managed
+database whose application role happens to be privileged.
 
-> *"FORCE RLS applies policies to the table owner as well (superuser /
-> BYPASSRLS still bypass)."*
+The design is therefore **defense in depth through identity separation**:
 
-The application was connecting as a `SUPERUSER`. In PostgreSQL, any role holding
-`rolsuper` or `rolbypassrls` skips every policy regardless of `FORCE` — so the
-policies were never evaluated. Empirically: **all five planted canaries at L0/L1
-were retrievable from L1 and L2.** Every tier could read every tier, silently,
-while the schema looked secure.
+| Identity | Privileges | Used for |
+|---|---|---|
+| Owner / migrator (the `DATABASE_URL` role) | Owns the schema; may be a superuser | Applying migrations and opening connections. **Never evaluated against RLS and never serves a request.** |
+| `scholaragent_app` | `NOLOGIN NOSUPERUSER NOBYPASSRLS`, table-level DML only | Every user-facing query, entered with `SET LOCAL ROLE` inside the transaction. |
 
-The local cause is the Postgres Docker entrypoint, which always creates
-`POSTGRES_USER` as a superuser. The same hole exists on any managed database
-whose application role happens to be privileged — so this is not a
-local-development curiosity.
-
-The fix is a role with no way to bypass, entered *inside each transaction*:
+The owner connection only *carries* the session; policies are always evaluated
+against `scholaragent_app`. The role, its grants, `ENABLE`/`FORCE ROW LEVEL
+SECURITY` and all policies are created together, in dependency order, in the
+baseline migration:
 
 ```sql
--- migrations/003_enforce_rls_role.sql
+-- migrations/001_initial_schema.sql  (§8)
 CREATE ROLE scholaragent_app
   NOLOGIN NOSUPERUSER NOBYPASSRLS
   NOCREATEDB NOCREATEROLE NOREPLICATION;
@@ -192,7 +192,7 @@ Four properties make this a control rather than a convention:
 3. **Fail-closed.** If the role is missing, `enterAppRole` throws and the query
    is refused — rather than running as superuser with every policy bypassed,
    which is the vulnerability itself, arriving silently.
-4. **Self-verifying.** Migration 003 raises if the role ever holds `SUPERUSER`
+4. **Self-verifying.** Migration 001 raises if the role ever holds `SUPERUSER`
    or `BYPASSRLS`, or if `FORCE ROW LEVEL SECURITY` is off on any protected
    table. A database cannot be stamped "secured" while it is not.
 
@@ -410,7 +410,7 @@ Presenting this live? See **[`docs/demo_runbook.md`](docs/demo_runbook.md)**.
 | `lib/core/` | `db.ts` (RLS transactions, hybrid retrieval, RRF), queue, redis, telemetry, IR metrics |
 | `lib/security/` | `auth.ts` (four-tier RBAC), `crypto.ts` (HMAC), `guardrails.ts` (PII, distress handoff) |
 | `lib/domain/` | `chat/` (agent, RAG, LLM adapters, re-rank), `ingestion/`, `whatsapp/`, `admin/` |
-| `migrations/` | `001` baseline schema · `002` knowledge gaps · `003` the RLS role fix |
+| `migrations/` | `001` baseline schema, `scholaragent_app` role, grants and RLS · `002` knowledge gaps · `004` parent/child chunks · `005` user memories |
 | `scripts/` | Ingestion, benchmark, evaluation, canary seeding, qrels grading |
 | `local_data/eval_corpus/` | The 15-document synthetic Hebrew corpus (L0/L1/L2) |
 | `docs/` | Research proposal, empirical results, demo runbook |

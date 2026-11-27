@@ -2,9 +2,9 @@
 -- ScholarAgent — Canonical Baseline Schema
 -- PostgreSQL 16 + pgvector
 --
--- This file is the single source of truth for a fresh database. It is the
--- production schema as of the former incremental series 001–009 (last patch:
--- RLS tightening). Apply with:
+-- This file is the single source of truth for a fresh database: tables,
+-- indexes, the cascade trigger, the least-privilege application role and its
+-- grants, and every row-level security policy. Apply with:
 --
 --   npm run migrate
 --   -- or --
@@ -21,6 +21,21 @@
 --     (stock PostgreSQL has no Hebrew stemmer).
 --   * Statements are idempotent (IF NOT EXISTS / DROP IF EXISTS) so the
 --     file may be re-applied safely on an already-bootstrapped instance.
+--
+-- Security model (defense in depth)
+--   Two database identities are separated by design:
+--     1. The connecting / owner role (whatever DATABASE_URL names). It owns the
+--        schema and applies migrations. On the Postgres Docker image this is
+--        always a SUPERUSER, and any role with rolsuper or rolbypassrls skips
+--        every RLS policy regardless of FORCE ROW LEVEL SECURITY.
+--     2. `scholaragent_app` (§8) — NOLOGIN, NOSUPERUSER, NOBYPASSRLS. The
+--        application enters it with `SET LOCAL ROLE` inside every RLS
+--        transaction (lib/core/db.ts), so policies are always evaluated.
+--   Owner privileges therefore never carry application traffic, and the policies
+--   in §9 are the only thing that decides which rows a request can see.
+--
+-- Section order is dependency-safe:
+--   tables → role → grants → ENABLE + FORCE RLS → policies → self-check.
 -- =============================================================================
 
 
@@ -257,11 +272,101 @@ CREATE TRIGGER trg_ingested_documents_cascade_chunks
 
 
 -- =============================================================================
--- 8. Row-Level Security (RLS) — Tightened State
+-- 8. Application Role & Privileges (least privilege)
+-- =============================================================================
+-- Every table above exists by now, so the grants below cover them. Tables added
+-- by later migrations are covered by ALTER DEFAULT PRIVILEGES.
+--
+-- NOLOGIN is intentional: nothing ever connects as this role, it is only
+-- entered via SET LOCAL ROLE from the connecting user. That keeps the number of
+-- credentials unchanged and needs no connection-string change. (A stronger
+-- arrangement is for the application to connect as this role directly, with
+-- LOGIN and no superuser anywhere in the path; a superuser that immediately
+-- drops to a NOBYPASSRLS role is equivalent for policy evaluation.)
+--
+-- The ELSE branch is not redundant: a pre-existing role of this name might have
+-- been created with BYPASSRLS, which would silently disable every policy.
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'scholaragent_app') THEN
+    CREATE ROLE scholaragent_app
+      NOLOGIN
+      NOSUPERUSER
+      NOBYPASSRLS
+      NOCREATEDB
+      NOCREATEROLE
+      NOREPLICATION;
+  ELSE
+    ALTER ROLE scholaragent_app
+      NOLOGIN
+      NOSUPERUSER
+      NOBYPASSRLS
+      NOCREATEDB
+      NOCREATEROLE
+      NOREPLICATION;
+  END IF;
+END
+$$;
+
+COMMENT ON ROLE scholaragent_app IS
+  'Unprivileged application role. Entered via SET LOCAL ROLE so RLS policies '
+  'are always evaluated, never bypassed by the owner/superuser connection. '
+  'Must never hold SUPERUSER or BYPASSRLS.';
+
+-- RLS restricts WHICH ROWS are visible; it does not grant table access. Without
+-- these the role would be denied outright rather than filtered.
+
+GRANT USAGE ON SCHEMA public TO scholaragent_app;
+
+GRANT SELECT, INSERT, UPDATE, DELETE
+  ON ALL TABLES IN SCHEMA public
+  TO scholaragent_app;
+
+GRANT USAGE, SELECT
+  ON ALL SEQUENCES IN SCHEMA public
+  TO scholaragent_app;
+
+-- Future tables and sequences. Default privileges attach to objects created by
+-- the role that runs this statement, which is the role the migration runner
+-- connects as — the same role that creates later tables. A migration applied by
+-- a DIFFERENT role is not covered, so any migration that adds a table should
+-- re-run the GRANT block above.
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO scholaragent_app;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO scholaragent_app;
+
+-- Least privilege: migration bookkeeping is the runner's business, and the
+-- runner connects as the owner, never as this role. Read is left in place so a
+-- diagnostic query under the app role can still report schema state.
+REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM scholaragent_app;
+
+-- SET ROLE requires membership in the target role. Granted to whichever role is
+-- applying this migration, which is the role the connection pool uses.
+-- Idempotent: re-granting an existing membership is a no-op.
+DO $$
+BEGIN
+  EXECUTE format('GRANT scholaragent_app TO %I', current_user);
+END
+$$;
+
+
+-- =============================================================================
+-- 9. Row-Level Security (RLS) — Enable, Force, Policies
 -- =============================================================================
 -- Dual-layer model: application RBAC (assertMinimumLevel / writePermissionLevel)
 -- plus these database policies. FORCE RLS applies policies to the table owner
--- as well (superuser / BYPASSRLS still bypass).
+-- as well; the owner/superuser connection is kept out of the request path by
+-- the SET LOCAL ROLE scholaragent_app switch (§8), since a role with rolsuper
+-- or rolbypassrls would otherwise skip every policy.
+--
+-- These three tables are the RLS-protected set. A later migration that adds a
+-- table holding tier-sensitive rows must itself ENABLE + FORCE RLS and write its
+-- own policies; neither the GRANTs above nor this section do it for new tables.
+-- (knowledge_gaps, migration 002, deliberately has no RLS.)
 --
 -- Session GUCs (SET LOCAL / set_config(..., true) inside a transaction):
 --   app.user_permission_level  — integer 0..3 as text
@@ -391,6 +496,43 @@ CREATE POLICY rls_chat_history_insert ON chat_history
     nullif(current_setting('app.sender_id', true), '') IS NOT NULL
     AND sender_id = current_setting('app.sender_id', true)
   );
+
+
+-- =============================================================================
+-- 10. Self-check
+-- =============================================================================
+-- Fails the migration rather than leaving a role that cannot enforce anything.
+-- run.ts applies each file as one implicit transaction, so a RAISE here rolls
+-- the whole migration back and nothing is stamped: a database cannot be marked
+-- "secured" while it is not.
+
+DO $$
+DECLARE
+  bad_role   text;
+  unforced   text;
+BEGIN
+  SELECT rolname INTO bad_role
+    FROM pg_roles
+   WHERE rolname = 'scholaragent_app'
+     AND (rolsuper OR rolbypassrls);
+
+  IF bad_role IS NOT NULL THEN
+    RAISE EXCEPTION
+      'scholaragent_app holds SUPERUSER or BYPASSRLS; RLS would not be enforced.';
+  END IF;
+
+  SELECT string_agg(c.relname, ', ') INTO unforced
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = 'public'
+     AND c.relname IN ('knowledge_base', 'ingested_documents', 'chat_history')
+     AND NOT (c.relrowsecurity AND c.relforcerowsecurity);
+
+  IF unforced IS NOT NULL THEN
+    RAISE EXCEPTION 'FORCE ROW LEVEL SECURITY is not active on: %', unforced;
+  END IF;
+END
+$$;
 
 
 -- =============================================================================

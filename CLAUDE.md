@@ -14,7 +14,7 @@ protect that claim — changing them silently invalidates the thesis results in
 ## Commands
 
 ```sh
-npm test                # jest — 170 tests across 16 suites, no DB or network needed
+npm test                # jest — 230 tests across 20 suites, no DB or network needed
 npx tsc --noEmit        # typecheck (CI runs this before lint and tests)
 npm run lint            # next lint
 npm run migrate         # apply migrations/*.sql in filename order
@@ -73,7 +73,7 @@ lib/domain/
   whatsapp/ webhook.ts (parsing/safety), worker.ts (the real work), client.ts, types.ts
   admin/    auditLogs.ts
 
-migrations/                  001 baseline, 002 knowledge gaps, 003 RLS role, run.ts
+migrations/                  001 baseline + RLS role/grants/policies, 002 knowledge gaps, 004, 005, run.ts
 scripts/                     Operational entry points, snake_case, via `node --import tsx`
 local_data/eval_corpus/      15-document L0/L1/L2 synthetic corpus for the thesis
 docs/                        Research proposal, empirical results, demo runbook
@@ -94,15 +94,18 @@ Imports use the `@/` alias (`tsconfig.json` paths, mirrored in
 ## RLS role enforcement — the load-bearing invariant
 
 `migrations/001_initial_schema.sql` enables and FORCEs row-level security on
-`knowledge_base`, `ingested_documents` and `chat_history`. That was **not
-enough**: the application connected as a `SUPERUSER`, and in PostgreSQL any role
-with `rolsuper` or `rolbypassrls` skips every policy regardless of `FORCE`.
-Empirically, all five seeded canaries at L0/L1 were readable from L1 and L2 —
-every tier could read every tier. The local cause is the Postgres Docker
-entrypoint, which always creates `POSTGRES_USER` as a superuser, but the same
-hole exists on any managed database whose app role happens to be privileged.
+`knowledge_base`, `ingested_documents` and `chat_history`. By design that is
+**not enough on its own**: in PostgreSQL any role with `rolsuper` or
+`rolbypassrls` skips every policy regardless of `FORCE`, and the connecting
+role usually is one — the Postgres Docker entrypoint always creates
+`POSTGRES_USER` as a superuser, and a managed database's app role may be
+privileged too. So identity is separated up front (defense in depth): the
+connecting role is only the owner/migrator and never serves a request, while
+every request runs as the least-privilege `scholaragent_app`.
 
-The fix is in `migrations/003_enforce_rls_role.sql`:
+The role, grants, `ENABLE`/`FORCE` RLS and policies live together in
+`migrations/001_initial_schema.sql`, in dependency order (tables → role →
+grants → ENABLE + FORCE → policies → self-check):
 
 ```sql
 CREATE ROLE scholaragent_app
@@ -127,14 +130,14 @@ Rules that follow from this, all of which matter:
 - **`SET LOCAL` is transaction-scoped.** It reverts on `COMMIT` and `ROLLBACK`,
   so one user's tier can never leak onto the next user of a pooled connection.
 - **`enterAppRole` fails closed** (`lib/core/db.ts:207`). If the role is missing
-  — migration 003 was not applied — the transaction throws rather than running
+  — migration 001 was not applied — the transaction throws rather than running
   as superuser with every policy bypassed. Never "handle" this error by
-  continuing; that re-creates the original vulnerability silently.
+  continuing; that silently disables the whole control.
 - **`assertSqlIdentifier`** (`lib/core/db.ts:189`) is the injection boundary.
   `SET LOCAL ROLE` takes an identifier, so `PG_APP_ROLE` is interpolated, not
   bound. It is exported purely so it can be tested directly
   (`lib/core/db.identifier.test.ts`).
-- **Migration 003 self-checks.** A `DO` block raises if the role holds
+- **Migration 001 self-checks** (§10). A `DO` block raises if the role holds
   `SUPERUSER`/`BYPASSRLS` or if `FORCE ROW LEVEL SECURITY` is off on any of the
   three tables, so a database cannot be stamped "secured" while it is not.
 - **The GUC names are `app.user_permission_level` and `app.sender_id`.** There
@@ -152,7 +155,7 @@ non-zero if either its positive or negative control fails.
 
 ### Adding a table that holds tier-sensitive rows
 
-Migration 003's GRANTs and `ALTER DEFAULT PRIVILEGES` cover future tables only
+Migration 001's GRANTs and `ALTER DEFAULT PRIVILEGES` (§8) cover future tables only
 when applied by the same role. A new migration adding a sensitive table must
 itself `ENABLE` + `FORCE ROW LEVEL SECURITY`, write its own policies, and re-run
 the GRANT block. `knowledge_gaps` (migration 002) deliberately has neither.
@@ -233,7 +236,7 @@ the durability mechanism. Do not "fix" these into 200s.
 
 ## Tests
 
-`npm test` is the baseline: **170 tests, 16 suites, all passing**, in roughly
+`npm test` is the baseline: **230 tests, 20 suites, all passing**, in roughly
 two seconds. The suite needs no database, no Redis and no network — every
 external dependency is faked. Keep it that way; a test that needs
 `docker compose up` will not run in CI.
@@ -268,9 +271,9 @@ module boundaries on purpose.
   re-applies on every `npm run migrate`. It is idempotent, so this is harmless,
   but do not assume `schema_migrations` reflects it. New migrations **must** end
   with their own `INSERT INTO schema_migrations … ON CONFLICT DO NOTHING`, as
-  001 and 003 do.
-- **Numbering jumped 002 → 003 intentionally** (two files numbered 002 would
-  both apply in filename order with nothing to disambiguate them).
+  001 does.
+- **Numbering jumps 002 → 004 intentionally.** The RLS role/grants migration
+  that was once 003 is now folded into 001, and the numbers were not reused.
 - **Retrieval arms share one code path.** All four arms in
   `lib/domain/ingestion/retrievalArms.ts` go through the same `executeRetrieval`
   in `lib/core/db.ts` and differ only by `strategy`; the query embedding is

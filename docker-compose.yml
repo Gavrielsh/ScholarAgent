@@ -22,11 +22,10 @@ services:
       #
       # NOTE: the Postgres entrypoint always creates POSTGRES_USER as a
       # SUPERUSER, and a superuser bypasses every row-level security policy
-      # regardless of FORCE ROW LEVEL SECURITY. That is why all five seeded
-      # canaries were readable from every tier. It is safe now only because
-      # migrations/003_enforce_rls_role.sql adds a NOBYPASSRLS role and
-      # withRlsTransaction drops into it with SET LOCAL ROLE before querying.
-      # Do not rely on this connection role being unprivileged.
+      # regardless of FORCE ROW LEVEL SECURITY. By design this role is only the
+      # owner/migrator: migrations/001_initial_schema.sql creates a NOBYPASSRLS
+      # role and withRlsTransaction drops into it with SET LOCAL ROLE before
+      # querying. Do not rely on this connection role being unprivileged.
       POSTGRES_USER: ${POSTGRES_USER:-user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
       POSTGRES_DB: ${POSTGRES_DB:-scholaragent}

@@ -1,11 +1,11 @@
 // Apply pending SQL migrations in filename order.
 // Usage: npm run migrate
 //
-// After schema consolidation the only file is 001_initial_schema.sql — the
-// production schema formerly reached by incremental patches 001–009.
-// Fresh databases apply that baseline once. Databases that already ran the
-// incremental series (stamped 009_rls_tighten) are recorded as
-// 001_initial_schema without re-executing DDL.
+// 001_initial_schema.sql is the consolidated baseline: tables, the
+// least-privilege scholaragent_app role and its grants, and all RLS policies.
+// Later files (002, 004, 005, ...) are applied after it in filename order.
+// Databases that already ran the legacy incremental series (stamped
+// 009_rls_tighten) are recorded as 001_initial_schema without re-executing DDL.
 
 import { readFile, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";

@@ -13,7 +13,7 @@
 -- table's sensitivity: it must never be readable by another sender. Per the
 -- rule in CLAUDE.md, a new migration adding a sensitive table must itself
 -- ENABLE + FORCE ROW LEVEL SECURITY, write its own policies, and re-run the
--- GRANT block from 003 — `knowledge_gaps` (002) deliberately has none of that,
+-- GRANT block from 001 — `knowledge_gaps` (002) deliberately has none of that,
 -- and this table is not in that category.
 --
 -- Scoping is by `app.sender_id`, matching the chat_history policies in 001
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS user_memories (
 -- 2. Row-level security
 -- -----------------------------------------------------------------------------
 -- FORCE as well as ENABLE: without FORCE the policies would not apply to the
--- table owner, which is exactly the hole 003 exists to close.
+-- table owner, which the least-privilege role switch in 001 §8 exists to guard.
 
 ALTER TABLE user_memories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_memories FORCE ROW LEVEL SECURITY;
@@ -102,22 +102,24 @@ CREATE POLICY rls_user_memories_update ON user_memories
 -- -----------------------------------------------------------------------------
 -- 3. Privileges
 -- -----------------------------------------------------------------------------
--- RLS restricts WHICH ROWS are visible; it does not grant table access. 003's
+-- RLS restricts WHICH ROWS are visible; it does not grant table access. 001's
 -- ALTER DEFAULT PRIVILEGES only covers tables created by the role that ran it,
 -- so a migration applied by a different role would leave the app role locked
--- out of this table entirely. Re-asserted explicitly, as 003's comment requires
+-- out of this table entirely. Re-asserted explicitly, as 001's comment requires
 -- of any migration that adds a table.
 --
 -- No DELETE: nothing in the system deletes a memory, and withholding it means a
--- compromised app path cannot erase a sender's summary.
+-- compromised app path cannot erase a sender's summary. 001's default
+-- privileges grant DELETE on every new table, so it is revoked explicitly.
 
 GRANT USAGE ON SCHEMA public TO scholaragent_app;
 GRANT SELECT, INSERT, UPDATE ON user_memories TO scholaragent_app;
+REVOKE DELETE ON user_memories FROM scholaragent_app;
 
 -- -----------------------------------------------------------------------------
 -- 4. Self-check
 -- -----------------------------------------------------------------------------
--- Same contract as 003 and 004: the database must not be stamped with this
+-- Same contract as 001 §10 and 004: the database must not be stamped with this
 -- migration while the guarantees above are absent. Raising here aborts the
 -- transaction, so the stamp at the bottom never lands.
 
@@ -166,7 +168,7 @@ $$;
 -- 5. Stamp
 -- -----------------------------------------------------------------------------
 -- run.ts does not record a version after applying a file; each migration stamps
--- itself, as 001, 003 and 004 do.
+-- itself, as 001 and 004 do.
 
 INSERT INTO schema_migrations (version) VALUES ('005_user_memories')
   ON CONFLICT (version) DO NOTHING;
