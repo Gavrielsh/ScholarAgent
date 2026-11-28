@@ -12,6 +12,97 @@
 import type { AccessLevel } from "@/lib/core/db/accessLevel";
 
 // ---------------------------------------------------------------------------
+// LLM usage and cost
+// ---------------------------------------------------------------------------
+
+/** Token counts for ONE provider call, as the provider itself reported them. */
+export interface LlmUsage {
+  /** The concrete model id the request was sent to (after alias resolution). */
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+}
+
+/** USD per one million tokens. */
+interface ModelPrice {
+  inputPerMTok: number;
+  outputPerMTok: number;
+}
+
+/**
+ * List prices (standard tier, no batch / cache discounts) for the models this
+ * repo defaults to — see `.env.example` and `lib/domain/chat/llm.ts`.
+ *
+ * Keys are matched as a case-insensitive PREFIX, longest first, so a dated id
+ * such as `claude-haiku-4-5-20251001` prices like `claude-haiku-4-5`.
+ *
+ * These are published list prices at the time of writing, not a billing
+ * statement: they drift, and discounts (prompt caching, batch) are not modelled.
+ * Treat the result as an estimate suitable for comparing configurations and for
+ * budgeting, and re-check the provider price pages before quoting it externally.
+ */
+const MODEL_PRICING_USD_PER_MTOK: Readonly<Record<string, ModelPrice>> = {
+  // Anthropic — claude-sonnet-4-6 (CLAUDE_MODEL default), claude-haiku-4-5 (fast tier).
+  "claude-sonnet-4-6": { inputPerMTok: 3, outputPerMTok: 15 },
+  "claude-haiku-4-5": { inputPerMTok: 1, outputPerMTok: 5 },
+  // Google — gemini-3.5-flash (GEMINI_MODEL / GEMINI_FAST_MODEL default).
+  "gemini-3.5-flash": { inputPerMTok: 1.5, outputPerMTok: 9 },
+  // OpenAI — gpt-4o-mini (OpenAI adapter default).
+  "gpt-4o-mini": { inputPerMTok: 0.15, outputPerMTok: 0.6 },
+};
+
+const PRICING_KEYS_LONGEST_FIRST = Object.keys(MODEL_PRICING_USD_PER_MTOK).sort(
+  (a, b) => b.length - a.length
+);
+
+function lookupModelPrice(model: string): ModelPrice | undefined {
+  const needle = model.trim().toLowerCase();
+  if (!needle) return undefined;
+  const key = PRICING_KEYS_LONGEST_FIRST.find((k) => needle.startsWith(k));
+  return key ? MODEL_PRICING_USD_PER_MTOK[key] : undefined;
+}
+
+export interface LlmCostBreakdown {
+  inputUsd: number;
+  outputUsd: number;
+  totalUsd: number;
+}
+
+/**
+ * Prices one call. Returns `undefined` — never 0 — for a model with no price
+ * (mock, or anything not in the table): "unknown" and "free" must stay
+ * distinguishable, or a misspelt model id would silently report zero spend.
+ */
+export function computeLlmCost(usage: LlmUsage): LlmCostBreakdown | undefined {
+  const price = lookupModelPrice(usage.model);
+  if (!price) return undefined;
+
+  const tokens = (n: number) => (Number.isFinite(n) && n > 0 ? n : 0);
+  const inputUsd = (tokens(usage.promptTokens) / 1_000_000) * price.inputPerMTok;
+  const outputUsd = (tokens(usage.completionTokens) / 1_000_000) * price.outputPerMTok;
+  return { inputUsd, outputUsd, totalUsd: inputUsd + outputUsd };
+}
+
+/** Total USD for one call, or `undefined` when the model is unpriced. */
+export function estimateLlmCostUsd(usage: LlmUsage): number | undefined {
+  return computeLlmCost(usage)?.totalUsd;
+}
+
+/**
+ * Sums several calls. `undefined` when NO call could be priced; calls with an
+ * unpriced model are skipped rather than poisoning the total, so a partially
+ * priced query reports the spend that is known.
+ */
+export function sumLlmCostUsd(usages: readonly LlmUsage[]): number | undefined {
+  let total: number | undefined;
+  for (const usage of usages) {
+    const cost = estimateLlmCostUsd(usage);
+    if (cost !== undefined) total = (total ?? 0) + cost;
+  }
+  return total;
+}
+
+// ---------------------------------------------------------------------------
 // Tracing (Langfuse)
 // ---------------------------------------------------------------------------
 
@@ -28,13 +119,19 @@ export interface TraceMessage {
 }
 
 export interface BaselineTraceHandles {
-  endRoot: (output: { answer: string; chunkIds: string[]; latencyMs: number }) => void;
+  endRoot: (output: {
+    answer: string;
+    chunkIds: string[];
+    latencyMs: number;
+    /** Estimated spend for the query's LLM calls; absent when unpriced. */
+    executionCostUsd?: number;
+  }) => void;
   retrievalSpan: {
     end: (output: { chunkIds: string[]; fusedCount: number }) => void;
   };
   /** Call after the final `messages` array for the baseline LLM is assembled. */
   attachLlmGeneration: (messages: readonly TraceMessage[]) => {
-    end: (output: { answer: string }) => void;
+    end: (output: { answer: string; usage?: LlmUsage }) => void;
   };
 }
 
@@ -48,7 +145,19 @@ function noopTrace(): BaselineTraceHandles {
 }
 
 interface LangfuseObservation {
-  end?: (data?: { output?: unknown }) => void;
+  end?: (data?: {
+    output?: unknown;
+    model?: string;
+    usage?: {
+      input: number;
+      output: number;
+      total: number;
+      unit: "TOKENS";
+      inputCost?: number;
+      outputCost?: number;
+      totalCost?: number;
+    };
+  }) => void;
 }
 
 interface LangfuseTrace {
@@ -98,7 +207,7 @@ export async function startBaselineRagTrace(args: {
     const retrieval = root.span({ name: "retrieval", input: { query: args.query } });
 
     return {
-      endRoot: (output: { answer: string; chunkIds: string[]; latencyMs: number }) => {
+      endRoot: (output) => {
         if (typeof root.update === "function") {
           root.update({ output });
         }
@@ -116,8 +225,30 @@ export async function startBaselineRagTrace(args: {
           input: messages,
         });
         return {
-          end: (output: { answer: string }) => {
-            if (typeof generation.end === "function") generation.end({ output });
+          end: ({ answer, usage }) => {
+            if (typeof generation.end !== "function") return;
+            if (!usage) {
+              generation.end({ output: { answer } });
+              return;
+            }
+            const cost = computeLlmCost(usage);
+            generation.end({
+              output: { answer },
+              model: usage.model,
+              usage: {
+                input: usage.promptTokens,
+                output: usage.completionTokens,
+                total: usage.promptTokens + usage.completionTokens,
+                unit: "TOKENS",
+                ...(cost
+                  ? {
+                      inputCost: cost.inputUsd,
+                      outputCost: cost.outputUsd,
+                      totalCost: cost.totalUsd,
+                    }
+                  : {}),
+              },
+            });
           },
         };
       },
@@ -482,6 +613,8 @@ export interface RagasJudge {
     messages: RagasJudgeMessage[];
     temperature?: number;
     responseSchema?: Record<string, unknown>;
+    /** Receives the provider-reported token usage of the call, when there is one. */
+    onUsage?: (usage: LlmUsage) => void;
   }): Promise<string>;
 }
 
@@ -507,6 +640,11 @@ export interface RagasScores {
   faithfulness: number;
   answerRelevancy: number;
   latencyMs?: number;
+  /**
+   * Estimated USD spent by the judge call that produced these scores.
+   * Absent (never 0) on the heuristic / mock paths and for unpriced models.
+   * It excludes the answer-generation call; add `BaselineRagCoreResult.executionCostUsd`.
+   */
   executionCostUsd?: number;
 }
 
@@ -595,6 +733,7 @@ export async function evaluateRagas(
   }
 
   const adapter = judgeFactory();
+  const usages: LlmUsage[] = [];
   const contextBlock = input.contexts.map((c, i) => `[${i + 1}] ${c}`).join("\n\n");
 
   const judgePrompt = `You are an evaluation judge for a Hebrew educational RAG system.
@@ -613,6 +752,7 @@ Ground truth (may be empty): ${input.groundTruth ?? ""}`;
   try {
     const raw = await adapter.generateText({
       temperature: 0,
+      onUsage: (usage) => usages.push(usage),
       messages: [
         { role: "system", content: "Return compact JSON only. Keys: contextPrecision, contextRecall, faithfulness, answerRelevancy (numbers 0-1)." },
         { role: "user", content: judgePrompt },
@@ -640,6 +780,7 @@ Ground truth (may be empty): ${input.groundTruth ?? ""}`;
       faithfulness: clamp01(parsed.faithfulness),
       answerRelevancy: clamp01(parsed.answerRelevancy),
       latencyMs: Date.now() - started,
+      executionCostUsd: sumLlmCostUsd(usages),
     };
   } catch {
     return { ...heuristicScores(input), latencyMs: Date.now() - started };

@@ -35,7 +35,7 @@ function assertSenderId(senderId: string): void {
 /**
  * Appends turns, skipping any whose `message_id` is already stored.
  *
- * Idempotent by construction (see migration 006): a BullMQ retry replays the
+ * Idempotent by construction (see migration 001): a BullMQ retry replays the
  * exact same `message_id`, so the conflict clause turns what used to be a
  * duplicate row into a no-op. Returns how many rows were actually written so
  * callers can tell a fresh write from a replay.

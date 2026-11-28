@@ -1,11 +1,14 @@
 import {
   buildChunkMetadata,
   buildContextualHeader,
+  buildParentChildRecords,
   chunkTextParentChild,
   detectSectionHeading,
   DocumentLimitError,
   ingestDocument,
+  planParentChildChunks,
   resolveClassificationLevel,
+  withContextualHeader,
 } from "@/lib/domain/ingestion/pipeline";
 
 // The persistence layer serialises this payload verbatim, and the delete path
@@ -215,5 +218,120 @@ describe("ingestDocument — chunk ceiling", () => {
 
     await expect(attempt).rejects.toBeInstanceOf(DocumentLimitError);
     await expect(attempt).rejects.toMatchObject({ limit: 400 });
+  });
+});
+
+/**
+ * Reconciliation rebuilds a document with `planParentChildChunks` +
+ * `buildParentChildRecords`. These pin that the rebuilt rows have the same shape
+ * live ingestion writes: 1400/400 parent/child sizes, a contextual header on
+ * every stored body, parents first with no embedding, children linked by index.
+ */
+describe("reconciled parent/child chunking", () => {
+  const section = (heading: string, n: number) =>
+    `${heading}\n\n` +
+    Array.from({ length: n }, (_, i) => `זו פסקה מספר ${i} בתוך ${heading} עם תוכן ממשי להדגמה.`)
+      .join(" ");
+  const text = [section("## נהלי החזר הוצאות", 40), section("## בטיחות בפעילות", 40)].join("\n\n");
+
+  const plan = planParentChildChunks({ text, filename: "policy.pdf", classificationLevel: 2 });
+  const documentId = "11111111-1111-1111-1111-111111111111";
+  const recordsFor = (extra?: Record<string, unknown>) =>
+    buildParentChildRecords({
+      ...plan,
+      vectors: plan.children.map(() => new Array(768).fill(0.1)),
+      documentId,
+      filename: "policy.pdf",
+      mimeType: "application/pdf",
+      uploadedByUserId: "u1",
+      classificationLevel: 2,
+      extra,
+    });
+
+  it("uses the live parent/child budgets, not the flat 1500/200 chunker", () => {
+    expect(plan.parents.length).toBeGreaterThan(1);
+    expect(plan.children.length).toBeGreaterThan(plan.parents.length);
+    expect(Math.max(...plan.children.map((c) => c.text.length))).toBeLessThanOrEqual(400);
+    expect(Math.max(...plan.parents.map((p) => p.text.length))).toBeLessThanOrEqual(1400);
+  });
+
+  it("prefixes every parent and child body with the contextual header", () => {
+    expect(plan.parentTexts).toHaveLength(plan.parents.length);
+    expect(plan.childTexts).toHaveLength(plan.children.length);
+
+    for (const body of [...plan.parentTexts, ...plan.childTexts]) {
+      expect(body.startsWith("[מסמך: policy.pdf | רמת סיווג: L2")).toBe(true);
+    }
+    expect(plan.childTexts.some((t) => t.includes("| סעיף: נהלי החזר הוצאות]"))).toBe(true);
+  });
+
+  it("builds the header exactly as live ingestion does", () => {
+    const child = plan.children[0]!;
+    const ctx = { filename: "policy.pdf", classificationLevel: 2 as const };
+    expect(plan.childTexts[0]).toBe(withContextualHeader(child, ctx));
+    expect(plan.childTexts[0]).toBe(
+      buildContextualHeader({ ...ctx, section: child.section }) + child.text
+    );
+  });
+
+  it("redacts PII before chunking", () => {
+    const redacted = planParentChildChunks({
+      text: "צרו קשר במייל someone@example.org לפרטים נוספים על ההחזר.",
+      filename: "f.txt",
+      classificationLevel: 1,
+    });
+    expect(redacted.childTexts.join("\n")).not.toContain("someone@example.org");
+  });
+
+  it("emits parents first (no embedding), then children linked by parentIndex", () => {
+    const records = recordsFor({ reconciled: true });
+    expect(records).toHaveLength(plan.parents.length + plan.children.length);
+
+    for (const row of records.slice(0, plan.parents.length)) {
+      expect(row.isParent).toBe(true);
+      expect(row.embedding).toBeNull();
+      expect(row.metadata.is_parent).toBe(true);
+    }
+    records.slice(plan.parents.length).forEach((row, i) => {
+      expect(row.isParent).toBe(false);
+      expect(row.embedding).not.toBeNull();
+      expect(row.parentIndex).toBe(plan.children[i]!.parentIndex);
+      // parents occupy [0, parents.length), so the index points at a parent row.
+      expect(records[row.parentIndex!]!.isParent).toBe(true);
+      expect(row.metadata.is_parent).toBeUndefined();
+    });
+  });
+
+  it("carries the shared metadata contract and the reconcile extras on every row", () => {
+    for (const row of recordsFor({ reconciled: true, reconciled_from: "file:policy.pdf" })) {
+      expect(row.metadata).toMatchObject({
+        document_id: documentId,
+        filename: "policy.pdf",
+        uploaded_by: "u1",
+        required_role: 2,
+        reconciled: true,
+        reconciled_from: "file:policy.pdf",
+      });
+    }
+  });
+
+  it("refuses a vector set that is not aligned with the children", () => {
+    expect(() =>
+      buildParentChildRecords({
+        ...plan,
+        vectors: [],
+        documentId,
+        filename: "policy.pdf",
+        mimeType: "application/pdf",
+        uploadedByUserId: "u1",
+        classificationLevel: 2,
+      })
+    ).toThrow(/Embedding count mismatch/);
+  });
+
+  it("yields no children for blank text, so the reconciler reports it unresolvable", () => {
+    const empty = planParentChildChunks({ text: "  ", filename: "x", classificationLevel: 3 });
+    expect(empty.children).toHaveLength(0);
+    expect(empty.parents).toHaveLength(0);
   });
 });

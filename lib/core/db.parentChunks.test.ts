@@ -1,6 +1,9 @@
 import {
+  backfillDocumentChunks,
   deleteDocumentAndChunks,
+  deterministicChunkId,
   insertDocumentWithChunks,
+  resolveParentIds,
   resolveParentChunks,
   type DocumentChunkRecord,
   type SimilarDocument,
@@ -283,5 +286,113 @@ describe("deleteDocumentAndChunks", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.sql).toContain("DELETE FROM knowledge_base");
+  });
+});
+
+/**
+ * Reconciliation (`npm run reconcile`) rebuilds a document through
+ * `backfillDocumentChunks`. It must persist the same parent/child hierarchy
+ * first ingestion does — with ids that are stable across re-runs, because the
+ * idempotency story rests on ON CONFLICT (id) overwriting in place.
+ */
+describe("deterministicChunkId", () => {
+  const DOC = "11111111-1111-1111-1111-111111111111";
+
+  it("is stable for the same document and ordinal", () => {
+    expect(deterministicChunkId(DOC, 3)).toBe(deterministicChunkId(DOC, 3));
+    expect(deterministicChunkId(DOC, 3, true)).toBe(deterministicChunkId(DOC, 3, true));
+  });
+
+  it("does not collide between a parent and a child with the same ordinal", () => {
+    // Parents and children are each numbered from 0, so ordinal 0 exists twice.
+    expect(deterministicChunkId(DOC, 0, true)).not.toBe(deterministicChunkId(DOC, 0, false));
+  });
+
+  it("differs across documents and ordinals, and is a valid v5 UUID", () => {
+    const other = "22222222-2222-2222-2222-222222222222";
+    expect(deterministicChunkId(DOC, 1)).not.toBe(deterministicChunkId(other, 1));
+    expect(deterministicChunkId(DOC, 1)).not.toBe(deterministicChunkId(DOC, 2));
+    expect(deterministicChunkId(DOC, 1)).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    );
+  });
+
+  it("keeps the original id spelling for searchable (child) rows", () => {
+    // Children keep the pre-hierarchy `documentId:chunkIndex` name, so ids
+    // already derived for flat reconciled documents do not change.
+    expect(deterministicChunkId(DOC, 5)).toBe(deterministicChunkId(DOC, 5, false));
+  });
+});
+
+describe("resolveParentIds", () => {
+  const ids = ["p0", "p1", "c0", "c1", "c2"];
+  const rows = [
+    { isParent: true },
+    { isParent: true },
+    { isParent: false, parentIndex: 0 },
+    { isParent: false, parentIndex: 0 },
+    { isParent: false, parentIndex: 1 },
+  ];
+
+  it("maps each child to its parent's id and leaves parents unlinked", () => {
+    expect(resolveParentIds(rows, ids)).toEqual([null, null, "p0", "p0", "p1"]);
+  });
+
+  it("returns all-null for a flat set", () => {
+    expect(resolveParentIds([{}, {}], ["a", "b"])).toEqual([null, null]);
+  });
+
+  it("rejects a forward reference", () => {
+    expect(() =>
+      resolveParentIds([{ parentIndex: 1 }, { isParent: true }], ["a", "b"])
+    ).toThrow(/parents must precede/i);
+  });
+});
+
+describe("backfillDocumentChunks — parent/child shape validation", () => {
+  const vec = () => new Array(768).fill(0.01);
+  const DOC = "11111111-1111-1111-1111-111111111111";
+
+  const parent = (): DocumentChunkRecord => ({
+    text: "parent",
+    chunkIndex: 0,
+    metadata: {},
+    embedding: null,
+    isParent: true,
+  });
+  const child = (over: Partial<DocumentChunkRecord> = {}): DocumentChunkRecord => ({
+    text: "child",
+    chunkIndex: 0,
+    metadata: {},
+    embedding: vec(),
+    isParent: false,
+    parentIndex: 0,
+    ...over,
+  });
+
+  it("rejects a child that precedes its parent, before any connection is used", async () => {
+    await expect(
+      backfillDocumentChunks({
+        documentId: DOC,
+        classificationLevel: L2,
+        chunks: [child({ parentIndex: 1 }), parent()],
+      })
+    ).rejects.toThrow(/parents must precede/i);
+  });
+
+  it("rejects a child pointing at a non-parent row", async () => {
+    await expect(
+      backfillDocumentChunks({
+        documentId: DOC,
+        classificationLevel: L2,
+        chunks: [child({ parentIndex: undefined }), child()],
+      })
+    ).rejects.toThrow(/not a parent row/i);
+  });
+
+  it("refuses an empty chunk set", async () => {
+    await expect(
+      backfillDocumentChunks({ documentId: DOC, classificationLevel: L2, chunks: [] })
+    ).rejects.toThrow(/zero chunks/i);
   });
 });

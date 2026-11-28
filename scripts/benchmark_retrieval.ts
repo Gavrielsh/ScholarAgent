@@ -29,8 +29,9 @@
  *   npm run benchmark
  *   npm run benchmark -- --repeats 5 --allow-partial-qrels
  *
- * Requires DATABASE_URL and GEMINI_API_KEY. A re-ranking judge for R4 requires
- * LLM_PROVIDER (and RERANK_LLM_PROVIDER to avoid self-preference bias).
+ * Requires DATABASE_URL and GEMINI_API_KEY. The R4 re-ranking judge is the
+ * LLM_PROVIDER adapter — the same provider that generates answers, so R4 is
+ * exposed to self-preference bias (see lib/domain/chat/rerank.ts).
  */
 
 import { mkdir, writeFile } from "node:fs/promises";

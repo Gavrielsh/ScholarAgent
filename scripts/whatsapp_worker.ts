@@ -151,7 +151,7 @@ async function shutdown(signal: string): Promise<void> {
   // waits for handlers already running. Anything still in flight when the
   // timeout fires stays in the queue with an expired lock and is retried by
   // another instance — safe, because both pipelines are idempotent on the Meta
-  // message id (migration 006 for chat, migration 007 for documents) and the
+  // message id (migration 001, for chat and documents alike) and the
   // Redis claim survives.
   //
   // Drained in parallel: run sequentially, a long ingestion job could consume

@@ -19,6 +19,7 @@ import {
 } from "@/lib/core/http/fetchWithTimeout";
 import { logWarn } from "@/lib/core/logger";
 import { parsePositiveInt } from "@/lib/core/env";
+import type { LlmUsage } from "@/lib/core/telemetry";
 
 // -------------------------------------------------------------------------
 // Retry
@@ -108,6 +109,31 @@ export interface GenerateTextInput {
   signal?: AbortSignal | null;
   /** Per-call override of the default 15s HTTP deadline. */
   timeoutMs?: number;
+  /**
+   * Called once per successful provider call with the token counts the provider
+   * reported, so a caller can price the query (`estimateLlmCostUsd`). Never
+   * called by the mock adapter or when the response carries no usage block. A
+   * throwing callback is swallowed — telemetry must not cost anyone an answer.
+   */
+  onUsage?: (usage: LlmUsage) => void;
+}
+
+/** Reports usage to the caller's callback, isolating the call from its failures. */
+function reportUsage(
+  input: GenerateTextInput,
+  model: string,
+  promptTokens: unknown,
+  completionTokens: unknown
+): void {
+  if (!input.onUsage) return;
+  if (typeof promptTokens !== "number" || typeof completionTokens !== "number") return;
+  try {
+    input.onUsage({ model, promptTokens, completionTokens });
+  } catch (err) {
+    logWarn("llm_usage_callback_failed", err instanceof Error ? err.message : String(err), {
+      model,
+    });
+  }
 }
 
 export interface LlmAdapter {
@@ -144,6 +170,7 @@ interface OpenAiChatCompletionResponse {
       content?: string;
     };
   }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
 }
 
 export class OpenAiAdapter implements LlmAdapter {
@@ -180,6 +207,7 @@ export class OpenAiAdapter implements LlmAdapter {
     }
 
     const json = parseJsonBody<OpenAiChatCompletionResponse>(response.body, label);
+    reportUsage(input, model, json.usage?.prompt_tokens, json.usage?.completion_tokens);
     return json.choices?.[0]?.message?.content?.trim() ?? "";
   }
 }
@@ -199,6 +227,12 @@ interface GeminiResponse {
       parts?: Array<{ text?: string }>;
     };
   }>;
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    /** Reasoning tokens: billed as output but not part of candidatesTokenCount. */
+    thoughtsTokenCount?: number;
+  };
 }
 
 // Maps our internal roles to Gemini's role format.
@@ -293,6 +327,15 @@ export class GeminiAdapter implements LlmAdapter {
     }
 
     const json = parseJsonBody<GeminiResponse>(response.body, label);
+    const usage = json.usageMetadata;
+    reportUsage(
+      input,
+      model,
+      usage?.promptTokenCount,
+      typeof usage?.candidatesTokenCount === "number"
+        ? usage.candidatesTokenCount + (usage.thoughtsTokenCount ?? 0)
+        : undefined
+    );
     return json.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
   }
 }
@@ -352,6 +395,7 @@ interface AnthropicErrorBody {
 
 interface AnthropicResponse {
   content?: AnthropicResponseContent[];
+  usage?: { input_tokens?: number; output_tokens?: number };
   error?: { type: string; message: string };
 }
 
@@ -456,6 +500,7 @@ export class ClaudeAdapter implements LlmAdapter {
     }
 
     const json = parseJsonBody<AnthropicResponse>(response.body, label);
+    reportUsage(input, modelRequested, json.usage?.input_tokens, json.usage?.output_tokens);
     return json.content?.find((c) => c.type === "text")?.text?.trim() ?? "";
   }
 }

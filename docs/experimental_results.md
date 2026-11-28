@@ -3,7 +3,7 @@
 **מסמך:** `docs/experimental_results.md`  
 **גרסת קוד:** `6f56973` (ענף `main`)  
 **קבצי תוצאות (ארטיפקטים):** `scripts/output/benchmark_summary.md` (נוצר ב-`2026-11-18T10:44:27.274Z`), `scripts/output/evaluation_results_2026-11-18_11-04-54.csv`  
-**מודלים שנבדקו:** `claude-sonnet-4-6` (ברירת המחדל ב-`lib/domain/chat/llm.ts:234`), `gemini-3.5-flash` (ברירת המחדל ב-`lib/domain/chat/llm.ts:174`)
+**מודלים שנבדקו:** `claude-sonnet-4-6` (ברירת המחדל `DEFAULT_MODEL` ב-`lib/domain/chat/llm.ts`), `gemini-3.5-flash` (ברירת המחדל ב-`GeminiAdapter` באותו קובץ)
 
 ---
 
@@ -189,7 +189,7 @@ catch (err) {
 | שאילתות שנוקדו | 21 מתוך 30 | `benchmark_summary.md` |
 | חזרות לכל שאילתה | 3 | `DEFAULT_REPEATS` |
 | עומק שליפה סופי | top 10 | `RETRIEVAL_LIMIT` |
-| קבוע `RRF k` | 60 | `retrievalArms.ts:51` |
+| קבוע `RRF k` | 60 | `RRF_K` ב-`retrievalArms.ts` |
 | מועמדים לשלב הדירוג מחדש (`R4`) | 25 | `STAGE1_LIMIT` |
 | שליפת יתר (`overfetch`) לכל שיטה | 200 | `ARM_OVERFETCH` |
 | מודל שופט ל-re-ranking | `gemini` | `benchmark_summary.md` |
@@ -424,7 +424,7 @@ A ADV-005: HTTP request to Anthropic(claude-sonnet-4-6) timed out after 15000ms.
 
 ### 7.4 הטיות שלב הדירוג מחדש (`re-ranker`) והיעדר גזירת שורשים בעברית
 
-זרוע `R4` אינה משתמשת במודל cross-encoder מקומי, אלא ב-LLM שמדרג כל קטע בנפרד (pointwise). שיטה זו חשופה לשלוש מגבלות: **הטיית העדפה עצמית (self-preference bias)** כאשר אותו ספק מודלים גם מדרג וגם מנסח את התשובה (המשתנה `RERANK_LLM_PROVIDER` נועד להפריד ביניהם, ויש לציין אם הופעל), **הטיית מיקום (position bias)** שנועדה להימדד באמצעות `shuffleSeed`, ו**חוסר דטרמיניזם** — זוהי הזרוע היחידה שבה הרצות חוזרות מייצרות שונות אמיתית בתוצאות.
+זרוע `R4` אינה משתמשת במודל cross-encoder מקומי, אלא ב-LLM שמדרג כל קטע בנפרד (pointwise). שיטה זו חשופה לשלוש מגבלות: **הטיית העדפה עצמית (self-preference bias)** כאשר אותו ספק מודלים גם מדרג וגם מנסח את התשובה (בפועל שופט הדירוג הוא `getLlmAdapter()`, כלומר אותו ספק שמוגדר ב-`LLM_PROVIDER`; משתנה נפרד להפרדה ביניהם לא מומש, ולכן ההטיה אינה מנוטרלת בריצה המתועדת), **הטיית מיקום (position bias)** שנועדה להימדד באמצעות `shuffleSeed`, ו**חוסר דטרמיניזם** — זוהי הזרוע היחידה שבה הרצות חוזרות מייצרות שונות אמיתית בתוצאות.
 
 היעדר stemming לעברית ב-PostgreSQL הוא מגבלה קבועה של מסד הנתונים, אך כפי שהוכח בסעיף 4.4, **לא זו הסיבה** לכך שזרוע `R1` קיבלה 0.000.
 
@@ -438,6 +438,16 @@ A ADV-005: HTTP request to Anthropic(claude-sonnet-4-6) timed out after 15000ms.
 1. **קובץ ה-CSV אינו מתעד בעמודה נפרדת איזה מודל רץ בכל שורה.** זיהוי המודלים (`claude-sonnet-4-6` ו-`gemini-3.5-flash`) מוסק מתוך הגדרות ברירת המחדל בקוד ומשתני הסביבה (`GEMINI_MODEL`/`CLAUDE_MODEL`). מומלץ להוסיף עמודת מודל מפורשת לקובץ הפלט.
 2. **סוג השיפוט (`kind`) אינו נשמר** בקובץ `qrels.jsonl` (כפי שצוין בסעיף 3.5).
 3. **הקובץ `migrations/002_knowledge_gaps.sql` אינו רושם את עצמו** בטבלת `schema_migrations`, ולכן הוא מורץ מחדש בכל הפעלה של `npm run migrate`. מכיוון שהוא כתוב בצורה idempotent (כך שהרצה חוזרת אינה משנה דבר שכבר בוצע), אין בכך נזק, אך מצב הגרסה אינו מתועד בטבלה.
+
+### 7.7 תיקונים ושיפורים שבוצעו בקוד *אחרי* הניסוי
+
+המספרים בסעיפים 4–7 הם **מדידות היסטוריות** של גרסת הקוד שצוינה בראש המסמך, והם לא עודכנו. השינויים הבאים נכנסו לאחר הריצה, ואינם משתקפים בהם:
+
+1. **תיקון החיפוש המילולי (OR-join).** `buildLexicalSearchExpression` ב-`lib/core/db.ts` מחבר כעת את מילות השאילתה ב-OR (עד 24 מונחים), במקום AND (סעיף 4.4; מוזג ל-`main` בקומיט `76eb1a3`). לכן `R1` ו-`R3` בטבלאות הם תוצאת הקוד הישן, והשערה `H1` נותרת **לא מוכרעת** עד הרצה חוזרת.
+2. **קטעי הורה/ילד (parent/child) וכותרת הקשר.** הקטעים נשמרים כהורה (~1,400 תווים, ללא embedding) וכילד (~400 תווים, חפיפה 60) עם כותרת `[מסמך | רמת סיווג | סעיף]`. המבנה נקבע ב-`migrations/004_parent_child_chunks.sql`.
+3. **סקריפט ה-`reconcile` תואם כעת את הקליטה החיה.** `scripts/reconcile_documents.ts` משתמש באותן פונקציות עזר (`planParentChildChunks`, `buildParentChildRecords`), ו-`backfillDocumentChunks` שומר את ההיררכיה (הורים ללא embedding, ילדים מקושרים להורה). קודם לכן שוחזרו מסמכים כקטעים שטוחים 1500/200 ללא כותרת. הדבר אינו משפיע על מספרי הניסוי, כי הקורפוס נקלט דרך `npm run ingest`.
+4. **טלמטריית עלות (`executionCostUsd`).** כל מתאם LLM מדווח כעת על ספירת הטוקנים שהספק החזיר, ו-`lib/core/telemetry.ts` מתמחר אותה לפי טבלת מחירי רשימה לכל מודל. ערך חסר פירושו "לא ידוע" (מודל mock או לא מתומחר), ולא אפס. קובץ ה-CSV של הניסוי **אינו** כולל עמודות עלות או טוקנים (סעיף 7.6), ולכן אין בו נתוני עלות.
+5. **מצב הבדיקות:** 271 בדיקות ב-21 קבצים (`npm test`), ללא מסד נתונים וללא רשת.
 
 ---
 
@@ -490,4 +500,4 @@ A ADV-005: HTTP request to Anthropic(claude-sonnet-4-6) timed out after 15000ms.
 | פרמטרים `α=0.5`, ניקוד 0..10, `temperature: 0` | `lib/domain/chat/rerank.ts` |
 | משתני הסביבה `app.user_permission_level` ו-`app.sender_id` | `migrations/001_initial_schema.sql`, `lib/core/db.ts` |
 | הגדרת התפקיד `scholaragent_app` ובלוק הבדיקה העצמית | `migrations/001_initial_schema.sql` (סעיפים 8–10) |
-| הגדרות המודלים `claude-sonnet-4-6` ו-`gemini-3.5-flash` | `lib/domain/chat/llm.ts:234`, `lib/domain/chat/llm.ts:174` |
+| הגדרות המודלים `claude-sonnet-4-6` ו-`gemini-3.5-flash` | `DEFAULT_MODEL` ו-`GeminiAdapter` ב-`lib/domain/chat/llm.ts` |

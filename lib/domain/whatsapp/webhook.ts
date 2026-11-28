@@ -260,7 +260,7 @@ interface SanitizedInbound {
  * Deterministic id for the assistant turn derived from the inbound message id.
  *
  * Without this the outbound row has a NULL message_id, falls outside the partial
- * unique index from migration 006, and gets duplicated on every retry that
+ * unique index from migration 001, and gets duplicated on every retry that
  * happens to fail after the reply was already sent.
  */
 function outboundMessageId(inboundMessageId: string | null): string | undefined {

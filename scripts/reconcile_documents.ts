@@ -1,7 +1,7 @@
 /**
  * reconcile_documents.ts — repairs documents that are registered but not embedded.
  *
- * `ingested_documents` (migration 007) is the registry; the chunks live in
+ * `ingested_documents` (migration 001) is the registry; the chunks live in
  * `knowledge_base`, tagged with `metadata->>'document_id'`. The first-ingestion
  * path writes both halves in one transaction, so the two cannot diverge there —
  * but they can diverge afterwards: the document-deleted webhook removes chunks
@@ -12,8 +12,17 @@
  * A document in that state is invisible to RAG while looking perfectly ingested
  * to every admin report. This script finds them (NOT EXISTS against
  * knowledge_base), recovers the source text, and rebuilds the chunks through the
- * same modules the live pipeline uses — piiRedact → chunker → embeddings — so a
- * reconciled document is byte-for-byte what normal ingestion would have produced.
+ * same helpers the live pipeline uses (`planParentChildChunks` and
+ * `buildParentChildRecords` in lib/domain/ingestion/pipeline.ts):
+ *
+ *   redactPii → parent/child chunking (1400 / 400, overlap 60) → contextual
+ *   header (document, classification level, section) → embed the CHILDREN only
+ *   → parents stored with embedding NULL, each child linked to its parent.
+ *
+ * A reconciled document therefore has the same parent/child hierarchy, headers
+ * and metadata as one ingested normally, and retrieval resolves its parents the
+ * same way. (Before this, reconciliation wrote flat 1500/200 chunks with no
+ * header and no parents.)
  *
  * SOURCE TEXT RESOLUTION, in order:
  *   1. Inline text on the document row (`metadata.extracted_text` / `raw_text`).
@@ -56,17 +65,15 @@ import {
   closePool,
   findDocumentsMissingChunks,
   markDocumentReconcileFailure,
-  type DocumentChunkRecord,
   type DocumentRegistryRow,
 } from "@/lib/core/db";
 import {
-  buildChunkMetadata,
-  chunkText,
+  buildParentChildRecords,
   extractTextFromUpload,
-  type Chunk,
+  planParentChildChunks,
+  type ParentChildPlan,
 } from "@/lib/domain/ingestion/pipeline";
 import { embedTextBatch } from "@/lib/domain/ingestion/embeddings";
-import { redactPii } from "@/lib/security/guardrails";
 import { parseNonNegativeInt, parsePositiveInt } from "@/lib/core/env";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
 import { downloadWhatsAppMedia } from "@/lib/domain/whatsapp/client";
@@ -93,7 +100,8 @@ const EMBED_BATCH_PAUSE_MS = parseNonNegativeInt(
   process.env.RECONCILE_EMBED_PAUSE_MS,
   parseNonNegativeInt(process.env.DOCUMENT_EMBED_BATCH_PAUSE_MS, 250)
 );
-/** Backstop against one 900-page PDF consuming an entire quota window. */
+/** Backstop against one 900-page PDF consuming an entire quota window. Counts
+ *  SEARCHABLE (child) chunks — what costs embedding quota — like live ingestion. */
 const MAX_CHUNKS_PER_DOCUMENT = parsePositiveInt(
   process.env.RECONCILE_MAX_CHUNKS,
   parsePositiveInt(process.env.DOCUMENT_MAX_CHUNKS, 400)
@@ -432,40 +440,42 @@ async function resolveSourceText(
 // Chunking + embedding
 // ---------------------------------------------------------------------------
 
-/** REUSE: redactPii, then the Hebrew/Latin-aware semantic chunker. */
-function buildChunks(text: string, document: DocumentRegistryRow): Chunk[] {
-  // chunkText redacts internally too — idempotent, and doing it here means the
-  // emptiness check below runs on already-masked text.
-  const chunks = chunkText(redactPii(text)).filter((chunk) => chunk.text.trim().length > 0);
+/** REUSE: the live pipeline's redact → parent/child chunk → contextual header. */
+function buildChunks(text: string, document: DocumentRegistryRow): ParentChildPlan {
+  const plan = planParentChildChunks({
+    text,
+    filename: document.filename,
+    classificationLevel: document.classificationLevel,
+  });
 
-  if (chunks.length === 0) {
+  if (plan.children.length === 0) {
     throw new UnresolvableDocumentError(
       `Chunking produced nothing usable for "${document.filename}".`
     );
   }
-  if (chunks.length > MAX_CHUNKS_PER_DOCUMENT) {
+  if (plan.children.length > MAX_CHUNKS_PER_DOCUMENT) {
     throw new UnresolvableDocumentError(
-      `${chunks.length} chunks exceeds the ${MAX_CHUNKS_PER_DOCUMENT}-chunk ceiling ` +
+      `${plan.children.length} chunks exceeds the ${MAX_CHUNKS_PER_DOCUMENT}-chunk ceiling ` +
         "(raise RECONCILE_MAX_CHUNKS to allow it)."
     );
   }
-  return chunks;
+  return plan;
 }
 
 /**
- * Embeds every chunk in slices, preserving index alignment with `chunks`.
+ * Embeds every child chunk text in slices, preserving index alignment with `texts`.
  *
  * `embedTextBatch` guarantees alignment within a slice; concatenating slices in
  * order preserves it across them. That alignment is load-bearing — a shifted
  * vector attaches the wrong embedding to the wrong text and silently poisons
  * retrieval for the life of the row.
  */
-async function embedChunksInSlices(chunks: Chunk[], options: Options): Promise<number[][]> {
+async function embedChunksInSlices(texts: string[], options: Options): Promise<number[][]> {
   const vectors: number[][] = [];
 
-  for (let start = 0; start < chunks.length; start += EMBED_BATCH_SIZE) {
-    const slice = chunks.slice(start, start + EMBED_BATCH_SIZE);
-    const batch = await embedTextBatch(slice.map((c) => c.text));
+  for (let start = 0; start < texts.length; start += EMBED_BATCH_SIZE) {
+    const slice = texts.slice(start, start + EMBED_BATCH_SIZE);
+    const batch = await embedTextBatch(slice);
 
     if (batch.length !== slice.length) {
       throw new Error(`Embedding count mismatch: got ${batch.length}, expected ${slice.length}.`);
@@ -473,10 +483,10 @@ async function embedChunksInSlices(chunks: Chunk[], options: Options): Promise<n
     vectors.push(...batch);
 
     if (options.verbose) {
-      console.log(`        · embedded ${vectors.length}/${chunks.length} chunks`);
+      console.log(`        · embedded ${vectors.length}/${texts.length} chunks`);
     }
 
-    const hasMore = start + EMBED_BATCH_SIZE < chunks.length;
+    const hasMore = start + EMBED_BATCH_SIZE < texts.length;
     if (hasMore && EMBED_BATCH_PAUSE_MS > 0) {
       await sleep(EMBED_BATCH_PAUSE_MS);
     }
@@ -510,10 +520,10 @@ async function reconcileDocument(
   console.log(`  → ${label}`);
 
   let source: ResolvedSource;
-  let chunks: Chunk[];
+  let plan: ParentChildPlan;
   try {
     source = await resolveSourceText(document, options, fileIndex);
-    chunks = buildChunks(source.text, document);
+    plan = buildChunks(source.text, document);
   } catch (err) {
     // A source problem is not going to fix itself on the next run, so it is
     // recorded on the row rather than only in this run's log.
@@ -543,13 +553,14 @@ async function reconcileDocument(
 
   if (options.dryRun) {
     console.log(
-      `    DRY   would rebuild ${chunks.length} chunk(s) from ${source.origin} ` +
+      `    DRY   would rebuild ${plan.children.length} chunk(s) ` +
+        `(+${plan.parents.length} parent) from ${source.origin} ` +
         `at level L${document.classificationLevel}`
     );
     return "dry_run";
   }
 
-  const vectors = await embedChunksInSlices(chunks, options);
+  const vectors = await embedChunksInSlices(plan.childTexts, options);
   const chunkMetadata = {
     source: document.source,
     organization_id: document.metadata?.organization_id ?? null,
@@ -560,20 +571,18 @@ async function reconcileDocument(
     reconciled_from: source.origin,
   };
 
-  const records: DocumentChunkRecord[] = chunks.map((chunk, i) => ({
-    text: chunk.text,
-    chunkIndex: chunk.index,
-    metadata: buildChunkMetadata({
-      documentId: document.documentId,
-      filename: document.filename,
-      mimeType: document.mimeType,
-      uploadedByUserId: document.uploadedByUserId,
-      classificationLevel: document.classificationLevel,
-      chunk,
-      extra: chunkMetadata,
-    }),
-    embedding: vectors[i],
-  }));
+  // Parents first, then children carrying their parentIndex — the same row set
+  // insertDocumentWithChunks receives on first ingestion.
+  const records = buildParentChildRecords({
+    ...plan,
+    vectors,
+    documentId: document.documentId,
+    filename: document.filename,
+    mimeType: document.mimeType,
+    uploadedByUserId: document.uploadedByUserId,
+    classificationLevel: document.classificationLevel,
+    extra: chunkMetadata,
+  });
 
   const result = await backfillDocumentChunks({
     documentId: document.documentId,
@@ -585,25 +594,28 @@ async function reconcileDocument(
     console.log("    NOOP  chunks appeared while this run was embedding; nothing written");
     logInfo("reconcile_document_raced", "Another writer populated the document first.", {
       documentId: document.documentId,
-      chunkCount: chunks.length,
+      chunkCount: plan.children.length,
     });
     metrics.documentsAlreadyPresent += 1;
     return "already_present";
   }
 
-  console.log(`    OK    ${result.insertedChunkIds.length} chunk(s) from ${source.origin}`);
+  console.log(
+    `    OK    ${plan.children.length} chunk(s) (+${plan.parents.length} parent) from ${source.origin}`
+  );
   logInfo("reconcile_document_completed", "Rebuilt chunks for a registered document.", {
     documentId: document.documentId,
     filename: document.filename,
     source: document.source,
     origin: source.origin,
     classificationLevel: document.classificationLevel,
-    chunkCount: result.insertedChunkIds.length,
+    chunkCount: plan.children.length,
+    parentCount: plan.parents.length,
     previousChunkCount: document.chunkCount,
   });
 
   metrics.documentsReconciled += 1;
-  metrics.chunksCreated += result.insertedChunkIds.length;
+  metrics.chunksCreated += plan.children.length;
   return "reconciled";
 }
 

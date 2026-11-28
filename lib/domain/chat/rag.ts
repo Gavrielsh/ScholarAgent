@@ -18,8 +18,14 @@ import {
   type SimilarDocument,
 } from "@/lib/domain/ingestion/retrieval";
 import { getLlmAdapter, type LlmMessage } from "@/lib/domain/chat/llm";
-import { computeDls, startBaselineRagTrace, type DlsResult } from "@/lib/core/telemetry";
-import { logError } from "@/lib/core/logger";
+import {
+  computeDls,
+  startBaselineRagTrace,
+  sumLlmCostUsd,
+  type DlsResult,
+  type LlmUsage,
+} from "@/lib/core/telemetry";
+import { logError, logInfo } from "@/lib/core/logger";
 import { formatWhatsAppMarkdown } from "@/lib/domain/whatsapp/client";
 import { MAX_HISTORY_TURNS } from "@/lib/domain/chat/session/context";
 import { readUserMemory } from "@/lib/domain/chat/session/memoryWorker";
@@ -202,6 +208,14 @@ export interface BaselineRagCoreResult {
   }>;
   dls: DlsResult;
   latencyMs: number;
+  /** Provider-reported token usage of the generation call; absent for mock. */
+  usage?: LlmUsage;
+  /**
+   * Estimated USD cost of this query's generation call (list price — see
+   * `computeLlmCost`). Absent, never 0, when the provider reported no usage or
+   * the model is unpriced. Excludes embedding and any background summarisation.
+   */
+  executionCostUsd?: number;
 }
 
 function toRetrievedChunks(docs: SimilarDocument[]): BaselineRagCoreResult["retrievedChunks"] {
@@ -330,24 +344,30 @@ export async function runBaselineRagCore(input: BaselineRagInput): Promise<Basel
   ];
 
   const genTrace = trace.attachLlmGeneration(llmMessages);
+  let usage: LlmUsage | undefined;
   const generated = await adapter.generateText({
     messages: llmMessages,
     temperature: 0.3,
     // Cancels the generation if the job deadline expires or the worker is
     // draining, so a doomed job stops paying for tokens it cannot deliver.
     signal,
+    onUsage: (u) => {
+      usage = u;
+    },
   });
   const answer = formatWhatsAppMarkdown(generated);
-  genTrace.end({ answer });
+  genTrace.end({ answer, usage });
 
+  const executionCostUsd = usage ? sumLlmCostUsd([usage]) : undefined;
   const latencyMs = Date.now() - startMs;
   trace.endRoot({
     answer,
     chunkIds: retrievedChunks.map((c) => c.id),
     latencyMs,
+    executionCostUsd,
   });
 
-  return { answer, retrievedChunks, dls, latencyMs };
+  return { answer, retrievedChunks, dls, latencyMs, usage, executionCostUsd };
 }
 
 export async function recordBaselineRagMetrics(input: {
@@ -362,6 +382,18 @@ export async function recordBaselineRagMetrics(input: {
       retrievedChunkIds: input.result.retrievedChunks.map((c) => c.id),
       latencyMs: input.result.latencyMs,
     });
+    // Per-query spend goes to the structured log (and Langfuse, via the trace)
+    // rather than to audit_logs: that table is append-only and RLS-adjacent, and
+    // a schema change there is not warranted for an estimate.
+    if (input.result.usage) {
+      logInfo("baseline_rag.llm_cost", "Per-query LLM usage and estimated cost.", {
+        userId: input.userContext.userId,
+        model: input.result.usage.model,
+        promptTokens: input.result.usage.promptTokens,
+        completionTokens: input.result.usage.completionTokens,
+        executionCostUsd: input.result.executionCostUsd ?? null,
+      });
+    }
   } catch (err) {
     logError("baseline_rag.audit_log_insert_failed", err, { userId: input.userContext.userId });
   }

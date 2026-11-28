@@ -4,7 +4,8 @@
   <h1>ScholarAgent</h1>
   <p>
     <strong>Database-enforced authorization for Hebrew organizational RAG.</strong><br />
-    An Agentic-RAG architecture that drives cross-tier retrieval leakage from
+    A deterministic four-tier RAG architecture — lexical intent routing, bounded
+    handlers, no autonomous tool loops — that drives cross-tier retrieval leakage from
     <strong>78.67%–80.00%</strong> to <strong>0.00%</strong> — measured, not asserted.
   </p>
   <p>
@@ -119,7 +120,7 @@ flowchart TB
         direction TB
         GUARD["Guardrails<br/>PII redaction · distress handoff"]
         RBAC["RBAC lookup<br/>phone → tier (lib/security/auth.ts)"]
-        ROUTE["Intent router<br/>knowledge · admin · history"]
+        ROUTE["Lexical intent router<br/>knowledge · admin · history<br/>(deterministic, no tool loop)"]
         GUARD --> RBAC --> ROUTE
     end
 
@@ -131,7 +132,7 @@ flowchart TB
         TX --> RLS --> HYB
     end
 
-    LLM["LLM adapter · lib/domain/chat/llm.ts<br/>Claude · Gemini · OpenAI · Mock<br/>retry 429/5xx/timeout — [500, 1500] ms"]
+    LLM["LLM adapter · lib/domain/chat/llm.ts<br/>Claude · Gemini · OpenAI · Mock<br/>retry 429/5xx/timeout — [500, 1500] ms<br/>token usage → per-query executionCostUsd"]
     OUT["↩ Answer via WhatsApp Cloud API"]
 
     U --> SIG
@@ -212,7 +213,29 @@ $$RRF(d) = \sum_{r} \frac{1}{k + \mathrm{rank}_r(d)}, \qquad k = 60$$
 
 Worth stating plainly for reviewers: `ts_rank_cd` is **not** Okapi BM25.
 PostgreSQL has no built-in BM25; this is coverage-density ranking, and the arm
-should not be described as BM25.
+should not be described as BM25. The `'simple'` text-search configuration does no
+stemming, so Hebrew prefixes (ה/ו/ב/ל…) are not stripped. The lexical query
+**OR-joins** its terms (`buildLexicalSearchExpression`, at most 24 terms); the
+experiment below ran before that fix, when the leg AND-joined every term.
+
+**Small-to-big chunks.** Documents are stored as parent chunks (~1,400 characters,
+`embedding NULL`, read by the LLM) and child chunks (~400 characters, overlap 60,
+embedded and searched). Every stored body starts with a contextual header
+(`[מסמך: … | רמת סיווג: L<n> | סעיף: …]`). A matched child is widened to its
+parent *inside the same RLS transaction*, so widening never exposes more than
+the caller may see. Every ingestion path — HTTP upload, WhatsApp document, and
+`npm run reconcile` — builds its rows through the same helpers
+(`planParentChildChunks`, `buildParentChildRecords` in
+`lib/domain/ingestion/pipeline.ts`), so a reconciled document is indistinguishable
+from a freshly ingested one.
+
+**Per-query cost.** Each provider adapter reports the token usage the API
+returned; `lib/core/telemetry.ts` prices it from a per-model table
+(`claude-sonnet-4-6`, `claude-haiku-4-5`, `gemini-3.5-flash`, `gpt-4o-mini`) and
+records `executionCostUsd` on the Langfuse trace, in the
+`baseline_rag.llm_cost` log line and on `RagasScores`. These are list-price
+*estimates*; mock and unknown models report no cost (never `0`). The recorded
+experiment predates this, so it carries no cost figures.
 
 All four benchmark arms run through the same `executeRetrieval`, over the same
 corpus, with the same overfetch and the same RLS mechanism, differing only by
@@ -372,7 +395,7 @@ npm run migrate
 **4 — Verify.** No database, Redis or network needed:
 
 ```sh
-npm test            # 243 tests, 21 suites
+npm test            # 271 tests, 21 suites
 npx tsc --noEmit
 npm run lint
 ```
@@ -392,12 +415,27 @@ npm run ingest -- --base local_data/eval_corpus   # 15-document L0/L1/L2 corpus
 npm run eval:seed                                 # plant canaries; exits non-zero if controls fail
 npm run benchmark                                 # Experiment 1 → scripts/output/benchmark_summary.md
 npm run evaluate                                  # Experiment 2 → scripts/output/evaluation_results_*.csv
+npm run qrels:pool                                # pool candidates for relevance judging
+npm run grade:qrels                               # grade the pooled judgments
 ```
 
 Run `eval:seed` before `evaluate`. Its positive control proves each canary is
 retrievable with RLS bypassed, and its negative control proves it is *not*
 retrievable from a lower tier. Without that, a 0% leakage result would be a test
 that cannot fail.
+
+### Operations
+
+```sh
+npm run reconcile                     # rebuild chunks for documents that lost them
+npx tsx scripts/reconcile_documents.ts --dry-run          # report only
+npx tsx scripts/reconcile_documents.ts --document-id=<uuid> --verbose
+```
+
+`reconcile` finds registered documents with no chunks, recovers their source text
+(inline metadata → file under `local_data/documents` → optionally the WhatsApp
+media handle), and rebuilds them with the full parent/child chunking and contextual
+headers. It exits non-zero if any document failed.
 
 Presenting this live? See **[`docs/demo_runbook.md`](docs/demo_runbook.md)**.
 
@@ -412,9 +450,9 @@ Presenting this live? See **[`docs/demo_runbook.md`](docs/demo_runbook.md)**.
 | `lib/security/` | `auth.ts` (four-tier RBAC), `crypto.ts` (HMAC), `guardrails.ts` (PII, distress handoff) |
 | `lib/domain/` | `chat/` (agent, RAG, LLM adapters, re-rank), `ingestion/`, `whatsapp/`, `admin/` |
 | `migrations/` | `001` baseline schema, `scholaragent_app` role, grants and RLS · `002` knowledge gaps · `004` parent/child chunks · `005` user memories |
-| `scripts/` | Ingestion, benchmark, evaluation, canary seeding, qrels grading |
+| `scripts/` | Ingestion, Drive sync, reconcile, benchmark, evaluation, canary seeding, qrels pooling and grading |
 | `local_data/eval_corpus/` | The 15-document synthetic Hebrew corpus (L0/L1/L2) |
-| `docs/` | Research proposal, empirical results, demo runbook |
+| `docs/` | Research proposals, AI-contribution plan, empirical results (HE), demo runbook |
 
 Dependencies flow strictly inward: `domain` → `security` → `core`. See
 [`CLAUDE.md`](CLAUDE.md) for the full engineering contract.

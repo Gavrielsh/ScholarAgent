@@ -15,7 +15,7 @@ Companion documents:
 ```sh
 docker compose up -d                              # postgres + redis
 npm run migrate                                   # creates scholaragent_app; self-check must pass
-npm test                                          # expect: 243 passed, 21 suites
+npm test                                          # expect: 271 passed, 21 suites
 npm run ingest -- --base local_data/eval_corpus   # 15 docs across L0/L1/L2
 npm run eval:seed                                 # MUST exit 0 — see below
 ```
@@ -158,14 +158,15 @@ do not scroll looking for things.
 | **300–307** | The `ALTER` on the `ELSE` branch | "Not redundant: a pre-existing role of this name carrying `BYPASSRLS` would silently disable every policy." |
 | **320–340** | `GRANT USAGE` + table/sequence grants | "RLS restricts *which rows* are visible; it does not grant table access. Without these the role is denied outright rather than filtered." |
 | **345** | `REVOKE INSERT, UPDATE, DELETE ON schema_migrations` | Least privilege — migration bookkeeping belongs to the runner. |
-| **350–353** | `GRANT scholaragent_app TO current_user` | "`SET ROLE` requires membership. Idempotent." |
-| **381–382, 424–425, 469–470** | `ENABLE` + `FORCE ROW LEVEL SECURITY` on the three tables | The protected set: `knowledge_base`, `ingested_documents`, `chat_history`. Policies follow each pair. |
-| **502–535** | **The self-check `DO` block** | *Linger here.* |
-| **514–521** | Raises if the role holds `SUPERUSER` or `BYPASSRLS` | — |
-| **523–533** | Raises if `FORCE RLS` is off on any protected table | "The migration refuses to stamp a database that is not actually secured. `run.ts` applies each file as one transaction, so this rolls everything back." |
-| **544–545** | The self-stamp | — |
+| **350, 357** | `REVOKE UPDATE, DELETE ON audit_logs` · `REVOKE INSERT, UPDATE, DELETE ON users` | "The audit log is append-only for the app role, and the app role cannot grant itself a tier — the RBAC registry has no RLS, so these grants are its only control." |
+| **362–366** | `GRANT scholaragent_app TO current_user` | "`SET ROLE` requires membership. Idempotent." |
+| **407–408, 449–450, 490–491** | `ENABLE` + `FORCE ROW LEVEL SECURITY` on the three tables | The protected set: `knowledge_base`, `ingested_documents`, `chat_history`. Policies follow each pair. |
+| **523–556** | **The self-check `DO` block** | *Linger here.* |
+| **535–543** | Raises if the role holds `SUPERUSER` or `BYPASSRLS` | — |
+| **545–554** | Raises if `FORCE RLS` is off on any protected table | "The migration refuses to stamp a database that is not actually secured. `run.ts` applies each file as one transaction, so this rolls everything back." |
+| **565–566** | The self-stamp | — |
 
-### Pane 2 — `lib/core/db.ts` (1,230 lines)
+### Pane 2 — `lib/core/db.ts` (about 1,490 lines)
 
 | Lines | What to show | What to say |
 |---|---|---|
@@ -181,20 +182,20 @@ do not scroll looking for things.
 | **236** | `await enterAppRole(client)` | "**Then** drop privileges. Order is not stylistic." |
 | **238** | `COMMIT` | "`SET LOCAL` reverts on `COMMIT` *and* `ROLLBACK` — so one user's tier can never leak onto the next user of a pooled connection." |
 | **255–279** | `withSenderTransaction` | "Same treatment for `chat_history` via `app.sender_id` (line **262**, role switch at **266**). Without the role switch, any sender could read any sender's history." |
-| **149–160** | **`withServiceClient` — the escape hatch** | "One bypass exists, deliberately. Separate pool, never switches role. The evaluation harness's **positive control** needs it: proving a canary is reachable at all is what makes 0% leakage mean anything. Never reachable from a user-facing path." |
-| **692–701** vs **749–757** | `querySimilarDocumentsByStrategy` (→ `withRlsTransaction`) vs `querySimilarDocumentsBypassRls` (→ `withServiceClient`) | "The secured and unsecured experiment arms, side by side. Same retrieval SQL, different transaction wrapper. That is the entire independent variable." |
+| **158** | **`withServiceClient` — the escape hatch** | "One bypass exists, deliberately. Separate pool, never switches role. The evaluation harness's **positive control** needs it: proving a canary is reachable at all is what makes 0% leakage mean anything. Never reachable from a user-facing path." |
+| **833–845** vs **852–863** | `querySimilarDocumentsByStrategy` (→ `withRlsTransaction`) vs `querySimilarDocumentsByStrategyBypassRls` (→ `withServiceClient`) | "The secured and unsecured experiment arms, side by side. Same retrieval SQL, different transaction wrapper. That is the entire independent variable." |
 
-### Optional pane 3 — `app/api/whatsapp/webhook/route.ts` (250 lines)
+### Optional pane 3 — `app/api/whatsapp/webhook/route.ts` (254 lines)
 
 Only if asked about production engineering.
 
 | Lines | Point |
 |---|---|
 | **1–5** | File header: verify, claim, enqueue, ACK — nothing touching Postgres or an LLM belongs here. |
-| **139–152** | HMAC-SHA256 verified against the **raw body bytes**, before parsing. |
-| **192–207** | Redis `SET NX` idempotency claim; Redis down → 503 so Meta redelivers (the only durability mechanism available). |
-| **232–246** | The non-blocking receipt: `void sendQueuedReceipt(...)` — fired, not awaited, because `sendWhatsAppTextMessage` retries up to 5 times over tens of seconds, and Meta redelivers anything not ACKed within seconds. |
-| **249** | The ACK. |
+| **138–153** | HMAC-SHA256 verified against the **raw body bytes**, before parsing. |
+| **192–211** | Redis `SET NX` idempotency claim; Redis down → 503 so Meta redelivers (the only durability mechanism available). |
+| **236–250** | The non-blocking receipt: `void sendQueuedReceipt(...)` — fired, not awaited, because `sendWhatsAppTextMessage` retries up to 5 times over tens of seconds, and Meta redelivers anything not ACKed within seconds. |
+| **253** | The ACK. |
 
 ---
 
@@ -299,7 +300,8 @@ an interactive WhatsApp assistant that disqualifies the approach outright.
 Two further caveats worth volunteering:
 - `R4` is **not a cross-encoder.** It is an LLM scoring each candidate pointwise
   (0–10, `temperature: 0`), exposed to self-preference bias and position bias
-  (§7.4). `RERANK_LLM_PROVIDER` exists to separate judge from generator.
+  (§7.4). The judge is the `LLM_PROVIDER` adapter — the same provider that
+  generates answers — so that bias is **not** neutralized in the recorded run.
 - It is the **only non-deterministic arm** — the only one where repeat runs
   produce genuine variance.
 
@@ -347,7 +349,7 @@ Three limits to state before being asked:
 | Usability cost | Answer Relevancy 81.1% → 68.7% (`A` → `C`) |
 | Re-rank cost | **+8,233 ms** P50 for +1.5 pp `Recall@3` |
 | Scale | 120 end-to-end runs · 90 retrieval observations · 30 queries · 15 docs · 600 judged pairs |
-| Test baseline | **243 tests, 21 suites, all passing** |
+| Test baseline | **271 tests, 21 suites, all passing** |
 | Total canary hits across the whole experiment | 19 |
 
 ---

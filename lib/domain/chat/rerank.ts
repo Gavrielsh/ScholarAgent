@@ -10,9 +10,11 @@
  * must say so:
  *
  * - **Self-preference bias.** If the same model both generates answers and ranks
- *   evidence, its rankings favour text it would itself produce. Set
- *   `RERANK_LLM_PROVIDER` to a different provider from `LLM_PROVIDER` and report
- *   both, or the measurement is contaminated.
+ *   evidence, its rankings favour text it would itself produce. The judge is
+ *   whatever `judgeFactory` the caller injects; the benchmark injects
+ *   `getLlmAdapter`, i.e. the `LLM_PROVIDER` provider, so judge and generator are
+ *   currently the same. Inject a different provider's adapter and report both,
+ *   or the measurement is contaminated.
  * - **Non-determinism.** Unlike arms R1–R3, which are deterministic SQL, R4's
  *   ordering can differ between runs. R4 is the one arm where repeated runs
  *   produce a genuine standard deviation rather than 0.

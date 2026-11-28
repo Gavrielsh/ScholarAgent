@@ -407,6 +407,133 @@ export function buildChunkMetadata(input: ChunkMetadataInput): Record<string, un
   };
 }
 
+/**
+ * The text that is both embedded and stored for a chunk: contextual header
+ * (document, classification level, section) followed by the chunk body.
+ *
+ * One definition shared by every ingestion path — HTTP upload, WhatsApp
+ * document and reconciliation — so a reconciled document is retrieved exactly
+ * like a freshly ingested one.
+ */
+export function withContextualHeader(
+  chunk: Pick<Chunk, "text" | "section">,
+  context: { filename: string; classificationLevel: PermissionLevel }
+): string {
+  return (
+    buildContextualHeader({
+      filename: context.filename,
+      classificationLevel: context.classificationLevel,
+      section: chunk.section,
+    }) + chunk.text
+  );
+}
+
+export interface ParentChildPlan {
+  parents: Chunk[];
+  children: ChildChunk[];
+  /** Header-prefixed parent bodies, index-aligned with `parents`. */
+  parentTexts: string[];
+  /** Header-prefixed child bodies, index-aligned with `children`. */
+  childTexts: string[];
+}
+
+/**
+ * redactPii → small-to-big chunking → contextual header, in the order every
+ * ingestion path applies them. `childTexts` is what gets embedded; both arrays
+ * are what gets stored. Used by reconciliation so a repaired document is built
+ * by exactly the same steps as a freshly ingested one.
+ */
+export function planParentChildChunks(input: {
+  text: string;
+  filename: string;
+  classificationLevel: PermissionLevel;
+  chunkOptions?: ChunkOptions;
+}): ParentChildPlan {
+  const { parents, children } = chunkTextParentChild(
+    redactPii(input.text),
+    input.chunkOptions
+  );
+  const headerContext = {
+    filename: input.filename,
+    classificationLevel: input.classificationLevel,
+  };
+  return {
+    parents,
+    children,
+    parentTexts: parents.map((chunk) => withContextualHeader(chunk, headerContext)),
+    childTexts: children.map((chunk) => withContextualHeader(chunk, headerContext)),
+  };
+}
+
+export interface ParentChildRecordsInput {
+  parents: readonly Chunk[];
+  children: readonly ChildChunk[];
+  /** Header-prefixed parent bodies, index-aligned with `parents`. */
+  parentTexts: readonly string[];
+  /** Header-prefixed child bodies, index-aligned with `children`. */
+  childTexts: readonly string[];
+  /** One embedding per CHILD, index-aligned with `children`. Parents get none. */
+  vectors: readonly number[][];
+  documentId: string;
+  filename: string;
+  mimeType: string;
+  uploadedByUserId: string;
+  classificationLevel: PermissionLevel;
+  /** Channel-specific metadata merged into every row (see `buildChunkMetadata`). */
+  extra?: Record<string, unknown>;
+}
+
+/**
+ * Assembles the rows `insertDocumentWithChunks` and `backfillDocumentChunks`
+ * persist: every parent first (embedding NULL), then every child carrying the
+ * `parentIndex` of its parent within this same array.
+ *
+ * Parents must precede children — the self-referencing FK needs the parent row
+ * inserted first, and `parentIndex` indexes into the returned array, so a
+ * parent's position equals its index in `parents`.
+ */
+export function buildParentChildRecords(input: ParentChildRecordsInput): DocumentChunkRecord[] {
+  if (input.vectors.length !== input.children.length) {
+    throw new Error(
+      `Embedding count mismatch: got ${input.vectors.length}, expected ${input.children.length}.`
+    );
+  }
+
+  const metadataFor = (chunk: Chunk, isParent: boolean) =>
+    buildChunkMetadata({
+      documentId: input.documentId,
+      filename: input.filename,
+      mimeType: input.mimeType,
+      uploadedByUserId: input.uploadedByUserId,
+      classificationLevel: input.classificationLevel,
+      chunk,
+      ...(isParent ? { isParent: true } : {}),
+      extra: input.extra,
+    });
+
+  return [
+    ...input.parents.map(
+      (chunk, i): DocumentChunkRecord => ({
+        text: input.parentTexts[i]!,
+        chunkIndex: chunk.index,
+        metadata: metadataFor(chunk, true),
+        embedding: null,
+        isParent: true,
+      })
+    ),
+    ...input.children.map(
+      (chunk, i): DocumentChunkRecord => ({
+        text: input.childTexts[i]!,
+        chunkIndex: chunk.index,
+        metadata: metadataFor(chunk, false),
+        embedding: input.vectors[i]!,
+        isParent: false,
+        parentIndex: chunk.parentIndex,
+      })
+    ),
+  ];
+}
+
 // -------------------------------------------------------------------------
 // Upload extraction and ingestion
 // -------------------------------------------------------------------------
@@ -500,15 +627,12 @@ export async function ingestDocument(input: UploadDocumentInput): Promise<Upload
   // generated from `content` and the lexical leg must see it too.
   const { parents, children } = chunkTextParentChild(sanitized, input.chunkOptions);
 
-  const withHeader = (chunk: Chunk): string =>
-    buildContextualHeader({
-      filename: input.filename,
-      classificationLevel: input.classificationLevel,
-      section: chunk.section,
-    }) + chunk.text;
-
-  const parentTexts = parents.map(withHeader);
-  const childTexts = children.map(withHeader);
+  const headerContext = {
+    filename: input.filename,
+    classificationLevel: input.classificationLevel,
+  };
+  const parentTexts = parents.map((chunk) => withContextualHeader(chunk, headerContext));
+  const childTexts = children.map((chunk) => withContextualHeader(chunk, headerContext));
 
   if (children.length === 0) {
     return { documentId, chunkCount: 0, insertedChunkIds: [], failures: [] };
@@ -554,51 +678,23 @@ export async function ingestDocument(input: UploadDocumentInput): Promise<Upload
     classificationLevel: input.classificationLevel,
     writePermissionLevel: input.uploadedByPermissionLevel,
     documentMetadata: input.extraMetadata ?? {},
-    // Parents first: the self-referencing FK requires a parent to be inserted
-    // before any child that points at it, and parentIndex is an index into this
-    // same array. insertDocumentWithChunks asserts the ordering.
-    chunks: [
-      ...parents.map((chunk, i) => ({
-        text: parentTexts[i]!,
-        chunkIndex: chunk.index,
-        metadata: buildChunkMetadata({
-          documentId,
-          filename: input.filename,
-          mimeType: input.mimeType,
-          uploadedByUserId: input.uploadedByUserId,
-          classificationLevel: input.classificationLevel,
-          chunk,
-          isParent: true,
-          extra: {
-            source: input.source ?? "upload_api",
-            ...(input.extraMetadata ?? {}),
-          },
-        }),
-        embedding: null,
-        isParent: true,
-      })),
-      ...children.map((chunk, i) => ({
-        text: childTexts[i]!,
-        chunkIndex: chunk.index,
-        metadata: buildChunkMetadata({
-          documentId,
-          filename: input.filename,
-          mimeType: input.mimeType,
-          uploadedByUserId: input.uploadedByUserId,
-          classificationLevel: input.classificationLevel,
-          chunk,
-          extra: {
-            source: input.source ?? "upload_api",
-            ...(input.extraMetadata ?? {}),
-          },
-        }),
-        embedding: vectors[i]!,
-        isParent: false,
-        // parents occupy [0, parents.length), so a parent's position in this
-        // array is exactly its index in `parents`.
-        parentIndex: chunk.parentIndex,
-      })),
-    ],
+    // Parents first (FK order); insertDocumentWithChunks asserts the ordering.
+    chunks: buildParentChildRecords({
+      parents,
+      children,
+      parentTexts,
+      childTexts,
+      vectors,
+      documentId,
+      filename: input.filename,
+      mimeType: input.mimeType,
+      uploadedByUserId: input.uploadedByUserId,
+      classificationLevel: input.classificationLevel,
+      extra: {
+        source: input.source ?? "upload_api",
+        ...(input.extraMetadata ?? {}),
+      },
+    }),
   });
 
   return {
@@ -936,15 +1032,9 @@ async function handleDocumentIngestion(
 
   // Contextual header, applied before embedding and stored as part of `content`
   // so the generated `content_tsv` carries it into the lexical leg too.
-  const header = (chunk: Chunk): string =>
-    buildContextualHeader({
-      filename: event.filename,
-      classificationLevel,
-      section: chunk.section,
-    }) + chunk.text;
-
-  const parentTexts = parents.map(header);
-  const childTexts = children.map(header);
+  const headerContext = { filename: event.filename, classificationLevel };
+  const parentTexts = parents.map((chunk) => withContextualHeader(chunk, headerContext));
+  const childTexts = children.map((chunk) => withContextualHeader(chunk, headerContext));
 
   // ── STEP 3: embed in rate-limit-friendly batches ──────────────────────────
   // Children only — parent rows are stored with embedding = NULL.
@@ -962,42 +1052,20 @@ async function handleDocumentIngestion(
     original_size_bytes: sizeBytes,
   };
 
-  // Parents first — the FK needs them inserted before their children, and
-  // parentIndex indexes into this array.
-  const records: DocumentChunkRecord[] = [
-    ...parents.map((chunk, i) => ({
-      text: parentTexts[i]!,
-      chunkIndex: chunk.index,
-      metadata: buildChunkMetadata({
-        documentId,
-        filename: event.filename,
-        mimeType: event.mimeType,
-        uploadedByUserId: user.userId,
-        classificationLevel,
-        chunk,
-        isParent: true,
-        extra: chunkMetadata,
-      }),
-      embedding: null,
-      isParent: true,
-    })),
-    ...children.map((chunk, i) => ({
-      text: childTexts[i]!,
-      chunkIndex: chunk.index,
-      metadata: buildChunkMetadata({
-        documentId,
-        filename: event.filename,
-        mimeType: event.mimeType,
-        uploadedByUserId: user.userId,
-        classificationLevel,
-        chunk,
-        extra: chunkMetadata,
-      }),
-      embedding: vectors[i]!,
-      isParent: false,
-      parentIndex: chunk.parentIndex,
-    })),
-  ];
+  // Parents first — the FK needs them inserted before their children.
+  const records: DocumentChunkRecord[] = buildParentChildRecords({
+    parents,
+    children,
+    parentTexts,
+    childTexts,
+    vectors,
+    documentId,
+    filename: event.filename,
+    mimeType: event.mimeType,
+    uploadedByUserId: user.userId,
+    classificationLevel,
+    extra: chunkMetadata,
+  });
 
   // ── STEP 4: single transaction — document row + every chunk ───────────────
   const result = await insertDocumentWithChunks({
@@ -1069,7 +1137,7 @@ async function handleIngestionFailure(
     return;
   }
 
-  // The document row is keyed on the Meta message id (migration 007), so a
+  // The document row is keyed on the Meta message id (migration 001), so a
   // duplicate means the work is already in the corpus. Confirming is correct;
   // retrying could only produce the same violation again.
   if (isUniqueViolation(err)) {

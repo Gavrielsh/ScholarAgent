@@ -2,7 +2,9 @@
 
 **Degree:** M.Sc. Software Engineering, AI Specialization — Azrieli College of Engineering, Jerusalem
 **Companion to:** `docs/research_proposal_agentic_rag.md`
-**Status:** planning document, written against the codebase at `032b17f`
+**Status:** planning document, written against the codebase at `032b17f`; the status
+columns and §5.3, §7 and §9 were updated to match the current `main`. The first two
+experiments it calls for have since been run — see `docs/experimental_results.md`.
 
 ---
 
@@ -139,10 +141,10 @@ path.**
 
 | | Question | Metric | Status |
 |---|---|---|---|
-| **RQ1** | Given a retrieval failure, how often does the model contain it? | Containment Gap | metric built, not wired |
-| **RQ2** | With clean retrieval, how often does the model disclose anyway, by attack family? | Unconditional Leakage | metric built, not wired |
+| **RQ1** | Given a retrieval failure, how often does the model contain it? | Containment Gap | wired into `evaluate_runner.ts`; measured descriptively (`experimental_results.md` §5.5) |
+| **RQ2** | With clean retrieval, how often does the model disclose anyway, by attack family? | Unconditional Leakage | wired into `evaluate_runner.ts`; measured descriptively (§5.5) |
 | **RQ3** | Does model-driven control over retrieval increase leakage versus deterministic routing? | G-DLS across control conditions | agentic path not built |
-| **RQ4** | Does hybrid RRF improve retrieval over dense-only in Hebrew? | Context Precision / Recall | **no dense-only arm exists** |
+| **RQ4** | Does hybrid RRF improve retrieval over dense-only in Hebrew? | Context Precision / Recall | arms `R1`–`R4` exist (`retrievalArms.ts`); **undecided** — the recorded run predates the lexical OR-join fix |
 | **RQ5** | Does deterministic pre-retrieval safety interception detect distress reliably? | interception rate | **no metric exists** |
 
 ### 5.2 Design: three staged experiments, not one grand factorial
@@ -167,15 +169,16 @@ failures the Containment Gap has an empty conditioning set and is not estimable.
 
 ### 5.3 Dataset
 
-Current: 25 records (5 standard, 20 adversarial), `scripts/data/golden_dataset.ts`.
+Current: 30 queries — 15 `standard_ir`, 6 `canary_extraction`, 6 `semantic_collision`, 3 `privilege_escalation` — in `scripts/data/golden_dataset.json` (typed by `golden_dataset.ts`), over a 15-document synthetic corpus with 318 forbidden terms and 5 seeded canaries (`npm run eval:seed`).
 
 Required:
 - **Expand to ~120.** Proportions near 0 or 1 have wide intervals at n=20; family-level
   breakdowns at n=4 per family say nothing.
 - **Balance across the four permission levels** and the five attack families.
 - **Seed canaries into the classified corpus.** A canary that appears in no L0 document
-  cannot prove disclosure — it proves only that the model invented a string. This is a
-  data-preparation task, not a code task, and it gates the deterministic channel.
+  cannot prove disclosure — it proves only that the model invented a string. *Done:* the
+  eval corpus contains natural canaries and `npm run eval:seed` plants five more, with a
+  positive and a negative control.
 - **Keep a benign control family.** Without it, over-refusal is invisible and a system
   that refuses everything scores perfectly on leakage.
 
@@ -224,12 +227,12 @@ that tested none.
 | **H3** | DLS = 0% guaranteed | A guarantee is not a hypothesis; and retrieval-stage DLS alone cannot support it | Split: R-DLS = 0 under RLS (testable), and CG / UL reported as findings |
 | **H4** | 100% distress detection, zero latency | Not measured anywhere; and `guardrails.ts` patterns were recently narrowed | Build the interception metric first, then state a hypothesis you can lose |
 
-On H4 specifically: the distress patterns `חרם`, `השפלה`, `משפילים` were removed on
-`refactor/arch-audit-and-worker-resilience`. That change is deliberately not merged. It
-probably reduces false positives, but social exclusion and humiliation are central cases
-in a social-educational organization, and the effect on recall is unmeasured. **Measure
-before and after and the change becomes a finding; merge it silently and it becomes a
-confound.**
+On H4 specifically: `lib/security/guardrails.ts` currently still contains the distress
+patterns `חרם`, `עושים חרם` and `השפלה` — the narrowing once proposed on a refactor branch
+is not in `main`. Social exclusion and humiliation are central cases in a
+social-educational organization, and the recall/false-positive trade-off of any future
+narrowing is unmeasured. **Measure before and after and the change becomes a finding;
+merge it silently and it becomes a confound.**
 
 ---
 
@@ -252,11 +255,13 @@ confound.**
 
 The ordering is by what unblocks the most downstream work, not by effort.
 
-1. **Wire G-DLS into `scripts/evaluate_runner.ts`** — add `LeakageSpec` to the adversarial
-   records, seed canaries into the corpus, emit `gDls` on `EvalRow`, aggregate. Until
-   this exists, the primary contribution produces no numbers.
-2. **Add the dense-only arm and split the confound** (E1, E2). Without it RQ4 is
-   unanswerable and RQ1 is uninterpretable.
+1. ~~**Wire G-DLS into `scripts/evaluate_runner.ts`**~~ — **done.** `LeakageSpec`s live in
+   `scripts/data/leakage_specs.ts`, canaries are seeded, and each row records
+   `generationLeaked`, `canaryHit` and `leakageAgreement`.
+2. **Split the confound** (E1, E2). The dense-only arm (`R2_dense`) now exists and the
+   2×2 security × model matrix (configs A–D) separates enforcement from model, but
+   orchestration is still not an independent factor, and `R1`/`R3` need a re-run after
+   the lexical fix before RQ4 can be answered.
 3. **Repetition and statistics** — k=5, bootstrap CIs, Wilcoxon. Cheap in code, and
    everything downstream depends on it.
 4. **Judge validation** — label the subsample, compute κ. Do this before generating
@@ -265,9 +270,9 @@ The ordering is by what unblocks the most downstream work, not by effort.
 6. **Safety interception metric** (RQ5), then evaluate the `guardrails.ts` narrowing.
 7. **Build the agentic path** (RQ3). The largest piece, and the one that resolves the
    title. Start it only once 1–4 make it measurable.
-8. **Update the proposal** — stale file paths from the refactor, stale model names, and
-   the FTS description (it claims Hebrew dictionaries; the schema uses
-   `to_tsvector('simple')`, which does no morphological analysis — see below).
+8. ~~**Update the proposal**~~ — **done** for file paths, model names and the FTS
+   description in `docs/research_proposal_agentic_rag.md` and `docs/proposal.md`
+   (the schema uses `to_tsvector('simple')`, which does no morphological analysis — see below).
 
 ### A finding already in hand
 
@@ -277,7 +282,8 @@ configuration performs tokenization and lowercasing only — no stemming, no sto
 morphology. In Hebrew, `ילד`, `הילד`, `לילד` and `ילדים` are therefore four unrelated
 tokens.
 
-This means the sparse arm of the hybrid retriever is **structurally handicapped**, which
+(The lexical leg has since been changed to OR-join its terms — commit `76eb1a3` — which fixes
+the empty-result bug but not the morphology gap.) This means the sparse arm of the hybrid retriever is **structurally handicapped**, which
 depresses the measured benefit of RRF and weakens RQ4 before a single experiment runs. It
 is also a ready-made secondary contribution: measure RRF gain with `simple` versus a
 Hebrew-aware configuration (prefix stripping for ו/ב/ל/ה/כ/מ/ש, lemmatization,

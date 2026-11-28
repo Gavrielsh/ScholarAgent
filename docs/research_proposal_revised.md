@@ -5,7 +5,7 @@
 **Author:** Gabriel Shalem
 **Advisor:** Dr. Asaf Shfeiner
 **Revision date:** November 2026
-**Codebase reference:** `032b17f`
+**Codebase reference:** `032b17f` (design baseline); §6 and §7.2 updated to the current `main`
 
 > This revision supersedes the three-hypothesis draft that spanned architecture,
 > security and learning science. `docs/research_proposal_agentic_rag.md` is left in place
@@ -217,14 +217,14 @@ contribution.
 | Layer | Implementation |
 |---|---|
 | Runtime | Next.js 14 (App Router), TypeScript, Node 20 |
-| Vector store | PostgreSQL 16 + pgvector; 768-dim embeddings (Gemini text-embedding-004), HNSW with `vector_cosine_ops` |
-| Retrieval | Hybrid: dense (`1 − cosine`) and lexical (`ts_rank_cd`), merged by Reciprocal Rank Fusion, k = 60 |
-| Access control | `FORCE ROW LEVEL SECURITY` on `knowledge_base`; policy `classification_level >= current_setting('app.user_permission_level')`, set per transaction |
+| Vector store | PostgreSQL 16 + pgvector; 768-dim embeddings (`gemini-embedding-001`), HNSW with `vector_cosine_ops` |
+| Retrieval | Hybrid: dense (`1 − cosine`) and lexical (`ts_rank_cd`, OR-joined terms), merged by Reciprocal Rank Fusion, k = 60; small-to-big parent/child chunks (1,400 / 400) with a contextual header |
+| Access control | `FORCE ROW LEVEL SECURITY` on `knowledge_base`, `ingested_documents` and `chat_history`; policy `classification_level >= nullif(current_setting('app.user_permission_level', true), '')::integer`, with the tier set per transaction and the connection switched to the least-privilege `scholaragent_app` role (`SET LOCAL ROLE`) |
 | Authorization model | Four tiers, L0 (Admin) – L3 (Volunteer); **hierarchical**, not multi-tenant |
 | Async execution | BullMQ + Redis, separate queues for chat and document ingestion |
 | Gateway | WhatsApp Cloud API with HMAC-SHA256 verification and Redis idempotency |
-| Orchestration | Deterministic TypeScript state machine (intent routing, session modes, safety signals) |
-| Evaluation | `scripts/evaluate_runner.ts` over `scripts/data/golden_dataset.ts`; RAGAS metrics, R-DLS, G-DLS |
+| Orchestration | Deterministic TypeScript state machine (lexical intent routing into bounded handlers, session modes, safety signals); one generation call per turn, no tool loop |
+| Evaluation | `scripts/evaluate_runner.ts` over `scripts/data/golden_dataset.json`; RAGAS metrics, R-DLS, G-DLS; per-query `executionCostUsd` estimate in `lib/core/telemetry.ts` |
 
 **Scale hazard, recorded because it affects interpretation.** The `similarity` field
 carries `1 − cosine` for the dense arm and `ts_rank_cd` for the lexical arm, and RRF sorts
@@ -258,9 +258,12 @@ observed difference can be attributed to either.
 
 ### 7.2 Dataset
 
-Current: 25 records — 5 standard, 20 adversarial — across five attack families
+Design baseline: 25 records — 5 standard, 20 adversarial — across five attack families
 (authorization escalation, PII extraction, distress signal, prompt injection, benign
-control) and four permission levels.
+control) and four permission levels. **Current `main`:** 30 queries (15 `standard_ir`,
+6 `canary_extraction`, 6 `semantic_collision`, 3 `privilege_escalation`) in
+`scripts/data/golden_dataset.json`, over a 15-document corpus with seeded canaries;
+the expansion to ~120 records below is still outstanding.
 
 Required for this design:
 

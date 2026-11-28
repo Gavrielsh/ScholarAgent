@@ -900,7 +900,7 @@ export async function querySimilarDocumentsBypassRls(
 }
 
 // ---------------------------------------------------------------------------
-// Transactional document ingestion (migration 007)
+// Transactional document ingestion (migration 001)
 // ---------------------------------------------------------------------------
 
 export interface DocumentChunkRecord {
@@ -965,6 +965,39 @@ export interface InsertDocumentResult {
   alreadyIngested: boolean;
 }
 
+/**
+ * Maps each chunk's `parentIndex` to the parent row's UUID. Validated before
+ * BEGIN: a forward or out-of-range reference would otherwise surface as an
+ * opaque FK violation mid-transaction, and a self-reference would insert a row
+ * that points at itself. Shared by first ingestion and reconciliation so both
+ * enforce the same parent-before-child contract.
+ */
+export function resolveParentIds(
+  chunks: readonly Pick<DocumentChunkRecord, "isParent" | "parentIndex">[],
+  chunkIds: readonly string[]
+): Array<string | null> {
+  return chunks.map((c, i) => {
+    const pi = c.parentIndex;
+    if (pi === undefined || pi === null) return null;
+    if (!Number.isInteger(pi) || pi < 0 || pi >= chunks.length) {
+      throw new Error(`Chunk ${i} has out-of-range parentIndex ${pi}.`);
+    }
+    if (pi === i) {
+      throw new Error(`Chunk ${i} lists itself as its own parent.`);
+    }
+    if (pi > i) {
+      throw new Error(
+        `Chunk ${i} references parentIndex ${pi}, which is inserted later; ` +
+          "parents must precede their children."
+      );
+    }
+    if (chunks[pi]?.isParent !== true) {
+      throw new Error(`Chunk ${i} points at index ${pi}, which is not a parent row.`);
+    }
+    return chunkIds[pi] ?? null;
+  });
+}
+
 const INSERT_INGESTED_DOCUMENT_SQL = `
   INSERT INTO ingested_documents (
     id, source, filename, mime_type, size_bytes, sha256,
@@ -1010,30 +1043,7 @@ export async function insertDocumentWithChunks(
   const metadata = input.chunks.map((c) => JSON.stringify(c.metadata));
   const isParentFlags = input.chunks.map((c) => c.isParent === true);
 
-  // parentIndex -> the parent's generated UUID. Validated before BEGIN: a
-  // forward or out-of-range reference would otherwise surface as an opaque FK
-  // violation mid-transaction, and a self-reference would insert a row that
-  // points at itself.
-  const parentIds = input.chunks.map((c, i) => {
-    const pi = c.parentIndex;
-    if (pi === undefined || pi === null) return null;
-    if (!Number.isInteger(pi) || pi < 0 || pi >= input.chunks.length) {
-      throw new Error(`Chunk ${i} has out-of-range parentIndex ${pi}.`);
-    }
-    if (pi === i) {
-      throw new Error(`Chunk ${i} lists itself as its own parent.`);
-    }
-    if (pi > i) {
-      throw new Error(
-        `Chunk ${i} references parentIndex ${pi}, which is inserted later; ` +
-          "parents must precede their children."
-      );
-    }
-    if (input.chunks[pi]?.isParent !== true) {
-      throw new Error(`Chunk ${i} points at index ${pi}, which is not a parent row.`);
-    }
-    return chunkIds[pi] ?? null;
-  });
+  const parentIds = resolveParentIds(input.chunks, chunkIds);
 
   return withClient(async (client) => {
     try {
@@ -1288,12 +1298,18 @@ const RECONCILE_CHUNK_ID_NAMESPACE = "6f5b1c9e-8f3a-4d5e-9c2b-1a7d0e4f6b83";
  * an in-place overwrite rather than a second copy of the document in the corpus.
  * randomUUID() would produce a fresh set every run.
  */
-function deterministicChunkId(documentId: string, chunkIndex: number): string {
+export function deterministicChunkId(
+  documentId: string,
+  chunkIndex: number,
+  isParent = false
+): string {
   const namespace = Buffer.from(RECONCILE_CHUNK_ID_NAMESPACE.replace(/-/g, ""), "hex");
-  const digest = createHash("sha1")
-    .update(namespace)
-    .update(`${documentId}:${chunkIndex}`, "utf8")
-    .digest();
+  // Parents and children are numbered independently (each starts at 0), so the
+  // two ordinals would collide without a discriminator. The child key keeps the
+  // original `documentId:chunkIndex` spelling, so ids of searchable rows are
+  // unchanged from before parent/child reconciliation existed.
+  const name = isParent ? `${documentId}:parent:${chunkIndex}` : `${documentId}:${chunkIndex}`;
+  const digest = createHash("sha1").update(namespace).update(name, "utf8").digest();
 
   const bytes = Buffer.from(digest.subarray(0, 16));
   bytes[6] = (bytes[6] & 0x0f) | 0x50; // version 5
@@ -1347,7 +1363,9 @@ export async function backfillDocumentChunks(
     throw new Error("Cannot backfill a document with zero chunks.");
   }
 
-  const chunkIds = input.chunks.map((c) => deterministicChunkId(input.documentId, c.chunkIndex));
+  const chunkIds = input.chunks.map((c) =>
+    deterministicChunkId(input.documentId, c.chunkIndex, c.isParent === true)
+  );
   const texts = input.chunks.map((c) => c.text);
   const levels = input.chunks.map(() => input.classificationLevel);
   // Serialised before BEGIN so a dimension mismatch fails before a connection is
@@ -1356,12 +1374,13 @@ export async function backfillDocumentChunks(
     c.embedding === null ? null : toVectorLiteral(c.embedding)
   );
   const metadata = input.chunks.map((c) => JSON.stringify(c.metadata));
-  // Reconciliation re-ingests a document as flat searchable chunks, exactly as
-  // it did before migration 004. It does not reconstruct a parent/child tree:
-  // the rows it repairs were written flat, and inventing parents for them here
-  // would change what the retrieval path returns for already-graded documents.
+  // The same parent/child hierarchy first ingestion writes: parents carry no
+  // embedding, children point at their parent's (deterministic) id, and parents
+  // must precede children in `input.chunks`. A flat caller (no isParent /
+  // parentIndex) still yields flat rows, so the contract is a superset.
   const isParentFlags = input.chunks.map((c) => c.isParent === true);
-  const parentIds = input.chunks.map(() => null);
+  const parentIds = resolveParentIds(input.chunks, chunkIds);
+  const searchableCount = input.chunks.filter((c) => c.isParent !== true).length;
 
   return withClient(async (client) => {
     try {
@@ -1421,7 +1440,7 @@ export async function backfillDocumentChunks(
                            || jsonb_build_object('reconciled_at', to_jsonb(now()))
                            - 'reconcile_error'
           WHERE id = $1;`,
-        [input.documentId, input.chunks.length]
+        [input.documentId, searchableCount]
       );
 
       await client.query("COMMIT");

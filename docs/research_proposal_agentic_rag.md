@@ -6,6 +6,13 @@
 **Advisor:** Dr. Asaf Shfeiner  
 **Date:** April 2026 (Updated)
 
+> **Status note (current `main`).** This is the original proposal, kept for comparison.
+> Its hypotheses were superseded by `docs/research_proposal_revised.md`, and the
+> experiments actually run are reported in `docs/experimental_results.md`. The technical
+> sections below describe the implementation as it exists today: a **deterministic**,
+> state-orchestrated pipeline — lexical intent routing into bounded handlers and one
+> generation call per turn — not an autonomous tool-calling agent.
+
 ---
 
 ## 1. Research Focus & Problem Statement
@@ -22,7 +29,7 @@ What added value does a deterministic, state-orchestrated **Agentic-RAG** archit
 
 ### Sub-Questions
 - How does **Hybrid Search** (Dense Vector Cosine Distance + Sparse Full-Text Search via Reciprocal Rank Fusion) combined with transactional PostgreSQL Row-Level Security (RLS) impact retrieval precision and security boundary enforcement?
-- How do leading frontier LLM providers (Anthropic Claude 3.5 Sonnet, Google Gemini 1.5/2.0, OpenAI GPT-4o) compare in faithfulness, latency, and instruction adherence under multi-tenant RBAC/RLS constraints?
+- How do leading frontier LLM providers (Anthropic Claude Sonnet 4.6, Google Gemini 3.5 Flash, OpenAI GPT-4o-mini) compare in faithfulness, latency, and instruction adherence under multi-tenant RBAC/RLS constraints?
 - Can cross-tier information leakage across hierarchical authorization layers be systematically prevented and quantified via a novel **Data Leakage Score (DLS)**?
 
 ---
@@ -32,9 +39,9 @@ What added value does a deterministic, state-orchestrated **Agentic-RAG** archit
 | ID | Hypothesis Statement |
 |---|---|
 | **H1** | **Hybrid Retrieval with Intent Routing** achieves $\ge 15\%$ higher Context Precision and Context Recall than Baseline naive vector search through query classification and Reciprocal Rank Fusion (RRF). |
-| **H2** | **Frontier Model Adherence:** Anthropic Claude 3.5 Sonnet and Gemini 1.5 Pro demonstrate statistically superior Faithfulness ($> 90\%$) compared to lightweight models, while maintaining sub-3-second end-to-end response latency. |
-| **H3** | **Zero Data Leakage:** Implementing dual-layer security (Application RBAC + Transactional Database RLS) guarantees a Data Leakage Score (DLS) of **0%** in both baseline and agentic configurations, whereas non-RLS baseline configurations yield $	ext{DLS} > 0\%$. |
-| **H4** | **Safety Interception:** Pre-retrieval deterministic regex and heuristic signal processing (`SafetySignals`) detects 100% of emergency/distress intents with zero LLM-latency overhead. |
+| **H2** | **Frontier Model Adherence:** Anthropic `claude-sonnet-4-6` and Google `gemini-3.5-flash` demonstrate statistically superior Faithfulness ($> 90\%$) compared to lightweight models, while maintaining sub-3-second end-to-end response latency. |
+| **H3** | **Zero Data Leakage:** Implementing dual-layer security (Application RBAC + Transactional Database RLS) guarantees a Data Leakage Score (DLS) of **0%** in both baseline and agentic configurations, whereas non-RLS baseline configurations yield $\text{DLS} > 0\%$. |
+| **H4** | **Safety Interception:** Pre-retrieval deterministic regex and heuristic signal processing (`evaluateInboundSafety`) detects 100% of emergency/distress intents with zero LLM-latency overhead. |
 
 ---
 
@@ -44,56 +51,46 @@ The system is implemented as a production-grade, event-driven enterprise applica
 
 | Layer / Component | Implemented Technology | Codebase Reference |
 |---|---|---|
-| **Core Runtime & Backend** | Next.js (App Router), TypeScript (ESNext, Node.js 20+) | `app/api/`, `lib/core/` |
-| **Database & Vector Store** | PostgreSQL 16 + `pgvector` (Cosine Distance `<=>`, HNSW/IVFFlat indexing) | `lib/core/db/client.ts`, `lib/core/db/pgvector.ts` |
-| **Search Mechanism** | **Hybrid Search:** Dense vector embeddings (1536-dim) + Hebrew/English Full-Text Search (`tsvector`, `ts_rank_cd`) via **Reciprocal Rank Fusion (RRF)** | `lib/core/db/pgvector.ts`, `migrations/001_initial_schema.sql` |
-| **Security & Authorization** | Dual-layer: Application-level RBAC + Transactional PostgreSQL Row-Level Security (`SET LOCAL app.current_user_role`) | `lib/security/auth/rbac.ts`, `lib/security/auth/rls.ts`, `migrations/001_initial_schema.sql` |
-| **Asynchronous Message Queue** | **BullMQ + Redis** (separate queues for WhatsApp ingestion and heavy document parsing) | `lib/core/queue/`, `lib/domain/ingestion/queue/`, `lib/domain/whatsapp/queue/`, `lib/core/redis/client.ts`, `docker/Dockerfile.worker` |
-| **Messaging & Gateway Interface** | WhatsApp Cloud API (Meta Graph API) + HMAC-SHA256 signature verification & Redis idempotency deduplication | `lib/domain/whatsapp/`, `lib/security/crypto/verifySignature.ts`, `app/api/whatsapp/webhook/route.ts` |
-| **Agentic State & Orchestration** | Deterministic TypeScript State Orchestrator (`BaselineOrchestrator`, `IntentRouter`, `SafetySignals`, Session Managers) | `lib/domain/chat/agent/baseline/`, `lib/domain/chat/agent/state.ts`, `lib/security/guardrails/safetySignals.ts` |
-| **Supported LLM Providers** | **Unified Adapter:** Google Gemini (1.5 Pro, 2.0 Flash), Anthropic Claude (3.5 Sonnet, 3 Haiku), OpenAI (GPT-4o, GPT-4o-mini), Mock Provider | `lib/domain/chat/llm/providers/`, `lib/domain/chat/llm/adapter.ts` |
-| **ETL & Data Sanitization** | Semantic chunking with heading preservation + automated PII scrubbing (Israeli ID, phone numbers, emails) | `lib/domain/ingestion/processor/chunker.ts`, `lib/security/privacy/piiRedact.ts` |
-| **Evaluation & Benchmark** | Automated evaluation harness with Golden Dataset + RAGAS metric suite + Data Leakage Score (DLS) | `scripts/evaluate_runner.ts`, `scripts/data/golden_dataset.ts`, `lib/core/metrics/` |
+| **Core Runtime & Backend** | Next.js 14 (App Router), TypeScript, Node.js 20.18+ | `app/api/`, `lib/core/` |
+| **Database & Vector Store** | PostgreSQL 16 + `pgvector` (cosine distance `<=>`, HNSW `m=16`, `ef_construction=64`, 768 dimensions) | `lib/core/db.ts`, `migrations/001_initial_schema.sql` |
+| **Embeddings** | `gemini-embedding-001` at 768 dimensions, batched with paced slices and retry | `lib/domain/ingestion/embeddings.ts` |
+| **Search Mechanism** | **Hybrid Search:** dense vector search + lexical search (`ts_rank_cd` over `to_tsvector('simple')`, OR-joined terms) fused by **Reciprocal Rank Fusion** (k = 60); small-to-big parent/child chunks | `lib/core/db.ts` (`executeRetrieval`, `reciprocalRankFusion`, `resolveParentChunks`), `migrations/004_parent_child_chunks.sql` |
+| **Security & Authorization** | Four-tier RBAC lookup plus database-enforced RLS: per transaction `set_config('app.user_permission_level', …, true)` followed by `SET LOCAL ROLE scholaragent_app` (`NOLOGIN NOSUPERUSER NOBYPASSRLS`); `FORCE ROW LEVEL SECURITY` on `knowledge_base`, `ingested_documents`, `chat_history` | `lib/security/auth.ts`, `lib/core/db.ts`, `migrations/001_initial_schema.sql` |
+| **Asynchronous Message Queue** | **BullMQ + Redis**: one queue for WhatsApp chat, one for document ingestion | `lib/core/queue.ts`, `lib/core/redis.ts`, `lib/domain/whatsapp/worker.ts`, `lib/domain/ingestion/worker.ts`, `docker/Dockerfile.worker` |
+| **Messaging & Gateway Interface** | WhatsApp Cloud API; HMAC-SHA256 verified against the raw body with a timing-safe compare; Redis `SET NX` idempotency claim | `app/api/whatsapp/webhook/route.ts`, `lib/security/crypto.ts`, `lib/domain/whatsapp/` |
+| **Orchestration** | Deterministic TypeScript orchestration: `processBaselineQuery` routes lexically into bounded handlers (knowledge RAG, chat history, L0/L1 admin flows) with session modes. The model makes no control decisions and there is no tool loop | `lib/domain/chat/agent.ts`, `lib/domain/chat/state.ts`, `lib/domain/chat/session/` |
+| **Safety Guardrails** | Deterministic pre-LLM distress handoff, privacy screens and PII redaction (`redactPii`) | `lib/security/guardrails.ts` |
+| **Supported LLM Providers** | **Unified adapter** over raw HTTP (no vendor SDK): Anthropic Claude (`claude-sonnet-4-6`; fast tier `claude-haiku-4-5`), Google Gemini (`gemini-3.5-flash`), OpenAI (`gpt-4o-mini`), and a deterministic Mock. Two retries (500 ms, 1,500 ms) on 429, 5xx and timeout | `lib/domain/chat/llm.ts` |
+| **ETL & Data Sanitization** | PDF / DOCX / TXT / MD / CSV extraction (no OCR: an image-only PDF is rejected), PII scrubbing (Israeli ID, phone numbers, emails), Hebrew-aware sentence chunking with heading detection, parent/child chunks (1,400 / 400, overlap 60) and a contextual header per chunk | `lib/domain/ingestion/pipeline.ts`, `lib/security/guardrails.ts` |
+| **Reconciliation** | Rebuilds chunks for registered documents that lost them, through the same parent/child + header helpers as live ingestion | `scripts/reconcile_documents.ts`, `backfillDocumentChunks` in `lib/core/db.ts` |
+| **Evaluation & Benchmark** | Evaluation harness over a 30-query golden dataset, RAGAS-style metrics, retrieval- and generation-stage Data Leakage Score, IR benchmark of four retrieval arms | `scripts/evaluate_runner.ts`, `scripts/data/golden_dataset.json`, `scripts/benchmark_retrieval.ts`, `lib/core/telemetry.ts`, `lib/core/irMetrics.ts` |
+| **Telemetry & Cost** | Optional Langfuse tracing; provider-reported token usage priced per model into `executionCostUsd` (an estimate; absent for mock or unpriced models) | `lib/core/telemetry.ts`, `lib/domain/chat/llm.ts` |
 
 ### 3.1 Module Boundaries (Domain-Driven Design)
 
-The `lib/` tree is organized into three boundaries, intended so that
-dependencies flow inward: domain logic may depend on security and core, but not
-the reverse.
+The `lib/` tree is organized into three boundaries, so that dependencies flow
+inward: domain logic may depend on security and core, but not the reverse.
 
 | Boundary | Responsibility | Contents |
 |---|---|---|
-| **`lib/core/`** | Technology-facing infrastructure with no business rules | `db/`, `redis/`, `queue/` (connection + job runtime), `http/`, `env/`, `logger.ts`, `observability/`, `metrics/` |
-| **`lib/security/`** | Cross-cutting security concerns enforced independently of any single domain | `auth/` (RBAC, RLS, roles, user registry), `crypto/` (HMAC webhook signature verification), `privacy/` (PII redaction), `guardrails/` (inbound safety signals) |
-| **`lib/domain/`** | Business domains, each owning its own processing, queues, and workers | `admin/` (audit logs), `chat/` (`session/`, `agent/`, `llm/`), `ingestion/` (`processor/`, `queue/`, `workers/`), `whatsapp/` (`core/`, `queue/`, `workers/`) |
+| **`lib/core/`** | Technology-facing infrastructure with no business rules | `db.ts`, `db/accessLevel.ts`, `queue.ts`, `redis.ts`, `telemetry.ts`, `irMetrics.ts`, `env.ts`, `logger.ts`, `http/fetchWithTimeout.ts` |
+| **`lib/security/`** | Cross-cutting security concerns enforced independently of any single domain | `auth.ts` (four-tier RBAC, user registry, phone normalization), `crypto.ts` (HMAC webhook verification), `guardrails.ts` (PII redaction, distress handoff, privacy screens), `extractUser.ts` (JWT identity) |
+| **`lib/domain/`** | Business domains | `admin/` (audit logs), `chat/` (agent, RAG, LLM adapters, `session/`), `ingestion/` (pipeline, embeddings, retrieval, worker), `whatsapp/` (webhook handling, worker, client) |
 
 Two consequences of this layout are relevant to the security claims in Sections 4
-and 5. First, PII redaction and the inbound safety guardrails are no longer
-embedded inside the ingestion and agent packages respectively; they are
-independent security modules invoked by those domains, which makes the
-sanitization boundary auditable in isolation. Second, HMAC signature
-verification sits in `lib/security/crypto/` rather than in the WhatsApp domain,
-so the gateway's authenticity check is separable from its message-parsing logic.
+and 5. First, PII redaction and the inbound safety guardrails are independent
+security modules invoked by the domains, which makes the sanitization boundary
+auditable in isolation. Second, HMAC signature verification sits in
+`lib/security/crypto.ts` rather than in the WhatsApp domain, so the gateway's
+authenticity check is separable from its message-parsing logic.
 
-Both boundaries now satisfy the intended direction in full. `lib/security/`
-depends only on `lib/core/` and imports nothing from `lib/domain/`. `lib/core/`
-imports nothing outward at all: its only non-relative imports are the `pg`,
-`bullmq` and `ioredis` drivers, `node:crypto`, and other `lib/core/` modules.
-
-An earlier revision of this section recorded four outward dependencies in
-`lib/core/` inherited from the pre-refactor layout — the vector store owning
-inline chunking and embedding, LLM-as-judge scoring reaching into the chat
-domain's provider adapter, trace payloads typed in terms of chat message types,
-and `PermissionLevel` / `UserContext` crossing in as RLS and scoring parameters.
-All four were resolved by the consolidation that followed, which moved the
-behaviour rather than the files: the embed-and-chunk step left the persistence
-layer for `lib/domain/ingestion/`, and the shared permission type became the
-dependency-free `AccessLevel` contract in `lib/core/db/accessLevel.ts`, which
-both `lib/core/db.ts` and `lib/core/telemetry.ts` consume structurally without
-knowing the role model around it.
-
-Verified against the codebase at `032b17f` by enumerating every import in
-`lib/core/` and `lib/security/`.
+Both boundaries satisfy the intended direction in full. `lib/security/` imports
+nothing from `lib/domain/`, and `lib/core/` imports from neither `lib/domain/` nor
+`lib/security/`. The shared permission type is the dependency-free `AccessLevel`
+contract in `lib/core/db/accessLevel.ts`, which both `lib/core/db.ts` and
+`lib/core/telemetry.ts` consume structurally without knowing the role model around
+it. The consolidation is enforced by review and by the module layout described in
+`CLAUDE.md`.
 
 All intra-project imports use the absolute `@/lib/...` path alias; no relative
 cross-module imports exist, so a module's dependencies — and therefore any
@@ -103,7 +100,10 @@ boundary violation — are readable directly from its import block.
 
 ## 4. Multi-Tier Authorization Model (Four-Tier Hierarchy)
 
-Following schema consolidation into a single canonical baseline (`migrations/001_initial_schema.sql`, which folds in the former incremental series), the system implements a strict **Four-Tier Role-Based and Row-Level Access Control Model (L0–L3)**:
+The schema lives in a single canonical baseline (`migrations/001_initial_schema.sql`),
+with `002` (knowledge gaps), `004` (parent/child chunks) and `005` (user memories)
+applied on top. The system implements a strict **Four-Tier Role-Based and Row-Level
+Access Control Model (L0–L3)**:
 
 ```
 [L0: ADMIN] (Permission Level 0) ──► Full system visibility, audit logs, system telemetry
@@ -116,74 +116,83 @@ Following schema consolidation into a single canonical baseline (`migrations/001
 ```
 
 ### 4.1 Hierarchical Constraint Logic
-In this numeric representation, a lower integer denotes a higher privilege level ($0 \le \text{Level} \le 3$). 
+In this numeric representation, a lower integer denotes a higher privilege level ($0 \le \text{Level} \le 3$).
 
 - **Access Invariant:** A user with permission level $P_{\text{user}}$ is permitted to retrieve chunk $C$ if and only if:
   $$\text{ClassificationLevel}(C) \ge P_{\text{user}}$$
 - **Enforcement Layers:**
-  1. **Application-Layer RBAC:** Validates extracted user identity, active state, and role mappings (`lib/security/auth/extractUser.ts`, `lib/security/auth/rbac.ts`).
-  2. **Database-Layer Transactional RLS:** Every query executes inside a transaction setting local session variables:
+  1. **Application-Layer RBAC:** Validates the sender's identity and role (`lookupUserByPhone` / `lookupUserById` in `lib/security/auth.ts`; JWT identity in `lib/security/extractUser.ts`). Corpus writes are restricted to L0/L1, and a tier can manage only tiers below it.
+  2. **Database-Layer Transactional RLS:** Every user-facing query executes inside a transaction that sets the tier and then drops privileges:
      ```sql
-     SET LOCAL app.current_user_role = 'STAFF';
-     SET LOCAL app.current_user_id = 'user_uuid';
+     BEGIN;
+     SELECT set_config('app.user_permission_level', '<tier>', true);   -- GUC first
+     SET LOCAL ROLE scholaragent_app;   -- NOLOGIN, NOSUPERUSER, NOBYPASSRLS
+     -- ... query ...
+     COMMIT;   -- SET LOCAL reverts: no tier leaks onto the next pooled use
      ```
-     PostgreSQL RLS policies directly filter document chunks and chat session history.
+     Own-history reads use `app.sender_id` the same way. `FORCE ROW LEVEL SECURITY` is enabled on `knowledge_base`, `ingested_documents` and `chat_history`, and every policy reads the setting as `nullif(current_setting('app.user_permission_level', true), '')::integer`, so a pooled connection that returns `''` denies rows instead of raising. Write policies additionally require `classification_level >= tier`. If the role is missing, `enterAppRole` throws rather than running as a superuser, and migration 001 contains a self-check that aborts if the role is privileged or `FORCE` is off.
   3. **ETL Scrubbing:** Personally Identifiable Information (PII) is scrubbed via regex-based redaction patterns during ingestion before chunks are vectorized.
 
 ---
 
-## 5. Agentic Orchestration & Pipeline Architecture
+## 5. Deterministic Orchestration & Pipeline Architecture
+
+The orchestration is a deterministic state machine, not an autonomous agent: routing is
+lexical (regular expressions and heuristics), each turn is either a bounded handler or a
+single generation call, and no model output ever selects a tool or triggers a second
+retrieval.
 
 ```
 [ Incoming WhatsApp Message / API Request ]
                     │
                     ▼
-       [ Signature Verification & Idempotency ]
+ [ HMAC verification (raw body) → Redis idempotency claim → enqueue → ACK ]   (webhook route)
                     │
                     ▼
-             [ Extract User & Role ]
+      [ BullMQ worker: sanitize (truncate + redactPii) → user lookup ]
                     │
                     ▼
-            [ SafetySignals Check ] ──(Emergency Detected)──► [ Immediate Hotline & Crisis Escalation ]
-                    │ (Safe)
+         [ evaluateInboundSafety ] ──(Distress / blocked privacy request)──► [ Handoff or refusal, before any LLM call ]
+                    │ (Proceed)
                     ▼
-             [ IntentRouter ]
-         ┌──────────┼───────────────┬────────────────┐
-         ▼          ▼               ▼                ▼
-  [KNOWLEDGE_QUERY] [ADMIN_ANALYTICS] [CHAT_HISTORY] [GREETING / OUT_OF_SCOPE]
-         │                 │               │                 │
-         ▼                 ▼               ▼                 ▼
-   Hybrid Retrieval  Admin Session    RLS History Fetch Direct LLM / Fallback
- (Dense+Sparse+RRF)  Telemetry Logs   Thread Summary
+        [ processBaselineQuery: lexical intent routing ]
+         ┌──────────┼────────────────┬──────────────────┐
+         ▼          ▼                ▼                  ▼
+  [RAG_INQUIRY] [L0 / L1 admin    [CHAT_HISTORY]   [User-management
+         │        handlers]            │             flows (L0/L1)]
+         ▼                             ▼
+  Hybrid Retrieval              RLS history fetch
+ (Dense + Lexical + RRF,        + summary
+  parent resolution)
          │
          ▼
-[ RLS Document Filter ] ──► [ DLS Verification Check ]
+[ RLS-scoped retrieval ] ──► [ computeDls defence-in-depth check ]
          │
          ▼
-[ Multi-Provider LLM Generation (Gemini / Claude / OpenAI) ]
+[ One LLM generation call (Claude / Gemini / OpenAI / Mock) ]
          │
          ▼
-[ Audit Logging & Asynchronous WhatsApp Dispatch via BullMQ ]
+[ WhatsApp send → persist assistant turn → audit log, knowledge-gap record, cost telemetry ]
 ```
 
 ### 5.1 Pipeline Stages
-1. **Security & Ingestion Gateway:** Validates webhook signature (`verifySignature.ts`) using constant-time timing-safe comparisons (`timingSafe.ts`) and Redis-backed idempotency tokens (`idempotency.ts`).
-2. **Deterministic Safety Filter (`SafetySignals`):** Intercepts critical psychological distress and physical safety triggers prior to any LLM execution, returning immediate certified emergency resources.
-3. **Intent Classification (`IntentRouter`):** Directs incoming payloads into specialized execution paths:
-   - `KNOWLEDGE_QUERY`: Multi-source knowledge base retrieval.
-   - `ADMIN_ANALYTICS`: Schema and audit metrics restricted strictly to `L0: ADMIN`.
-   - `CHAT_HISTORY`: Contextual session history retrieval with user RLS isolation.
-   - `GREETING` / `OUT_OF_SCOPE`: Zero-retrieval cost-effective conversational paths.
-4. **Hybrid Retrieval with Reciprocal Rank Fusion (RRF):** Queries pgvector using cosine distance while simultaneously running full-text search with Hebrew language dictionaries, merging scores via:
+1. **Security & Ingestion Gateway:** Validates the webhook signature (`verifyMetaSignature` in `lib/security/crypto.ts`) with timing-safe comparison and claims the message id with a Redis `SET NX` (`lib/core/redis.ts`). Nothing that touches Postgres or an LLM runs in the route.
+2. **Deterministic Safety Filter:** `evaluateInboundSafety` (`lib/security/guardrails.ts`) intercepts distress and privacy-sensitive requests before any LLM execution. Distress is checked for every tier and returns a human-handoff response; the privacy screens are skipped for L0/L1.
+3. **Intent Routing (`processBaselineQuery`):** Lexical routing into specialized paths:
+   - `RAG_INQUIRY`: knowledge-base retrieval followed by a single generation call. Greetings and out-of-domain requests are handled by the system-prompt rules of that same call.
+   - `CHAT_HISTORY`: history Q&A for elevated roles, with RLS isolation.
+   - Admin handlers: L0 analytics and user management, L1 daily staff summary, each bounded and role-guarded.
+4. **Hybrid Retrieval with Reciprocal Rank Fusion (RRF):** Queries pgvector using cosine distance while running the lexical leg, merging scores via:
    $$RRF\_Score(d) = \sum_{m \in M} \frac{1}{k + r_m(d)}$$
-   where $k=60$ and $r_m(d)$ is the rank of document $d$ in retrieval method $m$.
-5. **Post-Retrieval Security Guard:** Calculates the retrieval Data Leakage Score and logs query telemetry to the `audit_logs` table.
+   where $k=60$ and $r_m(d)$ is the rank of document $d$ in retrieval method $m$. A matched child chunk is widened to its parent inside the same RLS transaction.
+5. **Post-Retrieval Security Guard:** Calculates the retrieval Data Leakage Score on the returned chunks, strips any unauthorized chunk before it reaches the model, and logs query telemetry to the `audit_logs` table.
+6. **Cost Telemetry:** The adapter reports provider token usage and `lib/core/telemetry.ts` prices it into `executionCostUsd`, recorded on the Langfuse trace and the `baseline_rag.llm_cost` log line.
 
 ---
 
 ## 6. Evaluation Framework & Novel Metrics
 
-The experimental evaluation is conducted using the automated evaluation harness (`scripts/evaluate_runner.ts`) executed over the standardized `golden_dataset.ts`:
+The experimental evaluation is conducted using the automated evaluation harness (`scripts/evaluate_runner.ts`) executed over the standardized golden dataset (`scripts/data/golden_dataset.json`, 30 queries):
 
 | Metric | Target | Evaluation Tool / Method | Mathematical Definition / Meaning |
 |---|---|---|---|
@@ -215,10 +224,10 @@ Where:
 
 | Period | Target Milestone | Status / Deliverables |
 |---|---|---|
-| **Phase 1: Foundation (March 2026)** | Database schema, pgvector setup, migrations (001–009), multi-tier RLS enforcement, ETL & PII scrubbing pipeline. | **Completed** (Production schema & migrations verified) |
-| **Phase 2: Core Architecture (April 2026)** | BullMQ + Redis async workers, WhatsApp API integration, Baseline Hybrid Search, IntentRouter & SafetySignals modules. | **Completed** (Full pipeline implemented in codebase) |
-| **Phase 3: Multi-Provider Integration (May 2026)** | Implementation of unified LLM adapter (Gemini 1.5/2.0, Claude 3.5 Sonnet, GPT-4o, MockProvider), golden evaluation dataset construction. | **In Progress** (Adapters ready, benchmark dataset compiled) |
-| **Phase 4: Benchmarking & Reporting (June 2026)** | Automated benchmark execution (`evaluate_runner.ts`), statistical analysis of RAGAS metrics & DLS across models, M.Sc. thesis compilation. | **Scheduled** |
+| **Phase 1: Foundation (March 2026)** | Database schema, pgvector setup, migrations (`001` baseline, `002` knowledge gaps, `004` parent/child chunks, `005` user memories), multi-tier RLS enforcement, ETL & PII scrubbing pipeline. | **Completed** |
+| **Phase 2: Core Architecture (April 2026)** | BullMQ + Redis async workers, WhatsApp API integration, hybrid search, lexical intent routing and safety guardrails. | **Completed** |
+| **Phase 3: Multi-Provider Integration (May 2026)** | Unified LLM adapter (Claude, Gemini, OpenAI, Mock), golden evaluation dataset, per-query cost telemetry. | **Completed** |
+| **Phase 4: Benchmarking & Reporting (June 2026 onward)** | Experiment 1 (retrieval arms R1–R4) and Experiment 2 (4 configurations × 30 queries) executed on 2026-11-18 (`docs/experimental_results.md`). Repetitions, bootstrap confidence intervals, significance tests and judge validation against human labels are **not yet done**. | **Executed, descriptive; statistical treatment pending** |
 
 ---
 

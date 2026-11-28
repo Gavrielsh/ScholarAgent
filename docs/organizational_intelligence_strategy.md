@@ -3,7 +3,7 @@
 **A strategy for turning the question stream into field intelligence**
 
 Companion to `docs/research_proposal_agentic_rag.md` and `docs/ai_contribution_plan.md`
-Written against the codebase at `032b17f`
+Written against the codebase at `032b17f`; §6.3 and §7 updated to match the current `main`
 
 ---
 
@@ -149,10 +149,16 @@ nobody recognizes produces reports nobody trusts.
 
 ### 6.3 Retrieval confidence capture
 
-`audit_logs` records `retrieved_chunk_ids` and `latency_ms` but **not similarity scores**,
-so "the knowledge base had nothing good for this" is not recoverable after the fact. One
-column, and knowledge-gap detection becomes possible. Cheap, and blocks a whole capability
-until done.
+**Status: phase 1 is built.** `audit_logs` records `retrieved_chunk_ids` and `latency_ms`,
+and migration `002_knowledge_gaps.sql` adds `audit_logs.max_similarity` plus a
+`knowledge_gaps` table. `lib/domain/chat/knowledgeGaps.ts` (`detectKnowledgeGap`,
+`recordKnowledgeGap`) writes a row, after the reply is sent, when retrieval returned nothing
+(`empty_retrieval`) or the model declared the context insufficient
+(`model_declared_insufficient`). Nothing reads the table yet.
+
+One caveat before building on it: `max_similarity` mixes two scales — `1 − cosine` for dense
+rows and `ts_rank_cd` for lexical rows — so it is recorded but is not a usable threshold.
+A confidence signal should come from the fused `rrfScore` or a re-rank score instead.
 
 ### 6.4 Aggregation with privacy controls
 
@@ -169,7 +175,8 @@ See §8 — this is not decoration.
 ## 7. Build order
 
 1. **Sites dimension.** Nothing downstream works without it.
-2. **Retrieval-confidence column.** One migration, unblocks knowledge-gap detection.
+2. **Retrieval-confidence signal.** Gap *capture* exists (migration 002); what is missing is a
+   comparable confidence score (see §6.3) and anything that reads the table.
 3. **Signal extraction + taxonomy**, on historical `chat_history` — the backlog is already
    there, so this produces real output on day one instead of waiting weeks for data.
 4. **Aggregation with k-anonymity.** Thresholds configurable, because RQ-A is the

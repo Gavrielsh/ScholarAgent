@@ -2,8 +2,10 @@
 
 Guidance for Claude Code when working in this repository.
 
-ScholarAgent is an M.Sc. research system: a secure Agentic-RAG knowledge
-assistant for Hebrew-language non-profit organizations, delivered over WhatsApp.
+ScholarAgent is an M.Sc. research system: a secure, four-tier (L0–L3) RAG
+knowledge assistant for Hebrew-language non-profit organizations, delivered over
+WhatsApp. Orchestration is **deterministic** — lexical intent routing into
+bounded handlers, one generation call per turn, no autonomous tool loop.
 Its central claim is that **authorization must be enforced inside PostgreSQL,
 not in application code or the system prompt**. Most conventions below exist to
 protect that claim — changing them silently invalidates the thesis results in
@@ -14,7 +16,7 @@ protect that claim — changing them silently invalidates the thesis results in
 ## Commands
 
 ```sh
-npm test                # jest — 243 tests across 21 suites, no DB or network needed
+npm test                # jest — 271 tests across 21 suites, no DB or network needed
 npx tsc --noEmit        # typecheck (CI runs this before lint and tests)
 npm run lint            # next lint
 npm run migrate         # apply migrations/*.sql in filename order
@@ -24,8 +26,10 @@ npm run ingest          # ingest local_data/documents (--base to point elsewhere
 npm run eval:seed       # plant canaries + run positive/negative RLS controls
 npm run benchmark       # Experiment 1: retrieval arms R1-R4
 npm run evaluate        # Experiment 2: 4 configs x 30 queries, end-to-end
+npm run qrels:pool      # pool candidates for relevance judging
 npm run grade:qrels     # grade the pooled judgments
 npm run reconcile       # repair documents whose chunks went missing
+                        #   (parent/child chunks + contextual headers, like ingest)
 ```
 
 CI (`.github/workflows/ci.yml`) runs typecheck → lint → test on Node 20, then
@@ -61,7 +65,8 @@ lib/core/                    Technology-facing infrastructure, no business rules
   db/accessLevel.ts          AccessLevel 0..3 — dependency-free tier contract
   queue.ts                   BullMQ connection, deadline race, attempt accounting
   redis.ts                   Redis client + the webhook idempotency claim
-  telemetry.ts               Langfuse tracing, RAGAS scoring, DLS computation
+  telemetry.ts               Langfuse tracing, RAGAS scoring, DLS computation,
+                             per-model price table → executionCostUsd
   irMetrics.ts               Recall@k, MRR, NDCG for the retrieval benchmark
   logger.ts  env.ts  http/fetchWithTimeout.ts
 
@@ -72,17 +77,21 @@ lib/security/                Cross-cutting, enforced independently of any domain
   extractUser.ts             JWT identity extraction
 
 lib/domain/
-  chat/     agent.ts (intent routing + admin handlers), rag.ts (baseline RAG),
-            llm.ts (all four providers), rerank.ts, knowledgeGaps.ts,
-            state.ts (ChatMessage leaf), session/
-  ingestion/pipeline.ts, embeddings.ts, retrieval.ts, retrievalArms.ts, worker.ts
+  chat/     agent.ts (lexical intent routing + bounded admin handlers),
+            rag.ts (baseline RAG), llm.ts (all four providers, token usage),
+            rerank.ts (benchmark arm R4 only — not on the live chat path),
+            knowledgeGaps.ts, state.ts (ChatMessage leaf), session/
+  ingestion/pipeline.ts (chunking, extraction, ingest), embeddings.ts,
+            retrieval.ts, retrievalArms.ts, worker.ts
   whatsapp/ webhook.ts (parsing/safety), worker.ts (the real work), client.ts, types.ts
   admin/    auditLogs.ts
 
-migrations/                  001 baseline + RLS role/grants/policies, 002 knowledge gaps, 004, 005, run.ts
+migrations/                  001 baseline + RLS role/grants/policies, 002 knowledge gaps,
+                             004 parent/child chunks, 005 user memories, run.ts
 scripts/                     Operational entry points, snake_case, via `node --import tsx`
 local_data/eval_corpus/      15-document L0/L1/L2 synthetic corpus for the thesis
-docs/                        Research proposal, empirical results, demo runbook
+docs/                        Research proposals, AI-contribution plan, empirical results
+                             (Hebrew), demo runbook
 ```
 
 Two placements are deliberate and have bitten before:
@@ -135,11 +144,11 @@ Rules that follow from this, all of which matter:
   the role switch happens. Do not reorder.
 - **`SET LOCAL` is transaction-scoped.** It reverts on `COMMIT` and `ROLLBACK`,
   so one user's tier can never leak onto the next user of a pooled connection.
-- **`enterAppRole` fails closed** (`lib/core/db.ts:207`). If the role is missing
+- **`enterAppRole` fails closed** (`lib/core/db.ts`). If the role is missing
   — migration 001 was not applied — the transaction throws rather than running
   as superuser with every policy bypassed. Never "handle" this error by
   continuing; that silently disables the whole control.
-- **`assertSqlIdentifier`** (`lib/core/db.ts:189`) is the injection boundary.
+- **`assertSqlIdentifier`** (`lib/core/db.ts`) is the injection boundary.
   `SET LOCAL ROLE` takes an identifier, so `PG_APP_ROLE` is interpolated, not
   bound. It is exported purely so it can be tested directly
   (`lib/core/db.identifier.test.ts`).
@@ -166,7 +175,7 @@ Rules that follow from this, all of which matter:
 
 ### The one escape hatch
 
-`withServiceClient` (`lib/core/db.ts:158`) uses a separate pool and never
+`withServiceClient` (`lib/core/db.ts`) uses a separate pool and never
 switches role, so it reads across every classification level. It exists for one
 reason: the evaluation harness's **positive control**. Proving a canary is
 retrievable at all is what makes a later 0% leakage result mean anything.
@@ -256,16 +265,17 @@ the durability mechanism. Do not "fix" these into 200s.
 
 ## Tests
 
-`npm test` is the baseline: **243 tests, 21 suites, all passing**, in roughly
-two seconds. The suite needs no database, no Redis and no network — every
+`npm test` is the baseline: **271 tests, 21 suites, all passing**, in roughly
+a few seconds (about 20 on a cold run). The suite needs no database, no Redis and no network — every
 external dependency is faked. Keep it that way; a test that needs
 `docker compose up` will not run in CI.
 
 ```
-lib/core/             db.identifier, db.lexical, db.parentChunks, irMetrics, queue, telemetry
+lib/core/             db.identifier, db.lexical, db.parentChunks (incl. reconcile backfill),
+                      irMetrics, queue, telemetry (incl. cost pricing)
 lib/security/         auth, crypto, guardrails
 lib/domain/chat/      agent, knowledgeGaps, rag, rerank, session/memoryWorker
-lib/domain/ingestion/ embeddings, pipeline, worker
+lib/domain/ingestion/ embeddings, pipeline (incl. reconciled parent/child plan), worker
 lib/domain/whatsapp/  webhook, worker
 scripts/              grade_qrels, data/golden_dataset
 ```
@@ -315,8 +325,29 @@ module boundaries on purpose.
   `1 − cosine` for dense rows and `ts_rank_cd` for lexical rows, which share no
   scale. Filter on re-rank scores or `rrfScore` only
   (`lib/domain/chat/rerank.ts`).
-- **Default models**: `claude-sonnet-4-6` (`llm.ts:312`) and `gemini-3.5-flash`
-  (`llm.ts:249`), overridable via `CLAUDE_MODEL` / `GEMINI_MODEL`.
+- **Reconcile mirrors live ingestion.** `scripts/reconcile_documents.ts` builds
+  its rows with `planParentChildChunks` and `buildParentChildRecords` from
+  `pipeline.ts` — the same helpers HTTP upload and WhatsApp ingestion use — so a
+  repaired document gets 1400/400 (overlap 60) parent/child chunks and contextual
+  headers. `backfillDocumentChunks` persists the hierarchy with deterministic
+  ids (parents and children are keyed apart) and the shared `resolveParentIds`
+  parent-before-child check. Do not give reconcile its own chunker.
+- **Cost telemetry is an estimate, and absent means unknown.** Adapters report
+  provider token usage through `GenerateTextInput.onUsage`;
+  `computeLlmCost` / `estimateLlmCostUsd` in `lib/core/telemetry.ts` price it from
+  a per-model list-price table and return `undefined` — never `0` — for mock or
+  unknown models. Add a row to `MODEL_PRICING_USD_PER_MTOK` when adding a model.
+  `executionCostUsd` lands on the Langfuse trace, the `baseline_rag.llm_cost`
+  log line and `RagasScores`; it is deliberately not written to `audit_logs`.
+- **Routing is lexical, not agentic.** `processBaselineQuery` in `agent.ts`
+  routes on regex/heuristics; the model never picks a tool or retrieves twice.
+  The only LLM calls besides the single RAG generation are in the L0/L1 admin
+  handlers (analytics classification, history Q&A, daily summary) and the
+  background memory summariser. Re-ranking (`rerank.ts`) exists only as
+  benchmark arm R4.
+- **Default models**: `claude-sonnet-4-6` (`DEFAULT_MODEL` in `llm.ts`) and
+  `gemini-3.5-flash` (`GeminiAdapter`), overridable via `CLAUDE_MODEL` /
+  `GEMINI_MODEL`; fast tiers `claude-haiku-4-5` and `gemini-3.5-flash`.
   `LLM_PROVIDER` defaults to `mock`.
 
 ---
