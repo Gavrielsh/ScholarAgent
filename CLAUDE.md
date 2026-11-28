@@ -14,7 +14,7 @@ protect that claim — changing them silently invalidates the thesis results in
 ## Commands
 
 ```sh
-npm test                # jest — 230 tests across 20 suites, no DB or network needed
+npm test                # jest — 243 tests across 21 suites, no DB or network needed
 npx tsc --noEmit        # typecheck (CI runs this before lint and tests)
 npm run lint            # next lint
 npm run migrate         # apply migrations/*.sql in filename order
@@ -30,7 +30,13 @@ npm run reconcile       # repair documents whose chunks went missing
 
 CI (`.github/workflows/ci.yml`) runs typecheck → lint → test on Node 20, then
 builds both Docker images. The three check steps use `if: ${{ !cancelled() }}`
-so one failure does not mask the others.
+so one failure does not mask the others. A separate `security-eval-gate` job runs
+the migrations and `eval:seed` against a real Postgres.
+
+**Node.js 20.18+** is required: every `node --import tsx` script in
+`package.json` passes `--env-file-if-exists=.env.local`, which loads the file
+*before* the module graph evaluates (several modules read `process.env` at
+module scope). Real environment variables still win over the file.
 
 `docker compose up -d` starts **only** Postgres (pgvector/pgvector:pg16) and
 Redis. The `app` and `whatsapp-worker` services sit behind the `full` profile.
@@ -140,6 +146,20 @@ Rules that follow from this, all of which matter:
 - **Migration 001 self-checks** (§10). A `DO` block raises if the role holds
   `SUPERUSER`/`BYPASSRLS` or if `FORCE ROW LEVEL SECURITY` is off on any of the
   three tables, so a database cannot be stamped "secured" while it is not.
+- **The app role is least-privilege beyond RLS.** `scholaragent_app` cannot
+  `UPDATE`/`DELETE` `audit_logs` (append-only) and has no write access to `users`
+  (the RBAC registry has no RLS, so its grants are the only control). Registry
+  writes go through the helpers in `lib/security/auth.ts` on the owner
+  connection, and the management hierarchy is enforced *inside* the SQL
+  (`DELETE … WHERE permission_level > requester`), not by a prior read.
+- **Policies never cast the raw GUC.** Always
+  `nullif(current_setting('app.user_permission_level', true), '')::integer`: a
+  pooled connection reads the GUC back as `''` (not NULL) after the first
+  transaction, and `''::integer` raises instead of denying. Write policies also
+  require `classification_level >= tier`.
+- **Every corpus-write transaction calls `enterAppRole`** right after
+  `set_config` — `insertDocumentWithChunks` and `backfillDocumentChunks`
+  included. A write path that skips it runs as the owner and bypasses RLS.
 - **The GUC names are `app.user_permission_level` and `app.sender_id`.** There
   is no `app.current_tier`. Lower number = more privileged (0 = Admin,
   3 = Volunteer); a row is visible when caller level ≤ row classification.
@@ -236,16 +256,16 @@ the durability mechanism. Do not "fix" these into 200s.
 
 ## Tests
 
-`npm test` is the baseline: **230 tests, 20 suites, all passing**, in roughly
+`npm test` is the baseline: **243 tests, 21 suites, all passing**, in roughly
 two seconds. The suite needs no database, no Redis and no network — every
 external dependency is faked. Keep it that way; a test that needs
 `docker compose up` will not run in CI.
 
 ```
-lib/core/             db.identifier, db.lexical, irMetrics, queue, telemetry
-lib/security/         crypto, guardrails
-lib/domain/chat/      agent, knowledgeGaps, rerank
-lib/domain/ingestion/ pipeline, worker
+lib/core/             db.identifier, db.lexical, db.parentChunks, irMetrics, queue, telemetry
+lib/security/         auth, crypto, guardrails
+lib/domain/chat/      agent, knowledgeGaps, rag, rerank, session/memoryWorker
+lib/domain/ingestion/ embeddings, pipeline, worker
 lib/domain/whatsapp/  webhook, worker
 scripts/              grade_qrels, data/golden_dataset
 ```
@@ -274,6 +294,18 @@ module boundaries on purpose.
   001 does.
 - **Numbering jumps 002 → 004 intentionally.** The RLS role/grants migration
   that was once 003 is now folded into 001, and the numbers were not reused.
+- **Terminal job failures stay in BullMQ's `failed` set.** After the user has
+  been told, the processor throws `UserNotifiedFailureError` (an
+  `UnrecoverableError`); the `failed` handlers log and do **not** `job.remove()`.
+  A retry first checks `chat_history` for the assistant turn
+  (`outboundMessageId`) so a reply that already went out is not re-generated or
+  re-sent.
+- **Log phone numbers only through `redactPhone`** (`lib/security/auth.ts`), and
+  read numeric env vars only through `parsePositiveInt` / `parseNonNegativeInt`
+  (`lib/core/env.ts`) — `Number(process.env.X ?? n)` turns a blank `X=` into `0`.
+- **WhatsApp user management is strictly hierarchical.** `canManagePermissionLevel`
+  lets a tier act only on tiers below it; L1 cannot touch a peer L1, and L0
+  accounts are not provisioned or removed over WhatsApp.
 - **Retrieval arms share one code path.** All four arms in
   `lib/domain/ingestion/retrievalArms.ts` go through the same `executeRetrieval`
   in `lib/core/db.ts` and differ only by `strategy`; the query embedding is

@@ -119,6 +119,13 @@ function inferClassificationLevel(relativePath: string): PermissionLevel {
 // Recursive directory processor
 // ---------------------------------------------------------------------------
 
+/**
+ * Files that were attempted and failed. Tracked so the process can exit non-zero:
+ * a script that logs `[ERR]` and still exits 0 reads as success to CI and to any
+ * cron wrapper, which is how a half-ingested corpus goes unnoticed.
+ */
+const failedFiles: string[] = [];
+
 async function processDirectory(currentPath: string): Promise<void> {
   const entries = await fs.readdir(currentPath, { withFileTypes: true });
 
@@ -181,6 +188,7 @@ async function processDirectory(currentPath: string): Promise<void> {
         (result.failures.length > 0 ? `  (${result.failures.length} chunk failures)` : "")
       );
     } catch (err) {
+      failedFiles.push(relativePath);
       console.error(`[ERR]  ${relativePath} —`, err instanceof Error ? err.message : String(err));
     }
   }
@@ -217,8 +225,18 @@ async function run(): Promise<void> {
     await processDirectory(BASE_DIRECTORY);
   } catch (err) {
     console.error("Fatal error accessing base directory:", err);
+    process.exitCode = 1;
   } finally {
     await closePool();
+  }
+
+  if (failedFiles.length > 0) {
+    process.exitCode = 1;
+    console.error(`\n❌  Ingestion finished with ${failedFiles.length} failed file(s):`);
+    for (const file of failedFiles) console.error(`     - ${file}`);
+  } else if (process.exitCode === 1) {
+    console.error("\n❌  Ingestion aborted. Database connection closed.");
+  } else {
     console.log("\n✅  Ingestion complete. Database connection closed.");
   }
 }

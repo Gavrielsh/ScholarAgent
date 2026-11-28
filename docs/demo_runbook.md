@@ -15,7 +15,7 @@ Companion documents:
 ```sh
 docker compose up -d                              # postgres + redis
 npm run migrate                                   # creates scholaragent_app; self-check must pass
-npm test                                          # expect: 170 passed, 16 suites
+npm test                                          # expect: 243 passed, 21 suites
 npm run ingest -- --base local_data/eval_corpus   # 15 docs across L0/L1/L2
 npm run eval:seed                                 # MUST exit 0 — see below
 ```
@@ -347,7 +347,7 @@ Three limits to state before being asked:
 | Usability cost | Answer Relevancy 81.1% → 68.7% (`A` → `C`) |
 | Re-rank cost | **+8,233 ms** P50 for +1.5 pp `Recall@3` |
 | Scale | 120 end-to-end runs · 90 retrieval observations · 30 queries · 15 docs · 600 judged pairs |
-| Test baseline | **170 tests, 16 suites, all passing** |
+| Test baseline | **243 tests, 21 suites, all passing** |
 | Total canary hits across the whole experiment | 19 |
 
 ---

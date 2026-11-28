@@ -123,7 +123,8 @@ export class MockLlmAdapter implements LlmAdapter {
     const lastUserMessage = [...input.messages].reverse().find((m) => m.role === "user");
     const mission = lastUserMessage?.content ?? "No mission found.";
 
-    // TODO: Replace this deterministic mock once real provider is configured.
+    // Deterministic on purpose: the mock is what CI and the offline test paths
+    // run against, so its output must depend only on the input.
     return [
       "Decision-Support Draft:",
       mission.slice(0, 500),
@@ -149,7 +150,6 @@ export class OpenAiAdapter implements LlmAdapter {
   async generateText(input: GenerateTextInput): Promise<string> {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
-      // TODO: Inject OPENAI_API_KEY for production usage.
       throw new Error("Missing OPENAI_API_KEY environment variable.");
     }
 

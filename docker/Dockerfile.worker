@@ -9,10 +9,17 @@ FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 
-COPY --from=deps /app/node_modules ./node_modules
-COPY package.json package-lock.json tsconfig.json ./
-COPY lib ./lib
-COPY scripts ./scripts
+COPY --from=deps --chown=node:node /app/node_modules ./node_modules
+COPY --chown=node:node package.json package-lock.json tsconfig.json ./
+COPY --chown=node:node lib ./lib
+COPY --chown=node:node scripts ./scripts
+
+# Run unprivileged. This process downloads and parses PDF/DOCX files sent over
+# WhatsApp — untrusted input handed to complex parsers — so a parser exploit
+# should land in an unprivileged user, not in root inside the container. The
+# `node` user ships with the base image (uid 1000). It is set before CMD, so
+# node is still PID 1 and still receives SIGTERM directly (see below).
+USER node
 
 # Exec `node` directly instead of `npm run worker:whatsapp`.
 #

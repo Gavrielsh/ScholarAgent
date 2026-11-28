@@ -20,6 +20,7 @@ import {
   LOCK_GRACE_MS,
   maxAttempts,
   runWithDeadline,
+  UserNotifiedFailureError,
 } from "@/lib/core/queue";
 import { parsePositiveInt } from "@/lib/core/env";
 import {
@@ -28,7 +29,7 @@ import {
 } from "@/lib/domain/whatsapp/types";
 import { isAbortError } from "@/lib/core/http/fetchWithTimeout";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
-import { releaseWhatsAppMessageClaim } from "@/lib/core/redis";
+import { redactPhone } from "@/lib/security/auth";
 import { markMessageReadAndTyping } from "@/lib/domain/whatsapp/client";
 
 // -------------------------------------------------------------------------
@@ -183,57 +184,31 @@ export function createDocumentIngestionWorker(): Worker<ParsedInboundDocumentEve
     logInfo("document_queue_job_completed", "Document ingestion job finished.", {
       jobId: job.id,
       messageId: job.data.messageId,
-      senderId: job.data.senderId,
+      senderId: redactPhone(job.data.senderId),
       filename: job.data.filename,
       attempt: currentAttempt(job),
     });
   });
 
-  worker.on("failed", async (job, err) => {
+  worker.on("failed", (job, err) => {
     const timedOut = err instanceof JobTimeoutError;
 
+    // Terminal failures stay in BullMQ's `failed` set (bounded by `removeOnFail`
+    // on the queue) for inspection and manual `job.retry()`. Not removed here:
+    // the earlier "remove it and release the claim so Meta redelivers" recovery
+    // could not fire, because Meta stops redelivering once the webhook has
+    // ACKed, and it erased the only record of why a document never landed.
     logError("document_queue_job_failed", err, {
       jobId: job?.id ?? null,
       messageId: job?.data.messageId ?? null,
-      senderId: job?.data.senderId ?? null,
+      senderId: job ? redactPhone(job.data.senderId) : null,
       filename: job?.data.filename ?? null,
       attemptsMade: job?.attemptsMade ?? null,
+      // True when the admin already received the failure notice.
+      userNotified: err instanceof UserNotifiedFailureError,
       timedOut,
       aborted: !timedOut && isAbortError(err),
     });
-
-    if (!job) return;
-
-    // Reaching `failed` on the final attempt means the processor could not even
-    // deliver its failure notice (or the deadline fired before that branch ran).
-    // Releasing the claim lets a Meta redelivery try once more — the admin has
-    // heard nothing, so a duplicate attempt beats silence. The document row's
-    // unique index on the message id keeps a successful redelivery from
-    // double-ingesting.
-    const messageId = job.data.messageId;
-    if (messageId && currentAttempt(job) >= maxAttempts(job)) {
-      try {
-        await job.remove();
-      } catch (removeErr) {
-        logError("document_failed_job_remove_failed", removeErr, {
-          messageId,
-          jobId: job.id,
-        });
-      }
-      try {
-        await releaseWhatsAppMessageClaim(messageId);
-        logWarn(
-          "document_idempotency_claim_released",
-          "Final attempt failed without notifying the sender; allowing Meta redelivery.",
-          { messageId, jobId: job.id }
-        );
-      } catch (releaseErr) {
-        logError("document_idempotency_release_failed", releaseErr, {
-          messageId,
-          jobId: job.id,
-        });
-      }
-    }
   });
 
   worker.on("error", (err) => {

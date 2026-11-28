@@ -23,8 +23,12 @@ import {
   type InboundSafetyDecision,
 } from "@/lib/security/guardrails";
 import type { ChatMessage } from "@/lib/domain/chat/state";
-import { lookupUserByPhone, type UserContext } from "@/lib/security/auth";
-import { appendChatEntries, readChatHistory } from "@/lib/domain/chat/session/history";
+import { lookupUserByPhone, redactPhone, type UserContext } from "@/lib/security/auth";
+import {
+  appendChatEntries,
+  hasStoredMessage,
+  readChatHistory,
+} from "@/lib/domain/chat/session/history";
 import {
   buildBoundedConversationContext,
   truncateInboundMessage,
@@ -32,7 +36,7 @@ import {
 import { isUniqueViolation } from "@/lib/core/db";
 import { isAbortError, isHttpTimeoutError } from "@/lib/core/http/fetchWithTimeout";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
-import { TerminalNotifyError } from "@/lib/core/queue";
+import { TerminalNotifyError, UserNotifiedFailureError } from "@/lib/core/queue";
 import { sendWhatsAppTextMessage, UNAUTHORIZED_NUMBER_MESSAGE } from "@/lib/domain/whatsapp/client";
 
 // -------------------------------------------------------------------------
@@ -281,7 +285,29 @@ async function persistTurn(
     // History is an audit/context store, not the product. Losing one row must
     // never cost the user their answer, so this is logged and swallowed rather
     // than propagated into the retry machinery.
-    logError(event, err, { senderId });
+    logError(event, err, { senderId: redactPhone(senderId) });
+  }
+}
+
+/**
+ * Whether the assistant turn for this inbound message is already stored.
+ *
+ * A failed lookup answers `false`: the alternative is dropping a message the
+ * user is waiting on, and a duplicate reply is the lesser failure. It is logged,
+ * not swallowed silently.
+ */
+async function alreadyReplied(senderId: string, inboundMessageId: string): Promise<boolean> {
+  const replyId = outboundMessageId(inboundMessageId);
+  if (!replyId) return false;
+  try {
+    return await hasStoredMessage(senderId, replyId);
+  } catch (err) {
+    logWarn(
+      "whatsapp_retry_reply_check_failed",
+      err instanceof Error ? err.message : String(err),
+      { senderId: redactPhone(senderId), messageId: inboundMessageId }
+    );
+    return false;
   }
 }
 
@@ -341,7 +367,7 @@ function resolveSafety(inbound: SanitizedInbound, userContext: UserContext): Inb
 
   if (decision.action === "handoff") {
     logWarn("safety_mandatory_handoff", "Distress signals detected; LLM bypassed.", {
-      senderId: inbound.senderId,
+      senderId: redactPhone(inbound.senderId),
       messageId: inbound.messageId,
       // Level is recorded to prove the handoff fired for elevated tiers too.
       permissionLevel: userContext.permissionLevel,
@@ -349,14 +375,14 @@ function resolveSafety(inbound: SanitizedInbound, userContext: UserContext): Inb
     });
   } else if (decision.action === "block") {
     logInfo("safety_privacy_block", "Privacy guardrail returned a fixed response.", {
-      senderId: inbound.senderId,
+      senderId: redactPhone(inbound.senderId),
       permissionLevel: userContext.permissionLevel,
       safetyRiskScore: decision.signals.safetyRiskScore,
       intentCategory: decision.signals.intentCategory,
     });
   } else if (decision.query !== inbound.redactedText) {
     logInfo("safety_query_rewritten", "Query de-identified before retrieval.", {
-      senderId: inbound.senderId,
+      senderId: redactPhone(inbound.senderId),
       safetyRiskScore: decision.signals.safetyRiskScore,
     });
   }
@@ -372,6 +398,20 @@ async function handleInboundMessage(
   // ── STEP 1: redact before anything else touches the message ───────────────
   const inbound = sanitizeInbound(event);
   const { senderId, messageId } = inbound;
+
+  // ── STEP 1b: has an earlier attempt already answered this message? ────────
+  // Only meaningful on a retry. The assistant turn is stored under a
+  // deterministic id (outboundMessageId), so if it exists the reply reached the
+  // user and a later step of the job is what failed. Running again would pay for
+  // another retrieval + LLM call and send a second copy of the answer.
+  if (ctx.attempt > 1 && messageId && (await alreadyReplied(senderId, messageId))) {
+    logInfo("whatsapp_retry_reply_already_sent", "Earlier attempt already replied; skipping.", {
+      senderId: redactPhone(senderId),
+      messageId,
+      attempt: ctx.attempt,
+    });
+    return;
+  }
 
   // ── STEP 2: identity ──────────────────────────────────────────────────────
   // A UserRegistryDbError (Postgres unreachable) propagates on purpose: it is
@@ -422,7 +462,7 @@ async function handleInboundMessage(
     priorMessages = buildBoundedConversationContext(withoutCurrent);
   } catch (err) {
     // Degrade to a stateless answer rather than failing the whole message.
-    logError("chat_history_context_load_failed", err, { senderId });
+    logError("chat_history_context_load_failed", err, { senderId: redactPhone(senderId) });
   }
 
   // ── STEP 6: retrieval + generation ────────────────────────────────────────
@@ -451,14 +491,19 @@ async function handleInboundMessage(
     logError(
       "baseline_empty_answer",
       new Error("Baseline pipeline produced an empty answer"),
-      { senderId, messageId, kind: processResult.kind, intent: processResult.intent }
+      {
+        senderId: redactPhone(senderId),
+        messageId,
+        kind: processResult.kind,
+        intent: processResult.intent,
+      }
     );
     await replyAndPersist(inbound, FALLBACK_ERROR_MESSAGE, ctx.signal);
     return;
   }
 
   logInfo("whatsapp_outbound_ready", "Sending baseline reply.", {
-    senderId,
+    senderId: redactPhone(senderId),
     messageId,
     kind: processResult.kind,
     intent: processResult.intent,
@@ -466,6 +511,20 @@ async function handleInboundMessage(
   });
 
   await sendWhatsAppTextMessage({ to: senderId, body: outbound, signal: ctx.signal });
+
+  // Recorded immediately after the send, ahead of the metrics and gap writes
+  // below: this row is what a retry's idempotency check looks for, so every
+  // statement between the send and this write widens the window in which a
+  // failure would let the reply go out twice.
+  await persistTurn(
+    senderId,
+    {
+      role: "assistant",
+      content: outbound,
+      messageId: outboundMessageId(messageId),
+    },
+    "chat_history_outbound_persist_failed"
+  );
 
   if (processResult.ragMetrics) {
     try {
@@ -476,7 +535,7 @@ async function handleInboundMessage(
         result: processResult.ragMetrics,
       });
     } catch (err) {
-      logError("baseline_post_send_metrics_failed", err, { senderId });
+      logError("baseline_post_send_metrics_failed", err, { senderId: redactPhone(senderId) });
     }
 
     // Knowledge-gap detection (flywheel phase 1). Recorded here rather than
@@ -504,16 +563,6 @@ async function handleInboundMessage(
     }
   }
 
-  await persistTurn(
-    senderId,
-    {
-      role: "assistant",
-      content: outbound,
-      messageId: outboundMessageId(messageId),
-    },
-    "chat_history_outbound_persist_failed"
-  );
-
   // Rolling memory refresh — last, and only once the reply is sent and both
   // turns are stored, so the count it checks includes this exchange.
   //
@@ -534,8 +583,11 @@ async function handleInboundMessage(
  * New behaviour:
  *   - unique violation  → already done by a previous attempt; resolve silently.
  *   - not the last try  → stay silent and rethrow so BullMQ retries.
- *   - the last try      → apologise exactly once, then RESOLVE so BullMQ ACKs
- *                         the job and the loop terminates.
+ *   - the last try      → apologise exactly once, then throw
+ *                         UserNotifiedFailureError (an UnrecoverableError): the
+ *                         user has their answer, the retry loop ends, and the job
+ *                         lands in BullMQ's `failed` set instead of being
+ *                         reported as completed, so the failure stays inspectable.
  */
 async function handleProcessingFailure(
   err: unknown,
@@ -553,7 +605,7 @@ async function handleProcessingFailure(
   // cannot change the outcome, so resolve and let the job complete.
   if (isUniqueViolation(err)) {
     logInfo("whatsapp_job_duplicate_ignored", "Unique violation treated as success.", {
-      senderId,
+      senderId: redactPhone(senderId),
       messageId,
       attempt: ctx.attempt,
     });
@@ -564,7 +616,7 @@ async function handleProcessingFailure(
   const timedOut = isHttpTimeoutError(err);
 
   logError("baseline_process_failed", err, {
-    senderId,
+    senderId: redactPhone(senderId),
     messageId,
     attempt: ctx.attempt,
     maxAttempts: ctx.maxAttempts,
@@ -581,7 +633,9 @@ async function handleProcessingFailure(
     throw err;
   }
 
-  // Terminal. One apology, best effort — and crucially, no rethrow afterwards.
+  // Terminal. One apology, best effort. Throwing afterwards is safe from the
+  // apology-spam failure mode this function exists to prevent: the error is
+  // unrecoverable, so BullMQ records the failure and does not retry it.
   try {
     await sendWhatsAppTextMessage({
       to: senderId,
@@ -592,20 +646,26 @@ async function handleProcessingFailure(
       signal: null,
     });
     logInfo("whatsapp_fallback_notice_sent", "Final-attempt apology delivered.", {
-      senderId,
+      senderId: redactPhone(senderId),
       messageId,
     });
   } catch (sendErr) {
-    logError("whatsapp_fallback_notice_failed", sendErr, { senderId, messageId });
+    logError("whatsapp_fallback_notice_failed", sendErr, {
+      senderId: redactPhone(senderId),
+      messageId,
+    });
     throw new TerminalNotifyError(sendErr);
   }
+
+  throw new UserNotifiedFailureError(err);
 }
 
 /**
  * Business logic for one inbound message. Runs inside the BullMQ worker, which
  * owns the read receipt, typing indicator, and job deadline around this call.
  *
- * Resolves on terminal failure by design — see `handleProcessingFailure`.
+ * A terminal failure throws UserNotifiedFailureError once the user has been
+ * told — see `handleProcessingFailure`.
  */
 export async function processIncomingMessage(
   event: ParsedInboundEvent,

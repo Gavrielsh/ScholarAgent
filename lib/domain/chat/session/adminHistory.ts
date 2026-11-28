@@ -1,5 +1,5 @@
 import { withRlsTransaction } from "@/lib/core/db";
-import { isAdminRole, type PermissionLevel } from "@/lib/security/auth";
+import { isAdminRole, redactPhone, type PermissionLevel } from "@/lib/security/auth";
 import { logError } from "@/lib/core/logger";
 
 export interface StaffChatRow {
@@ -30,6 +30,20 @@ export class ForbiddenAdminActionError extends Error {
 }
 
 const REPORT_TIMEZONE = process.env.CHAT_REPORT_TIMEZONE ?? "Asia/Jerusalem";
+
+/**
+ * "Start of today" in the report timezone ($2), as a timestamptz.
+ *
+ * `now() AT TIME ZONE $2` yields the wall-clock time there (a plain timestamp),
+ * `date_trunc` floors it to local midnight, and the second `AT TIME ZONE $2`
+ * turns that wall-clock midnight back into the exact instant. The older
+ * `date_trunc('day', timezone($2, now()))` stopped one step short: it returned a
+ * timestamp WITHOUT a zone, which Postgres then compared to `occurred_at` by
+ * silently assuming the *session* zone (UTC on managed Postgres). Local midnight
+ * became 00:00 UTC — 02:00 or 03:00 in Jerusalem — so a report run overnight
+ * dropped everything said before then.
+ */
+const LOCAL_MIDNIGHT_SQL = "(date_trunc('day', now() AT TIME ZONE $2) AT TIME ZONE $2)";
 
 /**
  * Row shape of the two chat-history reports below. They select the same columns
@@ -85,7 +99,7 @@ async function fetchTodayStaffChatHistories(
            FROM chat_history ch
            INNER JOIN users u ON u.phone_number = ch.sender_id
           WHERE u.permission_level = ANY($1::int[])
-            AND ch.occurred_at >= date_trunc('day', timezone($2, now()))
+            AND ch.occurred_at >= ${LOCAL_MIDNIGHT_SQL}
           ORDER BY u.display_name NULLS LAST, u.phone_number, ch.occurred_at ASC`,
         [levels, REPORT_TIMEZONE]
       )
@@ -148,7 +162,11 @@ export async function findUsersByDisplayName(
       permissionLevel: row.permission_level,
     }));
   } catch (err) {
-    logError("admin_history_find_user_failed", err, { name: trimmed, requesterPermissionLevel });
+    // The searched name is a person's name; log its length, not the name.
+    logError("admin_history_find_user_failed", err, {
+      nameLength: trimmed.length,
+      requesterPermissionLevel,
+    });
     throw err;
   }
 }
@@ -174,7 +192,7 @@ export async function fetchTodayChatHistoryForPhone(
            FROM chat_history ch
            INNER JOIN users u ON u.phone_number = ch.sender_id
           WHERE ch.sender_id = $1
-            AND ch.occurred_at >= date_trunc('day', timezone($2, now()))
+            AND ch.occurred_at >= ${LOCAL_MIDNIGHT_SQL}
           ORDER BY ch.occurred_at ASC`,
         [phoneNumber, REPORT_TIMEZONE]
       )
@@ -182,7 +200,10 @@ export async function fetchTodayChatHistoryForPhone(
 
     return result.rows.map(toStaffChatRow);
   } catch (err) {
-    logError("admin_history_fetch_user_day_failed", err, { phoneNumber, requesterPermissionLevel });
+    logError("admin_history_fetch_user_day_failed", err, {
+      phoneNumber: redactPhone(phoneNumber),
+      requesterPermissionLevel,
+    });
     throw err;
   }
 }

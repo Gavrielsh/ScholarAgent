@@ -37,6 +37,7 @@ import { withSenderTransaction } from "@/lib/core/db";
 import { getQueueConnection, LOCK_GRACE_MS, runWithDeadline } from "@/lib/core/queue";
 import { parsePositiveInt } from "@/lib/core/env";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
+import { redactPhone } from "@/lib/security/auth";
 import { getLlmAdapter, resolveFastModel } from "@/lib/domain/chat/llm";
 import { MAX_HISTORY_TURNS } from "@/lib/domain/chat/session/context";
 
@@ -156,7 +157,7 @@ export async function maybeEnqueueMemorySummarization(input: {
     );
 
     logInfo("memory_summarization_enqueued", "Rolling memory refresh queued.", {
-      senderId,
+      senderId: redactPhone(senderId),
       turns,
       threshold: MAX_HISTORY_TURNS,
     });
@@ -165,7 +166,7 @@ export async function maybeEnqueueMemorySummarization(input: {
     logWarn(
       "memory_summarization_enqueue_failed",
       err instanceof Error ? err.message : String(err),
-      { senderId }
+      { senderId: redactPhone(senderId) }
     );
     return false;
   }
@@ -196,7 +197,7 @@ export async function readUserMemory(senderId: string): Promise<string | null> {
     return summary ? summary : null;
   } catch (err) {
     logWarn("memory_read_failed", err instanceof Error ? err.message : String(err), {
-      senderId,
+      senderId: redactPhone(senderId),
     });
     return null;
   }
@@ -336,14 +337,14 @@ export async function runMemorySummarization(
   const summary = await summarizeSenderHistory(senderId, signal);
   if (!summary) {
     logInfo("memory_summarization_skipped", "Summariser produced nothing storable.", {
-      senderId,
+      senderId: redactPhone(senderId),
     });
     return "skipped";
   }
 
   await upsertUserMemory(senderId, summary);
   logInfo("memory_summarization_written", "Rolling memory updated.", {
-    senderId,
+    senderId: redactPhone(senderId),
     summaryChars: summary.length,
   });
   return "written";
@@ -379,7 +380,7 @@ export function createMemorySummarizationWorker(): Worker<MemorySummarizationJob
     // next message past the threshold enqueues another one.
     logError("memory_summarization_failed", err, {
       jobId: job?.id ?? null,
-      senderId: job?.data.senderId ?? null,
+      senderId: job ? redactPhone(job.data.senderId) : null,
       attemptsMade: job?.attemptsMade ?? null,
     });
   });

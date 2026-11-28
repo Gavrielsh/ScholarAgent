@@ -13,11 +13,12 @@ import {
   LOCK_GRACE_MS,
   maxAttempts,
   runWithDeadline,
+  UserNotifiedFailureError,
 } from "@/lib/core/queue";
 import { parsePositiveInt } from "@/lib/core/env";
 import { WHATSAPP_INCOMING_QUEUE_NAME, type ParsedInboundEvent } from "@/lib/domain/whatsapp/types";
-import { releaseWhatsAppMessageClaim } from "@/lib/core/redis";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
+import { redactPhone } from "@/lib/security/auth";
 import { isAbortError } from "@/lib/core/http/fetchWithTimeout";
 import { markMessageReadAndTyping, startTypingKeepAlive } from "@/lib/domain/whatsapp/client";
 import { processIncomingMessage } from "@/lib/domain/whatsapp/webhook";
@@ -151,54 +152,35 @@ export function createWhatsAppIncomingWorker(): Worker<ParsedInboundEvent> {
     logInfo("whatsapp_queue_job_completed", "Incoming WhatsApp message processed.", {
       jobId: job.id,
       messageId: job.data.messageId,
-      senderId: job.data.senderId,
+      senderId: redactPhone(job.data.senderId),
       attempt: currentAttempt(job),
       pid: process.pid,
     });
   });
 
-  worker.on("failed", async (job, err) => {
+  worker.on("failed", (job, err) => {
     const timedOut = err instanceof JobTimeoutError;
 
+    // Terminal failures stay in BullMQ's `failed` set (bounded by `removeOnFail`
+    // on the queue) so they can be inspected and, if need be, re-run by hand
+    // with `job.retry()`. This handler deliberately does not remove the job: the
+    // earlier "remove it and release the idempotency claim so Meta redelivers"
+    // recovery never fired in practice, because Meta stops redelivering once the
+    // webhook has ACKed — and it destroyed the only record of the failure.
     logError("whatsapp_queue_job_failed", err, {
       jobId: job?.id ?? null,
       messageId: job?.data.messageId ?? null,
-      senderId: job?.data.senderId ?? null,
+      senderId: job ? redactPhone(job.data.senderId) : null,
       attemptsMade: job?.attemptsMade ?? null,
       pid: process.pid,
+      // True when the user already received the apology, i.e. this failure is a
+      // record for operators rather than a message that went unanswered.
+      userNotified: err instanceof UserNotifiedFailureError,
       // Separated so a hung upstream is greppable independently of ordinary
       // application errors.
       timedOut,
       aborted: !timedOut && isAbortError(err),
     });
-
-    if (!job) return;
-
-    // Reaching the final attempt via `failed` now means the processor could not
-    // even deliver its apology (or the job timed out before that branch ran).
-    // Release the idempotency claim so Meta's redelivery can have one more go —
-    // the user has heard nothing, so a duplicate is strictly better than silence.
-    const messageId = job.data.messageId;
-    if (messageId && currentAttempt(job) >= maxAttempts(job)) {
-      try {
-        await job.remove();
-      } catch (removeErr) {
-        logError("whatsapp_failed_job_remove_failed", removeErr, {
-          messageId,
-          jobId: job.id,
-        });
-      }
-      try {
-        await releaseWhatsAppMessageClaim(messageId);
-        logWarn(
-          "whatsapp_idempotency_claim_released",
-          "Final attempt failed without notifying the user; allowing Meta redelivery.",
-          { messageId, jobId: job.id }
-        );
-      } catch (releaseErr) {
-        logError("whatsapp_idempotency_release_failed", releaseErr, { messageId, jobId: job.id });
-      }
-    }
   });
 
   worker.on("error", (err) => {

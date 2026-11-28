@@ -7,7 +7,9 @@
 // is gone until the process restarts. Every fetch in this codebase must go
 // through one of the helpers below.
 
-const DEFAULT_HTTP_TIMEOUT_MS = Number(process.env.HTTP_DEFAULT_TIMEOUT_MS ?? 15_000);
+import { parsePositiveInt } from "@/lib/core/env";
+
+const DEFAULT_HTTP_TIMEOUT_MS = parsePositiveInt(process.env.HTTP_DEFAULT_TIMEOUT_MS, 15_000);
 
 /** Thrown when *our* deadline fired. Retryable: the peer was just too slow. */
 export class HttpTimeoutError extends Error {

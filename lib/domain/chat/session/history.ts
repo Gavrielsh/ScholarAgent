@@ -6,7 +6,9 @@
  */
 
 import { isUniqueViolation, withSenderTransaction } from "@/lib/core/db";
+import { parsePositiveInt } from "@/lib/core/env";
 import { logError, logInfo } from "@/lib/core/logger";
+import { redactPhone } from "@/lib/security/auth";
 
 export interface ChatHistoryEntry {
   role: "user" | "assistant" | "system";
@@ -22,7 +24,7 @@ export interface ChatHistoryFile {
   entries: ChatHistoryEntry[];
 }
 
-const FETCH_LIMIT = Number(process.env.CHAT_HISTORY_FETCH_LIMIT ?? 40);
+const FETCH_LIMIT = parsePositiveInt(process.env.CHAT_HISTORY_FETCH_LIMIT, 40);
 
 function assertSenderId(senderId: string): void {
   if (!senderId?.trim()) {
@@ -80,12 +82,36 @@ export async function appendChatEntries(
     // index) can still surface 23505. That is a duplicate, not a failure —
     // swallow it so the caller does not trigger a pointless BullMQ retry.
     if (isUniqueViolation(err)) {
-      logInfo("chat_history_append_duplicate", "Duplicate chat turn ignored.", { senderId });
+      logInfo("chat_history_append_duplicate", "Duplicate chat turn ignored.", {
+        senderId: redactPhone(senderId),
+      });
       return 0;
     }
-    logError("chat_history_append_failed", err, { senderId });
+    logError("chat_history_append_failed", err, { senderId: redactPhone(senderId) });
     throw err;
   }
+}
+
+/**
+ * Whether a turn with this `message_id` is already stored for the sender.
+ *
+ * Used on a retry to learn if an earlier attempt already delivered the reply:
+ * the assistant turn is stored under a deterministic id derived from the
+ * inbound message id, so its presence means the answer reached the user and
+ * running the LLM and the send again would double-bill and double-send.
+ *
+ * Runs under `withSenderTransaction`, so it can only ever see the sender's own
+ * rows. Throws on a database failure; the caller decides which way to fail.
+ */
+export async function hasStoredMessage(senderId: string, messageId: string): Promise<boolean> {
+  assertSenderId(senderId);
+  const res = await withSenderTransaction(senderId, (client) =>
+    client.query(
+      `SELECT 1 FROM chat_history WHERE sender_id = $1 AND message_id = $2 LIMIT 1`,
+      [senderId, messageId]
+    )
+  );
+  return (res.rowCount ?? 0) > 0;
 }
 
 export async function readChatHistory(senderId: string): Promise<ChatHistoryFile> {
@@ -121,7 +147,7 @@ export async function readChatHistory(senderId: string): Promise<ChatHistoryFile
 
     return { senderId, createdAt, updatedAt, entries };
   } catch (err) {
-    logError("chat_history_read_failed", err, { senderId });
+    logError("chat_history_read_failed", err, { senderId: redactPhone(senderId) });
     throw err;
   }
 }

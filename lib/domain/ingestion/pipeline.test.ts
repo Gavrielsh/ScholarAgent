@@ -3,6 +3,8 @@ import {
   buildContextualHeader,
   chunkTextParentChild,
   detectSectionHeading,
+  DocumentLimitError,
+  ingestDocument,
   resolveClassificationLevel,
 } from "@/lib/domain/ingestion/pipeline";
 
@@ -189,5 +191,29 @@ describe("chunkTextParentChild", () => {
 
   it("returns nothing for empty input rather than an empty-text chunk", () => {
     expect(chunkTextParentChild("   ")).toEqual({ parents: [], children: [] });
+  });
+});
+
+describe("ingestDocument — chunk ceiling", () => {
+  it("rejects an oversized document before any embedding or database call", async () => {
+    // ~8,000 distinct sentences is far past the default 400 searchable chunks.
+    // The rejection must happen before the network: no GEMINI_API_KEY is set
+    // here, so reaching the embedder would fail with a different error.
+    const text = Array.from(
+      { length: 8_000 },
+      (_, i) => `זהו משפט מספר ${i} במסמך הבדיקה הארוך מאוד של הארגון.`
+    ).join(" ");
+
+    const attempt = ingestDocument({
+      filename: "huge.txt",
+      mimeType: "text/plain",
+      text,
+      classificationLevel: 2,
+      uploadedByUserId: "user-1",
+      uploadedByPermissionLevel: 1,
+    });
+
+    await expect(attempt).rejects.toBeInstanceOf(DocumentLimitError);
+    await expect(attempt).rejects.toMatchObject({ limit: 400 });
   });
 });

@@ -344,6 +344,18 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
 -- diagnostic query under the app role can still report schema state.
 REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM scholaragent_app;
 
+-- audit_logs is an append-only trail (§6): the request path may add rows and read
+-- them back, never rewrite or erase them. A compromised request path that could
+-- UPDATE/DELETE here could cover its own tracks.
+REVOKE UPDATE, DELETE ON audit_logs FROM scholaragent_app;
+
+-- `users` is the RBAC registry and carries no RLS of its own, so write access is
+-- the only thing standing between a request and a self-granted tier. The runtime
+-- role reads it (RLS subqueries, admin reports) and nothing more; registry writes
+-- go through the privileged helpers in lib/security/auth.ts, which run on the
+-- owner connection and enforce the management hierarchy themselves.
+REVOKE INSERT, UPDATE, DELETE ON users FROM scholaragent_app;
+
 -- SET ROLE requires membership in the target role. Granted to whichever role is
 -- applying this migration, which is the role the connection pool uses.
 -- Idempotent: re-granting an existing membership is a no-op.

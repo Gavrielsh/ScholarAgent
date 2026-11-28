@@ -1,22 +1,28 @@
+import { parsePositiveInt } from "@/lib/core/env";
 import type { ChatMessage } from "@/lib/domain/chat/state";
 import type { ChatHistoryEntry } from "@/lib/domain/chat/session/history";
 
+// Every limit below uses parsePositiveInt on purpose. `Number(x ?? fallback)`
+// turns a blank `.env` entry (`CHAT_MAX_INBOUND_CHARS=`) into 0 — which here
+// would truncate every inbound message to nothing.
+
 /** Conservative chars-per-token ratio for Hebrew/Latin mixed corpora. */
-const CHARS_PER_TOKEN = Number(process.env.CHAT_CHARS_PER_TOKEN ?? 4);
+const CHARS_PER_TOKEN = parsePositiveInt(process.env.CHAT_CHARS_PER_TOKEN, 4);
 
 /** Hard cap on a single inbound user turn (anti abuse / injection payloads). */
-const MAX_INBOUND_MESSAGE_CHARS = Number(process.env.CHAT_MAX_INBOUND_CHARS ?? 8_000);
+const MAX_INBOUND_MESSAGE_CHARS = parsePositiveInt(process.env.CHAT_MAX_INBOUND_CHARS, 8_000);
 
 /** Total character budget for prior conversation passed to the LLM. */
-const MAX_CONTEXT_CHARS = Number(process.env.CHAT_MAX_CONTEXT_CHARS ?? 24_000);
+const MAX_CONTEXT_CHARS = parsePositiveInt(process.env.CHAT_MAX_CONTEXT_CHARS, 24_000);
 
 /** Approximate token ceiling derived from char budget (default ~6k tokens). */
-const MAX_CONTEXT_TOKENS = Number(
-  process.env.CHAT_MAX_CONTEXT_TOKENS ?? Math.floor(MAX_CONTEXT_CHARS / CHARS_PER_TOKEN)
+const MAX_CONTEXT_TOKENS = parsePositiveInt(
+  process.env.CHAT_MAX_CONTEXT_TOKENS,
+  Math.floor(MAX_CONTEXT_CHARS / CHARS_PER_TOKEN)
 );
 
 /** Default turn cap, and the sliding window the RAG prompt replays. */
-export const MAX_HISTORY_TURNS = Number(process.env.CHAT_MAX_HISTORY_TURNS ?? 10);
+export const MAX_HISTORY_TURNS = parsePositiveInt(process.env.CHAT_MAX_HISTORY_TURNS, 10);
 
 function estimateTokens(text: string): number {
   if (!text) return 0;

@@ -58,6 +58,25 @@ services:
       timeout: 3s
       retries: 5
 
+  # ---------------------------------------------------------------------------
+  # Configuration for `app` and `whatsapp-worker` (the `full` profile).
+  #
+  # Secrets and tuning (LLM_PROVIDER, GEMINI_API_KEY, WHATSAPP_*, ...) come from
+  # .env.local through `env_file` — the same file `npm run dev` and every script
+  # read — so there is one place to configure them. `required: false` keeps
+  # `docker compose up` working without it (the core services never read it).
+  #
+  # The `environment:` entries below are ONLY the values that must differ inside
+  # the compose network, and they win over env_file. Do not add pass-throughs such
+  # as `GEMINI_API_KEY: ${GEMINI_API_KEY:-}` here: Compose interpolates those from
+  # the shell or `.env`, not `.env.local`, so they resolve to "" and silently
+  # overwrite the real value that env_file just loaded.
+  #
+  # DATABASE_URL points at the `postgres` service by name — `localhost` in
+  # .env.local means the container itself in here. It follows the POSTGRES_*
+  # defaults above; export DATABASE_URL in the shell to point at a managed
+  # database instead (and set PG_SSLMODE=require for it).
+  # ---------------------------------------------------------------------------
   app:
     profiles: ["full"]
     build:
@@ -65,23 +84,23 @@ services:
       dockerfile: docker/Dockerfile
     container_name: scholaragent-app
     restart: unless-stopped
+    env_file:
+      - path: .env.local
+        required: false
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     ports:
       - "3000:3000"
     environment:
       NODE_ENV: production
-      DATABASE_URL: ${DATABASE_URL}
-      PG_SSLMODE: ${PG_SSLMODE:-require}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-scholaragent}}
+      # The bundled Postgres container does not terminate TLS.
+      PG_SSLMODE: ${PG_SSLMODE:-disable}
       PG_POOL_MAX: "10"
       PG_POOL_MIN: "1"
-      LLM_PROVIDER: mock
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-dev-verify-token}
-      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
-      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
-      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:-}
       REDIS_URL: redis://redis:6379
 
   whatsapp-worker:
@@ -92,21 +111,21 @@ services:
     container_name: scholaragent-whatsapp-worker
     restart: unless-stopped
     stop_grace_period: 40s
+    env_file:
+      - path: .env.local
+        required: false
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     environment:
       NODE_ENV: production
-      DATABASE_URL: ${DATABASE_URL}
-      PG_SSLMODE: ${PG_SSLMODE:-require}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-scholaragent}}
+      PG_SSLMODE: ${PG_SSLMODE:-disable}
       PG_POOL_MAX: "10"
       PG_POOL_MIN: "1"
-      LLM_PROVIDER: mock
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       REDIS_URL: redis://redis:6379
-      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
-      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
-      USER_MGMT_DEBUG: ${USER_MGMT_DEBUG:-0}
       WORKER_SHUTDOWN_TIMEOUT_MS: "25000"
       WHATSAPP_JOB_TIMEOUT_MS: "90000"
 

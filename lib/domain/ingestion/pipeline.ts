@@ -19,6 +19,7 @@ import {
   isElevatedRole,
   lookupUserByPhone,
   MANAGER_PERMISSION_LEVEL,
+  redactPhone,
   type PermissionLevel,
   type UserContext,
 } from "@/lib/security/auth";
@@ -28,8 +29,8 @@ import {
   isUniqueViolation,
   type DocumentChunkRecord,
 } from "@/lib/core/db";
-import { parsePositiveInt } from "@/lib/core/env";
-import { TerminalNotifyError } from "@/lib/core/queue";
+import { parseNonNegativeInt, parsePositiveInt } from "@/lib/core/env";
+import { TerminalNotifyError, UserNotifiedFailureError } from "@/lib/core/queue";
 import { abortableSleep, isAbortError, isHttpTimeoutError } from "@/lib/core/http/fetchWithTimeout";
 import { embedTextBatch } from "@/lib/domain/ingestion/embeddings";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
@@ -427,6 +428,29 @@ export interface UploadDocumentInput {
   /** Override chunking parameters per document type (optional). */
   chunkOptions?: ChunkOptions;
   source?: string;
+  /**
+   * Cancellation from the caller — the HTTP request's own signal, so a client
+   * that disconnects stops the embedding run instead of letting it finish and
+   * bill for a document nobody is waiting on.
+   */
+  signal?: AbortSignal | null;
+}
+
+/**
+ * The document produced more searchable chunks than a single ingestion may
+ * embed. A caller-correctable condition (split the file), distinct from an
+ * infrastructure failure, so the HTTP layer can answer it with a 4xx.
+ */
+export class DocumentLimitError extends Error {
+  readonly chunkCount: number;
+  readonly limit: number;
+
+  constructor(chunkCount: number, limit: number) {
+    super(`${chunkCount} chunks exceeds the ${limit}-chunk ceiling.`);
+    this.name = "DocumentLimitError";
+    this.chunkCount = chunkCount;
+    this.limit = limit;
+  }
 }
 
 export interface UploadDocumentResult {
@@ -490,10 +514,20 @@ export async function ingestDocument(input: UploadDocumentInput): Promise<Upload
     return { documentId, chunkCount: 0, insertedChunkIds: [], failures: [] };
   }
 
+  // Same ceiling the WhatsApp path enforces (see extractChunks), applied to
+  // SEARCHABLE chunks because those are what cost embedding quota. Checked
+  // before any network call, so an oversized file fails in milliseconds and
+  // spends nothing.
+  if (children.length > MAX_CHUNKS_PER_DOCUMENT) {
+    throw new DocumentLimitError(children.length, MAX_CHUNKS_PER_DOCUMENT);
+  }
+
   // Only the children are embedded; parents are stored with embedding = NULL.
   // The header is part of the embedded string, which is the point of contextual
   // enrichment — the vector encodes the document and section, not just the slice.
-  const vectors = await embedTextBatch(childTexts);
+  // Embedded in paced slices rather than one request: a single call carrying
+  // every chunk is itself what exceeds the provider's batch limit and quota.
+  const vectors = await embedChunksInBatches(childTexts, input.signal);
 
   if (vectors.length !== children.length) {
     throw new Error(
@@ -662,7 +696,7 @@ const TOO_LARGE_MESSAGE = "המסמך גדול מכדי להיקלט בבת אח
  */
 const EMBED_BATCH_SIZE = parsePositiveInt(process.env.DOCUMENT_EMBED_BATCH_SIZE, 16);
 /** Paced gap between slices; the free Gemini tier is requests-per-minute limited. */
-const EMBED_BATCH_PAUSE_MS = Number(process.env.DOCUMENT_EMBED_BATCH_PAUSE_MS ?? 250);
+const EMBED_BATCH_PAUSE_MS = parseNonNegativeInt(process.env.DOCUMENT_EMBED_BATCH_PAUSE_MS, 250);
 /** Backstop against a 900-page PDF consuming an entire quota window. */
 const MAX_CHUNKS_PER_DOCUMENT = parsePositiveInt(process.env.DOCUMENT_MAX_CHUNKS, 400);
 
@@ -734,11 +768,14 @@ export function resolveClassificationLevel(
  * vector attaches the wrong embedding to the wrong text and silently poisons
  * retrieval for the life of the row.
  */
-async function embedChunksInBatches(texts: string[], signal: AbortSignal): Promise<number[][]> {
+async function embedChunksInBatches(
+  texts: string[],
+  signal?: AbortSignal | null
+): Promise<number[][]> {
   const vectors: number[][] = [];
 
   for (let start = 0; start < texts.length; start += EMBED_BATCH_SIZE) {
-    if (signal.aborted) {
+    if (signal?.aborted) {
       throw new Error("Document ingestion cancelled before embedding finished.");
     }
 
@@ -746,7 +783,7 @@ async function embedChunksInBatches(texts: string[], signal: AbortSignal): Promi
     // gets embedded, and building it needs the filename and classification
     // level that only the caller has.
     const slice = texts.slice(start, start + EMBED_BATCH_SIZE);
-    const batch = await embedTextBatch(slice, signal);
+    const batch = await embedTextBatch(slice, signal ?? undefined);
 
     if (batch.length !== slice.length) {
       throw new Error(
@@ -794,7 +831,7 @@ async function authorizeSender(
       "document_ingestion_permission_denied",
       "Non-admin attempted to upload a document via WhatsApp.",
       {
-        senderId: event.senderId,
+        senderId: redactPhone(event.senderId),
         messageId: event.messageId,
         permissionLevel: user.permissionLevel,
         filename: event.filename,
@@ -985,7 +1022,7 @@ async function handleDocumentIngestion(
   });
 
   logInfo("document_ingestion_completed", "Document stored in the knowledge base.", {
-    senderId: event.senderId,
+    senderId: redactPhone(event.senderId),
     messageId: event.messageId,
     documentId: result.documentId,
     filename: event.filename,
@@ -1007,7 +1044,8 @@ async function handleDocumentIngestion(
  *   - user error       → one specific explanation, then resolve. No retry.
  *   - unique violation → an earlier attempt already committed; confirm success.
  *   - not the last try → stay silent and rethrow so BullMQ retries.
- *   - the last try     → notify once, then RESOLVE so the retry loop terminates.
+ *   - the last try     → notify once, then throw UserNotifiedFailureError so the
+ *                        retry loop terminates and the job stays in `failed`.
  */
 async function handleIngestionFailure(
   err: unknown,
@@ -1022,7 +1060,7 @@ async function handleIngestionFailure(
 
   if (err instanceof DocumentIngestionUserError) {
     logWarn("document_ingestion_rejected", err.message, {
-      senderId,
+      senderId: redactPhone(senderId),
       messageId,
       filename: event.filename,
       mimeType: event.mimeType,
@@ -1036,7 +1074,7 @@ async function handleIngestionFailure(
   // retrying could only produce the same violation again.
   if (isUniqueViolation(err)) {
     logInfo("document_ingestion_duplicate_ignored", "Unique violation treated as success.", {
-      senderId,
+      senderId: redactPhone(senderId),
       messageId,
       attempt: ctx.attempt,
     });
@@ -1049,7 +1087,7 @@ async function handleIngestionFailure(
   const timedOut = isHttpTimeoutError(err);
 
   logError("document_ingestion_failed", err, {
-    senderId,
+    senderId: redactPhone(senderId),
     messageId,
     filename: event.filename,
     mimeType: event.mimeType,
@@ -1065,6 +1103,11 @@ async function handleIngestionFailure(
   }
 
   await notify(event, FAILURE_MESSAGE, ctx);
+
+  // The admin has been told; end the retry loop but keep the failure on record.
+  // UserNotifiedFailureError is unrecoverable, so BullMQ files the job under
+  // `failed` rather than reporting a document that never landed as `completed`.
+  throw new UserNotifiedFailureError(err);
 }
 
 /**
@@ -1084,7 +1127,7 @@ async function notify(
     await sendWhatsAppTextMessage({ to: event.senderId, body, signal: null });
   } catch (sendErr) {
     logError("document_ingestion_notice_failed", sendErr, {
-      senderId: event.senderId,
+      senderId: redactPhone(event.senderId),
       messageId: event.messageId,
       attempt: ctx.attempt,
     });
@@ -1096,7 +1139,8 @@ async function notify(
  * Business logic for one inbound document. Runs inside the BullMQ worker, which
  * owns the read receipt and the job deadline around this call.
  *
- * Resolves on terminal failure by design — see `handleIngestionFailure`.
+ * A terminal failure throws UserNotifiedFailureError once the admin has been
+ * told — see `handleIngestionFailure`.
  */
 export async function processDocumentIngestion(
   event: ParsedInboundDocumentEvent,

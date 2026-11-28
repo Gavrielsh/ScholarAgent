@@ -143,7 +143,17 @@ interface UserRow {
   display_name: string | null;
 }
 
-function redactPhone(phoneNumber: string): string {
+/**
+ * Masks a phone number for logs: `972501234567` → `972***67`.
+ *
+ * Every log line, error report and trace that names a sender goes through this.
+ * A phone number identifies a person, and the senders here include children's
+ * mentors and people who have just triggered a crisis handoff — plaintext
+ * numbers in an aggregated log index are exactly what that handoff exists to
+ * protect against. The prefix and last two digits stay so two log lines about
+ * the same sender can still be correlated by eye.
+ */
+export function redactPhone(phoneNumber: string): string {
   if (phoneNumber.length <= 4) return "****";
   return `${phoneNumber.slice(0, 3)}***${phoneNumber.slice(-2)}`;
 }
@@ -292,13 +302,38 @@ export async function insertAdminManagedUser(
   }
 }
 
-export async function deleteAdminManagedUser(phone: string): Promise<boolean> {
+export type DeleteManagedUserOutcome = "deleted" | "not_found" | "forbidden";
+
+/**
+ * Deletes a registry row only if the requester outranks it.
+ *
+ * The hierarchy rule is part of the DELETE itself (`permission_level > $2`), so
+ * deciding and deleting are one atomic statement. A separate "read the target's
+ * level, then delete" would leave a window in which the row is changed or
+ * replaced between the check and the write, and the delete would act on a row
+ * the check never saw. `>` is strict: an L1 cannot remove a peer L1, and L0
+ * (`> 0`) can remove every other tier.
+ *
+ * When nothing is deleted a second, read-only lookup separates "no such user"
+ * from "not permitted" purely to pick the reply. It authorises nothing, so it
+ * cannot reopen the race.
+ */
+export async function deleteAdminManagedUser(
+  phone: string,
+  requesterLevel: PermissionLevel
+): Promise<DeleteManagedUserOutcome> {
   const normalized = normalizePhoneNumber(phone);
-  if (!normalized) return false;
+  if (!normalized) return "not_found";
 
   try {
-    const result = await query(`DELETE FROM users WHERE phone_number = $1`, [normalized]);
-    return (result.rowCount ?? 0) > 0;
+    const deleted = await query(
+      `DELETE FROM users WHERE phone_number = $1 AND permission_level > $2 RETURNING id`,
+      [normalized, requesterLevel]
+    );
+    if ((deleted.rowCount ?? 0) > 0) return "deleted";
+
+    const exists = await query(`SELECT 1 FROM users WHERE phone_number = $1 LIMIT 1`, [normalized]);
+    return (exists.rowCount ?? 0) > 0 ? "forbidden" : "not_found";
   } catch (err) {
     logError("user_registry_delete_failed", err, { phone: redactPhone(normalized) });
     throw new UserRegistryDbError(err);
@@ -329,28 +364,6 @@ export async function getAllManagedUsers(): Promise<ManagedUserRecord[]> {
     });
   } catch (err) {
     logError("user_registry_list_failed", err);
-    throw new UserRegistryDbError(err);
-  }
-}
-
-export async function getUserByPhone(
-  phone: string
-): Promise<{ permission_level: PermissionLevel } | null> {
-  const normalized = normalizePhoneNumber(phone);
-  if (!normalized) return null;
-
-  try {
-    const result = await query<{ permission_level: number }>(
-      `SELECT permission_level FROM users WHERE phone_number = $1 LIMIT 1`,
-      [normalized]
-    );
-    const row = result.rows[0];
-    if (!row) return null;
-    const permissionLevel = asPermissionLevel(row.permission_level);
-    if (permissionLevel === null) return null;
-    return { permission_level: permissionLevel };
-  } catch (err) {
-    logError("user_registry_get_by_phone_failed", err, { phone: redactPhone(normalized) });
     throw new UserRegistryDbError(err);
   }
 }

@@ -16,6 +16,7 @@
 import type { Worker } from "bullmq";
 
 import { closePool } from "@/lib/core/db";
+import { parsePositiveInt } from "@/lib/core/env";
 import { closeRedisClient } from "@/lib/core/redis";
 import {
   closeDocumentIngestionQueue,
@@ -48,7 +49,7 @@ if (!process.env.WHATSAPP_ACCESS_TOKEN?.trim() || !process.env.WHATSAPP_PHONE_NU
  * both default to 30s, so this defaults to 25s to leave room for the Redis and
  * Postgres teardown that follows.
  */
-const SHUTDOWN_TIMEOUT_MS = Number(process.env.WORKER_SHUTDOWN_TIMEOUT_MS ?? 25_000);
+const SHUTDOWN_TIMEOUT_MS = parsePositiveInt(process.env.WORKER_SHUTDOWN_TIMEOUT_MS, 25_000);
 
 /** Absolute ceiling. If the graceful path itself wedges, exit anyway. */
 const FORCE_EXIT_TIMEOUT_MS = SHUTDOWN_TIMEOUT_MS + 5_000;

@@ -1,11 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { parsePositiveInt } from "@/lib/core/env";
+import { isAbortError } from "@/lib/core/http/fetchWithTimeout";
+import { logError } from "@/lib/core/logger";
 import { assertMinimumLevel, canClassifyAtLevel, type PermissionLevel } from "@/lib/security/auth";
 import { extractUserContext, UnauthenticatedError } from "@/lib/security/extractUser";
-import { extractTextFromUpload, ingestDocument, assertMimeMatchesContent } from "@/lib/domain/ingestion/pipeline";
+import {
+  assertMimeMatchesContent,
+  DocumentLimitError,
+  extractTextFromUpload,
+  ingestDocument,
+} from "@/lib/domain/ingestion/pipeline";
 
-// 10 MB hard cap per upload. TODO: tune via env once usage patterns are clear.
-const MAX_FILE_BYTES = 10 * 1024 * 1024;
+// Per-upload size ceiling, 10 MB unless UPLOAD_MAX_BYTES says otherwise.
+const MAX_FILE_BYTES = parsePositiveInt(process.env.UPLOAD_MAX_BYTES, 10 * 1024 * 1024);
 
 const ALLOWED_MIME_TYPES = new Set<string>([
   "text/plain",
@@ -37,6 +45,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     if (err instanceof UnauthenticatedError) {
       return jsonError(401, err.message);
     }
+    logError("upload_auth_failed", err);
     return jsonError(500, "קריאת פרטי האימות נכשלה.");
   }
 
@@ -98,16 +107,33 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   // ── 4. Extract text ──────────────────────────────────────────────────────
+  let bytes: ArrayBuffer;
+  try {
+    bytes = await file.arrayBuffer();
+  } catch (err) {
+    logError("upload_read_failed", err, { userId: user.userId });
+    return jsonError(400, "קריאת הקובץ שהועלה נכשלה.");
+  }
+
+  try {
+    // Its messages are ours and written for the client, so they are returned.
+    assertMimeMatchesContent(new Uint8Array(bytes), file.type);
+  } catch (err) {
+    return jsonError(422, err instanceof Error ? err.message : "סוג הקובץ אינו תואם לתוכנו.");
+  }
+
   let text: string;
   try {
-    const bytes = await file.arrayBuffer();
-    assertMimeMatchesContent(new Uint8Array(bytes), file.type);
     text = await extractTextFromUpload(bytes, file.type);
   } catch (err) {
-    return jsonError(
-      422,
-      err instanceof Error ? err.message : "חילוץ הטקסט מהקובץ נכשל."
-    );
+    // A parser's own message can carry library internals, so it goes to the log
+    // and the client gets a fixed explanation.
+    logError("upload_extraction_failed", err, {
+      userId: user.userId,
+      mimeType: file.type,
+      sizeBytes: file.size,
+    });
+    return jsonError(422, "חילוץ הטקסט מהקובץ נכשל. ודאו שהקובץ תקין ולא מוגן בסיסמה.");
   }
 
   if (!text.trim()) {
@@ -127,6 +153,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         organization_id: user.organizationId ?? null,
         original_size_bytes: file.size,
       },
+      // A client that disconnects cancels the embedding run rather than letting
+      // it finish and bill for a document nobody is waiting on.
+      signal: request.signal,
     });
 
     return NextResponse.json(
@@ -138,10 +167,28 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 201 }
     );
   } catch (err) {
-    const message = err instanceof Error ? err.message : "שגיאת טעינה לא ידועה.";
-    // TODO: Distinguish DB connection errors from embedding errors with
-    //       structured error types so retries can be targeted intelligently.
-    return jsonError(502, `טעינת המסמך נכשלה: ${message}`);
+    if (err instanceof DocumentLimitError) {
+      // The caller can fix this by splitting the file, so it is a 4xx and says so.
+      return jsonError(
+        413,
+        `המסמך גדול מדי לקליטה בבת אחת (${err.chunkCount} קטעים, המקסימום הוא ${err.limit}). ` +
+          "יש לפצל אותו לקבצים קטנים יותר."
+      );
+    }
+
+    if (request.signal.aborted || isAbortError(err)) {
+      return jsonError(408, "הבקשה בוטלה לפני שהסתיימה קליטת המסמך.");
+    }
+
+    // The upstream body (embedding provider, Postgres) can name hosts, keys and
+    // SQL. It belongs in the log, never in the response.
+    logError("upload_ingest_failed", err, {
+      userId: user.userId,
+      filename: file.name,
+      mimeType: file.type,
+      sizeBytes: file.size,
+    });
+    return jsonError(502, "טעינת המסמך נכשלה. אפשר לנסות שוב בעוד מספר דקות.");
   }
 }
 

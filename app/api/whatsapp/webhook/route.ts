@@ -21,6 +21,7 @@ import {
   type InboundDelivery,
 } from "@/lib/domain/whatsapp/webhook";
 import { sendWhatsAppTextMessage } from "@/lib/domain/whatsapp/client";
+import { redactPhone } from "@/lib/security/auth";
 import {
   isWebhookSignatureRequired,
   META_SIGNATURE_HEADER,
@@ -76,14 +77,14 @@ async function sendQueuedReceipt(to: string, messageId: string | null): Promise<
       signal: controller.signal,
     });
     logInfo("whatsapp_document_receipt_sent", "Queued-for-processing notice delivered.", {
-      to,
+      to: redactPhone(to),
       messageId,
     });
   } catch (err) {
     logWarn(
       "whatsapp_document_receipt_failed",
       err instanceof Error ? err.message : String(err),
-      { to, messageId, timeoutMs: RECEIPT_TIMEOUT_MS }
+      { to: redactPhone(to), messageId, timeoutMs: RECEIPT_TIMEOUT_MS }
     );
   } finally {
     clearTimeout(timer);
@@ -183,7 +184,7 @@ export async function POST(request: NextRequest): Promise<Response> {
     logWarn(
       "whatsapp_webhook_missing_message_id",
       "Inbound delivery dropped because it has no message id.",
-      { senderId, kind: delivery.kind }
+      { senderId: redactPhone(senderId), kind: delivery.kind }
     );
     return ack();
   }
@@ -202,7 +203,10 @@ export async function POST(request: NextRequest): Promise<Response> {
   } catch (err) {
     // Redis is down. Returning non-2xx makes Meta redeliver, which is the only
     // durability mechanism available here — do not swallow this as a 200.
-    logError("whatsapp_idempotency_claim_failed", err, { messageId, senderId });
+    logError("whatsapp_idempotency_claim_failed", err, {
+      messageId,
+      senderId: redactPhone(senderId),
+    });
     return new Response("Service Unavailable", { status: 503 });
   }
 
@@ -213,7 +217,7 @@ export async function POST(request: NextRequest): Promise<Response> {
       jobId,
       kind: delivery.kind,
       messageId,
-      senderId,
+      senderId: redactPhone(senderId),
     });
   } catch (err) {
     try {
@@ -223,8 +227,8 @@ export async function POST(request: NextRequest): Promise<Response> {
     }
     logError("whatsapp_webhook_enqueue_failed", err, {
       kind: delivery.kind,
-      messageId: messageId ?? null,
-      senderId,
+      messageId,
+      senderId: redactPhone(senderId),
     });
     return new Response("Service Unavailable", { status: 503 });
   }

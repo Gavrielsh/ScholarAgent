@@ -67,6 +67,7 @@ import {
 } from "@/lib/domain/ingestion/pipeline";
 import { embedTextBatch } from "@/lib/domain/ingestion/embeddings";
 import { redactPii } from "@/lib/security/guardrails";
+import { parseNonNegativeInt, parsePositiveInt } from "@/lib/core/env";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
 import { downloadWhatsAppMedia } from "@/lib/domain/whatsapp/client";
 
@@ -75,20 +76,27 @@ import { downloadWhatsAppMedia } from "@/lib/domain/whatsapp/client";
 // ---------------------------------------------------------------------------
 
 const DEFAULT_SOURCE_DIR = path.join(process.cwd(), "local_data", "documents");
-const DEFAULT_LIMIT = Number(process.env.RECONCILE_LIMIT ?? 100);
+const DEFAULT_LIMIT = parsePositiveInt(process.env.RECONCILE_LIMIT, 100);
+
+// Each RECONCILE_* value falls back to its DOCUMENT_* twin, then to a default.
+// Nested parse calls rather than `a ?? b ?? c`: `??` only skips null/undefined,
+// so a blank RECONCILE_* entry would win the chain and evaluate to 0.
 
 /** Same slice size and pacing as the WhatsApp ingestion worker: one large batch
  *  is itself what trips the free Gemini tier's per-minute quota, and every retry
  *  of it re-sends every chunk. */
-const EMBED_BATCH_SIZE = Number(
-  process.env.RECONCILE_EMBED_BATCH_SIZE ?? process.env.DOCUMENT_EMBED_BATCH_SIZE ?? 16
+const EMBED_BATCH_SIZE = parsePositiveInt(
+  process.env.RECONCILE_EMBED_BATCH_SIZE,
+  parsePositiveInt(process.env.DOCUMENT_EMBED_BATCH_SIZE, 16)
 );
-const EMBED_BATCH_PAUSE_MS = Number(
-  process.env.RECONCILE_EMBED_PAUSE_MS ?? process.env.DOCUMENT_EMBED_BATCH_PAUSE_MS ?? 250
+const EMBED_BATCH_PAUSE_MS = parseNonNegativeInt(
+  process.env.RECONCILE_EMBED_PAUSE_MS,
+  parseNonNegativeInt(process.env.DOCUMENT_EMBED_BATCH_PAUSE_MS, 250)
 );
 /** Backstop against one 900-page PDF consuming an entire quota window. */
-const MAX_CHUNKS_PER_DOCUMENT = Number(
-  process.env.RECONCILE_MAX_CHUNKS ?? process.env.DOCUMENT_MAX_CHUNKS ?? 400
+const MAX_CHUNKS_PER_DOCUMENT = parsePositiveInt(
+  process.env.RECONCILE_MAX_CHUNKS,
+  parsePositiveInt(process.env.DOCUMENT_MAX_CHUNKS, 400)
 );
 
 /** Metadata keys that may carry the already-extracted text of the document. */

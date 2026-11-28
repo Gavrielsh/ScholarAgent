@@ -319,7 +319,8 @@ and `Recall@10` is saturated at 1.000 by corpus design.
 
 ## Quickstart
 
-**Prerequisites:** Node.js 20 (matching CI and both Docker images), Docker
+**Prerequisites:** Node.js 20.18+ (matching CI and both Docker images; the npm
+scripts use `node --env-file-if-exists`, which arrived in 20.18), Docker
 Compose, and at least one LLM API key (or `LLM_PROVIDER=mock`, the default).
 
 ```sh
@@ -371,7 +372,7 @@ npm run migrate
 **4 — Verify.** No database, Redis or network needed:
 
 ```sh
-npm test            # 170 tests, 16 suites
+npm test            # 243 tests, 21 suites
 npx tsc --noEmit
 npm run lint
 ```

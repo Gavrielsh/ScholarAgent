@@ -13,12 +13,12 @@ import { CLAUDE_FAST_MODEL, getLlmAdapter, resolveFastModel } from "@/lib/domain
 import {
   deleteAdminManagedUser,
   getAllManagedUsers,
-  getUserByPhone,
   insertAdminManagedUser,
   isAdminRole,
   isElevatedRole,
   isManagerRole,
   normalizePhoneNumber,
+  redactPhone,
   type PermissionLevel,
   type UserContext,
 } from "@/lib/security/auth";
@@ -465,7 +465,10 @@ export async function resolveL0AdminFlow(input: {
     logError(
       "l0_admin_flow_permission_violation",
       new Error("non-admin reached L0 admin flow"),
-      { adminPhone: input.adminPhone, requesterPermissionLevel: input.requesterPermissionLevel }
+      {
+        adminPhone: redactPhone(input.adminPhone),
+        requesterPermissionLevel: input.requesterPermissionLevel,
+      }
     );
     return { type: "text", answer: "" };
   }
@@ -486,7 +489,7 @@ export async function resolveL0AdminFlow(input: {
 
   if (menuChoice === "daily" && (inHistoryMenu || input.buttonId)) {
     logInfo("l0_menu_choice_resolved", "Daily summary selected.", {
-      adminPhone: input.adminPhone,
+      adminPhone: redactPhone(input.adminPhone),
       via: input.buttonId ? "button" : "text",
     });
     return fulfillDailySummary(input.adminPhone, input.requesterPermissionLevel, input.signal);
@@ -494,7 +497,7 @@ export async function resolveL0AdminFlow(input: {
 
   if (menuChoice === "specific" && (inHistoryMenu || input.buttonId)) {
     logInfo("l0_menu_choice_resolved", "Specific-user prompt selected.", {
-      adminPhone: input.adminPhone,
+      adminPhone: redactPhone(input.adminPhone),
       via: input.buttonId ? "button" : "text",
     });
     return fulfillSpecificUserPrompt(input.adminPhone);
@@ -551,7 +554,7 @@ export const USER_DELETED_MESSAGE = "המשתמש הוסר בהצלחה";
 
 export const ADD_FORMAT_RETRY =
   "פורמט לא תקין. אנא נסה שוב לפי הפורמט:\nשם משתמש מספר טלפון רמת הרשאה";
-export const ADD_INPUT_EXAMPLE = "ישראל ישראלי, 0541234567, 0";
+export const ADD_INPUT_EXAMPLE = "ישראל ישראלי, 0541234567, 2";
 export const ADD_NOT_ENOUGH_ARGS_MESSAGE =
   `חסרים פרטים. אנא הזן שם, מספר טלפון ורמת הרשאה.\nדוגמה לקלט תקין: ${ADD_INPUT_EXAMPLE}`;
 export const ADD_INVALID_LEVEL_MESSAGE =
@@ -657,12 +660,23 @@ export function isUserManagementButtonId(buttonId: string | undefined): boolean 
   );
 }
 
-/** Requester may manage a target whose privilege is equal or lower (higher numeric level). */
+/**
+ * Whether the requester may add or remove an account at `targetLevel`.
+ *
+ * Strictly outranking, never "equal or lower": a Manager (L1) cannot create,
+ * modify or remove a peer Manager, so one compromised or careless L1 account
+ * cannot mint more of itself or purge the rest. L0 sits above every managed
+ * tier (L1–L3). Admin accounts themselves are not provisioned over WhatsApp.
+ *
+ * The delete path does not rely on this function alone: the same rule is part
+ * of the SQL in `deleteAdminManagedUser` (`permission_level > requester`), which
+ * is what makes the decision atomic with the write.
+ */
 export function canManagePermissionLevel(
   requesterLevel: PermissionLevel,
   targetLevel: PermissionLevel
 ): boolean {
-  return requesterLevel <= targetLevel;
+  return requesterLevel === 0 ? targetLevel >= 1 : requesterLevel < targetLevel;
 }
 
 function isPermissionLevel(value: number): value is PermissionLevel {
@@ -903,7 +917,7 @@ async function handleAddUserInput(
 
   if (USER_MGMT_DEBUG) {
     logInfo("add_user_branch_trace", "handleAddUserInput branch selected.", {
-      adminPhone,
+      adminPhone: redactPhone(adminPhone),
       ...describeRaw("query", query),
       ...describeRaw("commandText", commandText ?? ""),
       usedCommandText: commandText !== undefined,
@@ -944,7 +958,7 @@ async function handleDeleteUserInput(
 
   if (USER_MGMT_DEBUG) {
     logInfo("delete_user_branch_trace", "handleDeleteUserInput branch selected.", {
-      adminPhone,
+      adminPhone: redactPhone(adminPhone),
       ...describeRaw("query", query),
       ...describeRaw("commandText", commandText ?? ""),
       usedCommandText: commandText !== undefined,
@@ -959,17 +973,17 @@ async function handleDeleteUserInput(
     return clearSessionAndReply(adminPhone, SELF_DELETE_DENIED_MESSAGE);
   }
 
-  const target = await getUserByPhone(parsed.phone);
-  if (target && !canManagePermissionLevel(requesterLevel, target.permission_level)) {
-    return clearSessionAndReply(adminPhone, HIERARCHY_DENIED_MESSAGE);
+  // The hierarchy check is inside the DELETE (see deleteAdminManagedUser), so
+  // there is no separate read of the target's level to go stale.
+  const outcome = await deleteAdminManagedUser(parsed.phone, requesterLevel);
+  switch (outcome) {
+    case "forbidden":
+      return clearSessionAndReply(adminPhone, HIERARCHY_DENIED_MESSAGE);
+    case "not_found":
+      return clearSessionAndReply(adminPhone, USER_NOT_FOUND_MESSAGE);
+    case "deleted":
+      return clearSessionAndReply(adminPhone, USER_DELETED_MESSAGE);
   }
-
-  const deleted = await deleteAdminManagedUser(parsed.phone);
-  if (!deleted) {
-    return clearSessionAndReply(adminPhone, USER_NOT_FOUND_MESSAGE);
-  }
-
-  return clearSessionAndReply(adminPhone, USER_DELETED_MESSAGE);
 }
 
 async function applyUserManagementChoice(
@@ -1023,7 +1037,7 @@ export async function resolveUserManagementFlow(input: {
       "user_management_permission_violation",
       new Error("non-elevated role reached user management flow"),
       {
-        adminPhone: input.adminPhone,
+        adminPhone: redactPhone(input.adminPhone),
         requesterPermissionLevel: input.requesterPermissionLevel,
       }
     );
@@ -1035,7 +1049,7 @@ export async function resolveUserManagementFlow(input: {
 
   if (input.buttonId && isUserManagementButtonId(input.buttonId) && menuChoice) {
     logInfo("user_management_choice_resolved", "User-management button selected.", {
-      adminPhone: input.adminPhone,
+      adminPhone: redactPhone(input.adminPhone),
       choice: menuChoice,
     });
     return applyUserManagementChoice(
@@ -1057,7 +1071,7 @@ export async function resolveUserManagementFlow(input: {
   if (session?.mode === "AWAITING_USER_MANAGEMENT_CHOICE") {
     if (menuChoice && menuChoice !== "cancel") {
       logInfo("user_management_choice_resolved", "User-management text selected.", {
-        adminPhone: input.adminPhone,
+        adminPhone: redactPhone(input.adminPhone),
         choice: menuChoice,
       });
       return applyUserManagementChoice(
@@ -1184,7 +1198,7 @@ export async function processBaselineQuery(
     logError(
       "safety_gate_bypassed",
       new Error("Distress signals reached the orchestrator"),
-      { senderPhone, permissionLevel: userContext.permissionLevel }
+      { senderPhone: redactPhone(senderPhone), permissionLevel: userContext.permissionLevel }
     );
     return {
       kind: "text",

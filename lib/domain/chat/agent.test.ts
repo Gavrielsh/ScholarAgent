@@ -221,11 +221,28 @@ describe("redaction boundary", () => {
 });
 
 describe("canManagePermissionLevel", () => {
-  it("blocks L1 from adding or deleting L0, and allows L0 to manage every tier", () => {
+  it("blocks L1 from adding or deleting L0 and from touching a peer L1", () => {
     expect(canManagePermissionLevel(1, 0)).toBe(false);
-    expect(canManagePermissionLevel(1, 1)).toBe(true);
-    expect(canManagePermissionLevel(0, 0)).toBe(true);
+    expect(canManagePermissionLevel(1, 1)).toBe(false);
+    expect(canManagePermissionLevel(1, 2)).toBe(true);
+    expect(canManagePermissionLevel(1, 3)).toBe(true);
+  });
+
+  it("lets L0 manage every tier below it, but not provision or remove another L0", () => {
+    expect(canManagePermissionLevel(0, 0)).toBe(false);
+    expect(canManagePermissionLevel(0, 1)).toBe(true);
+    expect(canManagePermissionLevel(0, 2)).toBe(true);
     expect(canManagePermissionLevel(0, 3)).toBe(true);
+  });
+
+  it("never lets a tier manage itself or anything above it", () => {
+    for (const requester of [0, 1, 2, 3] as const) {
+      for (const target of [0, 1, 2, 3] as const) {
+        if (target <= requester) {
+          expect(canManagePermissionLevel(requester, target)).toBe(false);
+        }
+      }
+    }
   });
 });
 

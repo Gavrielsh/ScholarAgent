@@ -19,7 +19,9 @@ import {
   isHttpTimeoutError,
   parseJsonBody,
 } from "@/lib/core/http/fetchWithTimeout";
+import { parseNonNegativeInt, parsePositiveInt } from "@/lib/core/env";
 import { logError, logInfo, logWarn } from "@/lib/core/logger";
+import { redactPhone } from "@/lib/security/auth";
 
 // -------------------------------------------------------------------------
 // Text formatting
@@ -113,7 +115,7 @@ const RTL_MARK = "\u200F";
  * Graph API surfaces as a retryable send failure rather than as a job timeout
  * that kills the whole pipeline mid-flight.
  */
-export const WHATSAPP_HTTP_TIMEOUT_MS = Number(process.env.WHATSAPP_HTTP_TIMEOUT_MS ?? 15_000);
+export const WHATSAPP_HTTP_TIMEOUT_MS = parsePositiveInt(process.env.WHATSAPP_HTTP_TIMEOUT_MS, 15_000);
 
 // -------------------------------------------------------------------------
 // Auth circuit breaker
@@ -130,8 +132,9 @@ export const WHATSAPP_HTTP_TIMEOUT_MS = Number(process.env.WHATSAPP_HTTP_TIMEOUT
  * false, status: 401 }` shape (and jobs still fail/retry per their own
  * BullMQ policy) as they would from a real 401.
  */
-const AUTH_CIRCUIT_COOLDOWN_MS = Number(
-  process.env.WHATSAPP_AUTH_CIRCUIT_COOLDOWN_MS ?? 60_000
+const AUTH_CIRCUIT_COOLDOWN_MS = parseNonNegativeInt(
+  process.env.WHATSAPP_AUTH_CIRCUIT_COOLDOWN_MS,
+  60_000
 );
 
 let authCircuitOpenUntil = 0;
@@ -353,7 +356,7 @@ const TYPING_MAX_DURATION_MS = 120_000;
  * Blocking a user's answer for 15s to draw a "typing…" bubble is a worse
  * outcome than not drawing it at all.
  */
-const TYPING_HTTP_TIMEOUT_MS = Number(process.env.WHATSAPP_TYPING_TIMEOUT_MS ?? 5_000);
+const TYPING_HTTP_TIMEOUT_MS = parsePositiveInt(process.env.WHATSAPP_TYPING_TIMEOUT_MS, 5_000);
 
 /**
  * Marks the inbound message as read and switches the typing indicator on
@@ -430,7 +433,12 @@ export function startTypingKeepAlive(
     }
     if (Date.now() - startedAt > TYPING_MAX_DURATION_MS) return;
     void markMessageReadAndTyping(messageId, signal).then((ok) => {
-      if (!ok) logWarn("whatsapp_typing_refresh_failed", "Typing refresh rejected.", { to, messageId });
+      if (!ok) {
+        logWarn("whatsapp_typing_refresh_failed", "Typing refresh rejected.", {
+          to: redactPhone(to),
+          messageId,
+        });
+      }
     });
   }, TYPING_REFRESH_MS);
 
@@ -508,16 +516,19 @@ export async function sendWhatsAppInteractiveButtons(params: {
 // both are cancellable by the BullMQ job signal.
 
 /** 20 MB — comfortably above Meta's own 100 MB document cap for what we accept. */
-const WHATSAPP_MEDIA_MAX_BYTES = Number(
-  process.env.WHATSAPP_MEDIA_MAX_BYTES ?? 20 * 1024 * 1024
+const WHATSAPP_MEDIA_MAX_BYTES = parsePositiveInt(
+  process.env.WHATSAPP_MEDIA_MAX_BYTES,
+  20 * 1024 * 1024
 );
 
-const MEDIA_METADATA_TIMEOUT_MS = Number(
-  process.env.WHATSAPP_MEDIA_METADATA_TIMEOUT_MS ?? 15_000
+const MEDIA_METADATA_TIMEOUT_MS = parsePositiveInt(
+  process.env.WHATSAPP_MEDIA_METADATA_TIMEOUT_MS,
+  15_000
 );
 /** Wider than a normal call: this one moves megabytes over a mobile-origin CDN. */
-const MEDIA_DOWNLOAD_TIMEOUT_MS = Number(
-  process.env.WHATSAPP_MEDIA_DOWNLOAD_TIMEOUT_MS ?? 60_000
+const MEDIA_DOWNLOAD_TIMEOUT_MS = parsePositiveInt(
+  process.env.WHATSAPP_MEDIA_DOWNLOAD_TIMEOUT_MS,
+  60_000
 );
 
 /**

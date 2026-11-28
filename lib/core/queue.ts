@@ -5,7 +5,7 @@
 // (see the comments below) that a second hand-rolled copy would drift and
 // reintroduce bugs that were already fixed once.
 
-import type { ConnectionOptions } from "bullmq";
+import { UnrecoverableError, type ConnectionOptions } from "bullmq";
 
 import { logWarn } from "@/lib/core/logger";
 
@@ -32,6 +32,30 @@ export class JobTimeoutError extends Error {
   constructor(jobId: string, timeoutMs: number) {
     super(`Job ${jobId} exceeded its ${timeoutMs}ms deadline.`);
     this.name = "JobTimeoutError";
+  }
+}
+
+/**
+ * Thrown on the final attempt, AFTER the user has been told the request failed.
+ *
+ * It extends BullMQ's `UnrecoverableError`, so the job goes straight to the
+ * `failed` set instead of being retried or reported as `completed`. That is the
+ * point: the user has their apology, but the failure itself must stay visible
+ * and inspectable (and retryable by hand with `job.retry()`), not be disguised
+ * as a successful job. Contrast with {@link TerminalNotifyError}, where the
+ * notice itself could not be delivered.
+ */
+export class UserNotifiedFailureError extends UnrecoverableError {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super(
+      cause instanceof Error
+        ? `Job failed after the user was notified: ${cause.message}`
+        : "Job failed after the user was notified."
+    );
+    this.name = "UserNotifiedFailureError";
+    this.cause = cause;
   }
 }
 
